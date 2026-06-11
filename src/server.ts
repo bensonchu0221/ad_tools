@@ -4,6 +4,8 @@ import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import { registerAuth } from './core/auth.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
+import { probePopin } from './tools/adpreview/shoot.js';
+import { findMedia } from './tools/adpreview/media.js';
 
 // 工具註冊表：新增 tool 2/3 時在這裡加一筆即可
 interface Tool {
@@ -40,6 +42,15 @@ app.get('/', async (_req, reply) => {
 });
 
 app.get('/health', async (_req, reply) => reply.code(200).send('ok'));
+
+// 診斷：從機房 IP 測 popin 出不出得來（需 DIAG_KEY 金鑰）
+app.get('/health/popin', async (req, reply) => {
+  const key = (req.query as any).key;
+  if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+  const url = (req.query as any).url || findMedia('cnyes')?.url;
+  const result = await probePopin(url);
+  reply.send({ url, ...result });
+});
 
 await registerAdpreview(app);
 

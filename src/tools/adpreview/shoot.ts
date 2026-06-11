@@ -11,6 +11,38 @@ function getBrowser(): Promise<Browser> {
   return browserPromise;
 }
 
+/** 診斷：從伺服器端載入 URL，回報 popin 是否有 render（測機房 IP 是否被擋）。 */
+export async function probePopin(
+  url: string
+): Promise<{ cardCount: number; adCount: number; ms: number; error?: string }> {
+  const browser = await getBrowser();
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: UA });
+  const page = await context.newPage();
+  const t0 = Date.now();
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    for (let i = 0; i < 8; i++) {
+      await page.mouse.wheel(0, 1600);
+      await page.waitForTimeout(800);
+    }
+    try {
+      await page.waitForSelector(POPIN.card, { timeout: 20000 });
+    } catch {
+      /* 沒出 popin */
+    }
+    const counts = await page.evaluate((sel) => {
+      const cards = [...document.querySelectorAll(sel.card)];
+      const ads = cards.filter((c) => c.classList.contains(sel.adCardClass));
+      return { cardCount: cards.length, adCount: ads.length };
+    }, POPIN);
+    return { ...counts, ms: Date.now() - t0 };
+  } catch (e: any) {
+    return { cardCount: 0, adCount: 0, ms: Date.now() - t0, error: String(e?.message || e) };
+  } finally {
+    await context.close();
+  }
+}
+
 export interface ShootInput {
   url: string;
   image: string; // 圖片 URL 或 data URI

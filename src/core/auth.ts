@@ -98,7 +98,7 @@ export async function registerAuth(app: FastifyInstance) {
   // 守衛：未登入一律導向 /login（健康檢查與登入相關路由除外）
   app.addHook('preHandler', async (req, reply) => {
     const path = req.url.split('?')[0];
-    if (path === '/health' || path === '/login' || path.startsWith('/auth/')) return;
+    if (path === '/login' || path.startsWith('/auth/') || path.startsWith('/health')) return;
     if (!(req.session as any).user) return reply.redirect('/login');
   });
 }
