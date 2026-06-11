@@ -41,7 +41,7 @@ export async function registerAuth(app: FastifyInstance) {
   await app.register(cookie);
   await app.register(session, {
     secret,
-    cookie: { secure: true, httpOnly: true, maxAge: 1800 * 1000, sameSite: 'lax' },
+    cookie: { secure: true, httpOnly: true, maxAge: 30 * 24 * 60 * 60 * 1000, sameSite: 'lax' }, // 30 天，比照 timeoff-system
   });
 
   app.get('/login', (_req, reply) => reply.type('text/html').send(loginPage()));
