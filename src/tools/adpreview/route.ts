@@ -1,8 +1,9 @@
 // tool #1 廣告預覽：表單 UI + 產圖 endpoint + D 帳號 token 管理
 import type { FastifyInstance } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { MEDIA, findMedia } from './media.js';
-import { shootPreview } from './shoot.js';
-import { getCreatives } from '../../core/popin.js';
+import { shootPreview, renderPreviewHtml, saveHtmlPreview, getHtmlPreview } from './shoot.js';
+import { fetchCreativeDetail } from '../../core/popin.js';
 import { layout } from '../../core/html.js';
 import {
   listDAccounts,
@@ -14,14 +15,6 @@ import {
 } from '../../core/store.js';
 
 export const BASE_PATH = '/tools/adpreview';
-
-// popin 圖片網址正規化：移除 __scv 後綴並補回副檔名（對應舊 ad_preview.php）
-function normalizePopinImage(url: string): string {
-  const m = url.match(/\.([a-zA-Z0-9]+)(?:__scv.*)?$/);
-  const ext = m ? m[1] : 'jpg';
-  const base = url.replace(/__scv.*$/, '').replace(/\.[a-zA-Z0-9]+$/, '');
-  return `${base}.${ext}`;
-}
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -82,17 +75,21 @@ export async function registerAdpreview(app: FastifyInstance) {
         <div><label class="label">Campaign ID</label><input name="campaignId" class="input input-bordered w-full" placeholder="mongo_id"></div>
         <div><label class="label">Asset ID</label><input name="assetId" class="input input-bordered w-full" placeholder="mongo_id"></div>
       </div>
+      <button type="button" id="testFetchBtn" class="btn btn-secondary btn-outline mt-2">試抓素材（先確認抓得到再產生）</button>
+      <div id="testFetchResult" class="mt-2"></div>
     </div>
   </div>
 
   <div class="card bg-base-100 shadow-sm">
     <div class="card-body">
-      <label class="label">截圖範圍</label>
-      <select name="scope" class="select select-bordered w-full">
-        <option value="widget">整個 popin 區塊</option>
-        <option value="card">只截廣告卡</option>
+      <label class="label">輸出方式</label>
+      <select name="output" class="select select-bordered w-full">
+        <option value="html">網頁預覽（在頁面中顯示已替換的網頁，自行截圖）</option>
+        <option value="widget">下載 PNG：整個 popin 區塊</option>
+        <option value="card">下載 PNG：只截廣告卡</option>
       </select>
-      <button type="submit" class="btn btn-primary w-full mt-2">產生預覽截圖</button>
+      <button type="submit" class="btn btn-primary w-full mt-2" id="genBtn">產生預覽</button>
+      <div class="text-xs opacity-60 text-center" id="genHint"></div>
     </div>
   </div>
 </form>
@@ -150,6 +147,55 @@ export async function registerAdpreview(app: FastifyInstance) {
     hidden.value = t.getAttribute('data-name');
     search.blur(); // 選完再關閉 dropdown
   });
+
+  // 試抓素材：先確認 token/campaign/asset 抓得到，並顯示抓到的圖與文案
+  var testBtn = document.getElementById('testFetchBtn');
+  var resultBox = document.getElementById('testFetchResult');
+  if (testBtn) testBtn.addEventListener('click', function () {
+    var account = hidden.value || search.value.trim();
+    var campaignId = document.querySelector('input[name="campaignId"]').value.trim();
+    var assetId = document.querySelector('input[name="assetId"]').value.trim();
+    if (!account || !campaignId || !assetId) {
+      resultBox.innerHTML = '<div class="alert alert-warning text-sm">請先選擇 D 帳號並填入 Campaign ID 與 Asset ID</div>';
+      return;
+    }
+    setMode('popin');
+    testBtn.classList.add('btn-disabled');
+    testBtn.textContent = '抓取中…';
+    resultBox.innerHTML = '';
+    fetch('${BASE_PATH}/fetch-creative', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ account: account, campaignId: campaignId, assetId: assetId }),
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.ok) {
+        resultBox.innerHTML =
+          '<div class="card card-side bg-base-200">' +
+            '<figure class="w-48 shrink-0"><img src="' + d.imageUrl + '" alt="素材圖" class="object-cover"></figure>' +
+            '<div class="card-body py-3 px-4 text-sm">' +
+              '<div><span class="badge badge-success badge-sm">抓取成功</span></div>' +
+              '<div><b>標題：</b>' + d.title + '</div>' +
+              '<div><b>Campaign：</b>' + d.campaignName + '</div>' +
+              (d.brand ? '<div><b>廣告主：</b>' + d.brand + '</div>' : '') +
+              '<div class="break-all opacity-60 text-xs"><b>圖片網址（已驗證可載入）：</b>' + d.imageUrl + '</div>' +
+            '</div></div>';
+      } else {
+        resultBox.innerHTML = '<div class="alert alert-error text-sm whitespace-pre-wrap">' + d.error + '</div>';
+      }
+    }).catch(function (e) {
+      resultBox.innerHTML = '<div class="alert alert-error text-sm">請求失敗：' + e.message + '</div>';
+    }).finally(function () {
+      testBtn.classList.remove('btn-disabled');
+      testBtn.textContent = '試抓素材（先確認抓得到再產生）';
+    });
+  });
+
+  // 送出時顯示產生中（開真實頁需 20-40 秒）
+  document.querySelector('form[action$="/generate"]').addEventListener('submit', function () {
+    var btn = document.getElementById('genBtn');
+    btn.classList.add('btn-disabled');
+    document.getElementById('genHint').textContent = '產生中…開啟真實媒體頁約需 20-40 秒，請勿關閉頁面';
+  });
 })();
 </script>`)
     );
@@ -159,6 +205,33 @@ export async function registerAdpreview(app: FastifyInstance) {
   app.get(`${BASE_PATH}/accounts`, async (_req, reply) => {
     const rows = await listDAccounts();
     reply.send(rows.map((r) => ({ accountName: r.accountName, source: r.source })));
+  });
+
+  // ---------- 試抓素材：回抓到的圖/文案/相關資料，或明確 API 錯誤 ----------
+  app.post(`${BASE_PATH}/fetch-creative`, async (req, reply) => {
+    const b = req.body as any;
+    try {
+      if (!b?.account || !b?.campaignId || !b?.assetId) {
+        return reply.send({ ok: false, error: '請選擇 D 帳號並填入 Campaign ID 與 Asset ID' });
+      }
+      const token = await getDAccountToken(String(b.account).trim());
+      if (!token) return reply.send({ ok: false, error: `找不到帳號「${b.account}」的 token，請至 token 管理頁確認` });
+      const detail = await fetchCreativeDetail(token, String(b.campaignId).trim(), String(b.assetId).trim());
+      reply.send({ ok: true, ...detail });
+    } catch (e: any) {
+      reply.send({ ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  // ---------- HTML 預覽檢視 ----------
+  app.get(`${BASE_PATH}/view/:id`, async (req, reply) => {
+    const html = getHtmlPreview((req.params as any).id);
+    if (!html) {
+      return reply.code(404).type('text/html').send(
+        layout('預覽已過期', `<div class="alert alert-warning">此預覽已過期或不存在（保留 15 分鐘），請回表單重新產生。</div><a class="btn mt-4" href="${BASE_PATH}">返回</a>`)
+      );
+    }
+    reply.type('text/html').send(html);
   });
 
   // ---------- token 管理頁 ----------
@@ -314,33 +387,54 @@ function resetForm() {
       if (fields.mode === 'popin') {
         if (!fields.account) throw new Error('請先搜尋並選擇 D 帳號');
         const token = await getDAccountToken(fields.account);
-        if (!token) throw new Error('找不到該 D 帳號 token');
-        const creatives = await getCreatives(
+        if (!token) throw new Error(`找不到帳號「${fields.account}」的 token，請至 token 管理頁確認`);
+        // 與「試抓素材」共用同一函式：錯誤訊息逐層明確、圖片網址經伺服器端驗證
+        const detail = await fetchCreativeDetail(
           token,
-          [fields.campaignId?.trim()].filter(Boolean) as string[],
-          [fields.assetId?.trim()].filter(Boolean) as string[]
+          fields.campaignId?.trim() ?? '',
+          fields.assetId?.trim() ?? ''
         );
-        if (!creatives.length) throw new Error('popin 查無對應素材，請確認 campaign / asset id');
-        image = normalizePopinImage(creatives[0].image);
-        title = fields.title?.trim() || creatives[0].title;
+        image = detail.imageUrl;
+        title = fields.title?.trim() || detail.title;
       } else {
         if (!imageBuf) throw new Error('請上傳廣告圖片');
         image = `data:${imageMime};base64,${imageBuf.toString('base64')}`;
         title = fields.title?.trim() || '（未填標題）';
       }
 
-      const png = await shootPreview({
+      const shootInput = {
         url,
         image,
         title,
         advertiserName,
-        scope: fields.scope === 'card' ? 'card' : 'widget',
-      });
+        scope: (fields.output === 'card' ? 'card' : 'widget') as 'card' | 'widget',
+      };
 
-      reply
-        .type('image/png')
-        .header('Content-Disposition', 'attachment; filename="ad_preview.png"')
-        .send(png);
+      if (fields.output === 'widget' || fields.output === 'card') {
+        // PNG 下載（原行為）
+        const png = await shootPreview(shootInput);
+        return reply
+          .type('image/png')
+          .header('Content-Disposition', 'attachment; filename="ad_preview.png"')
+          .send(png);
+      }
+
+      // 預設：整頁 HTML 預覽（iframe 顯示，AM 自行截圖）
+      const html = await renderPreviewHtml(shootInput);
+      const id = randomUUID();
+      saveHtmlPreview(id, html);
+      reply.type('text/html').send(
+        layout('網頁預覽', `
+<div class="flex items-center justify-between my-2">
+  <div class="breadcrumbs text-sm"><ul><li><a href="/">工具選單</a></li><li><a href="${BASE_PATH}">廣告預覽截圖</a></li><li>網頁預覽</li></ul></div>
+  <div class="flex gap-2">
+    <a class="btn btn-sm" href="${BASE_PATH}">重新產生</a>
+    <a class="btn btn-sm btn-outline" href="${BASE_PATH}/view/${id}" target="_blank">另開新分頁</a>
+  </div>
+</div>
+<div class="alert alert-info text-sm mb-2">以下是「已替換素材」的真實媒體頁（已凍結，不會再變動）。請捲動到廣告位置後用 Mac 截圖（⌘⇧4）。預覽保留 15 分鐘。</div>
+<iframe src="${BASE_PATH}/view/${id}" sandbox="allow-same-origin" class="w-full bg-white rounded-box border border-base-300" style="height:85vh"></iframe>`)
+      );
     } catch (err: any) {
       reply
         .code(500)
