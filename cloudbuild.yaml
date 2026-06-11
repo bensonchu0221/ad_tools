@@ -1,0 +1,41 @@
+# git push main → Cloud Build → 部署 Cloud Run（沿用平台慣例）
+# 需先在 GCP 建好 Cloud Build trigger 監看 github.com/bensonchu0221/ad_tools 的 main 分支。
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'asia-east1-docker.pkg.dev/popinpoc1/cloud-run-source-deploy/ad_tools:$COMMIT_SHA'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-east1-docker.pkg.dev/popinpoc1/cloud-run-source-deploy/ad_tools:$COMMIT_SHA'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'ad-tools'
+      - '--image=asia-east1-docker.pkg.dev/popinpoc1/cloud-run-source-deploy/ad_tools:$COMMIT_SHA'
+      - '--region=asia-east1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=2Gi'        # Chromium 較吃記憶體
+      - '--cpu=2'
+      - '--timeout=120'
+      - '--no-cpu-throttling'
+      - '--min-instances=1'   # 讓瀏覽器保溫
+      # popin 自動抓素材所需的 DB 連線（待建好 Secret Manager 後再開啟）：
+      # - '--update-env-vars=DB_HOST=35.234.61.181,DB_NAME=ad_tools,DB_USER=ad_tools'
+      # - '--update-secrets=DB_PASSWORD=ad-tools-db-password:latest'
+      # R(rixbee) token（同樣走 Secret Manager）：
+      # - '--update-secrets=RIXBEE_AGENCY_TOKEN=rixbee-agency-token:latest,RIXBEE_DIRECT_TOKEN=rixbee-direct-token:latest'
+
+images:
+  - 'asia-east1-docker.pkg.dev/popinpoc1/cloud-run-source-deploy/ad_tools:$COMMIT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
