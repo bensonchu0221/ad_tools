@@ -20,7 +20,8 @@ const TOOLS: Tool[] = [
   { name: 'R 大量上傳 (Broadciel)', desc: 'r_bulk_upload', href: 'https://r-bulk-upload.example/', external: true },
 ];
 
-const app = Fastify({ logger: true });
+// trustProxy：Cloud Run 由 proxy 終結 TLS，必須信任 X-Forwarded-* 否則 secure cookie 不會送出
+const app = Fastify({ logger: true, trustProxy: true });
 await app.register(multipart, { limits: { fileSize: 15 * 1024 * 1024 } });
 await registerAuth(app); // Google 登入保護（未設定 OAuth env 時自動停用）
 
