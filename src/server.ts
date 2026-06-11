@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
+import { registerAuth } from './core/auth.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 
 // 工具註冊表：新增 tool 2/3 時在這裡加一筆即可
@@ -19,6 +20,7 @@ const TOOLS: Tool[] = [
 
 const app = Fastify({ logger: true });
 await app.register(multipart, { limits: { fileSize: 15 * 1024 * 1024 } });
+await registerAuth(app); // Google 登入保護（未設定 OAuth env 時自動停用）
 
 // 選單首頁
 app.get('/', async (_req, reply) => {
