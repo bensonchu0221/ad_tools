@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import { randomUUID } from 'node:crypto';
 import { employeeCheckEnabled, isActiveEmployee } from './employees.js';
+import { layout } from './html.js';
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -34,12 +35,19 @@ function domainAllowed(email: string): boolean {
 }
 
 function loginPage(msg = ''): string {
-  return `<!doctype html><meta charset="utf-8"><title>登入</title>
-<div style="font-family:system-ui;max-width:420px;margin:6rem auto;text-align:center">
-  <h1 style="font-size:1.3rem">內部廣告工具系統</h1>
-  ${msg ? `<p style="color:#c00">${msg}</p>` : ''}
-  <a href="/auth/google/login" style="display:inline-block;margin-top:1rem;background:#1565c0;color:#fff;padding:.7rem 1.4rem;border-radius:6px;text-decoration:none">使用 Google 登入</a>
-</div>`;
+  return layout(
+    '登入',
+    `<div class="flex justify-center mt-24">
+  <div class="card bg-base-100 shadow-md w-96">
+    <div class="card-body items-center text-center">
+      <h1 class="card-title">內部廣告工具系統</h1>
+      ${msg ? `<div class="alert alert-error text-sm">${msg}</div>` : ''}
+      <a href="/auth/google/login" class="btn btn-primary mt-2 w-full">使用 Google 登入</a>
+    </div>
+  </div>
+</div>`,
+    { nav: false }
+  );
 }
 
 /** 從簽章 cookie 取出已登入 email；無效/未登入回 null */

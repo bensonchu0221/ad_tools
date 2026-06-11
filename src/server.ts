@@ -2,10 +2,13 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
+import formbody from '@fastify/formbody';
 import { registerAuth } from './core/auth.js';
+import { layout } from './core/html.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
+import { dbDiagnostics } from './core/store.js';
 
 // 工具註冊表：新增 tool 2/3 時在這裡加一筆即可
 interface Tool {
@@ -23,23 +26,23 @@ const TOOLS: Tool[] = [
 // trustProxy：Cloud Run 由 proxy 終結 TLS，必須信任 X-Forwarded-* 否則 secure cookie 不會送出
 const app = Fastify({ logger: true, trustProxy: true });
 await app.register(multipart, { limits: { fileSize: 15 * 1024 * 1024 } });
+await app.register(formbody); // token 管理頁的 urlencoded 表單
 await registerAuth(app); // Google 登入保護（未設定 OAuth env 時自動停用）
 
 // 選單首頁
 app.get('/', async (_req, reply) => {
   const cards = TOOLS.map(
-    (t) => `<a class="card" href="${t.href}"${t.external ? ' target="_blank"' : ''}>
-      <div class="t">${t.name}${t.external ? ' ↗' : ''}</div><div class="d">${t.desc}</div></a>`
+    (t) => `<a class="card bg-base-100 shadow-sm hover:shadow-md transition-shadow" href="${t.href}"${t.external ? ' target="_blank"' : ''}>
+      <div class="card-body">
+        <h2 class="card-title text-base">${t.name}${t.external ? ' ↗' : ''}</h2>
+        <p class="text-sm opacity-70">${t.desc}</p>
+      </div></a>`
   ).join('');
-  reply.type('text/html').send(`<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>廣告工具系統</title>
-<style>
-  body{font-family:system-ui,"PingFang TC","Microsoft JhengHei",sans-serif;max-width:760px;margin:3rem auto;padding:0 1rem;color:#222}
-  h1{font-size:1.5rem}.grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1.5rem}
-  .card{display:block;border:1px solid #e0e0e0;border-radius:10px;padding:1.2rem;text-decoration:none;color:inherit;transition:.15s}
-  .card:hover{border-color:#1565c0;box-shadow:0 2px 10px rgba(0,0,0,.08)}
-  .t{font-weight:bold;font-size:1.05rem}.d{color:#666;font-size:.85rem;margin-top:.3rem}
-</style></head><body><h1>內部廣告工具系統</h1><div class="grid">${cards}</div></body></html>`);
+  reply.type('text/html').send(
+    layout('內部廣告工具系統', `
+<h1 class="text-xl font-bold my-4">工具選單</h1>
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">${cards}</div>`)
+  );
 });
 
 app.get('/health', async (_req, reply) => reply.code(200).send('ok'));
@@ -51,6 +54,19 @@ app.get('/health/popin', async (req, reply) => {
   const url = (req.query as any).url || findMedia('cnyes')?.url;
   const result = await probePopin(url);
   reply.send({ url, ...result });
+});
+
+// 診斷：token DB 與舊庫同步狀態（需 DIAG_KEY 金鑰）。會觸發一次同步。
+app.get('/health/db', async (req, reply) => {
+  const key = (req.query as any).key;
+  if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+  const { listDAccounts } = await import('./core/store.js');
+  try {
+    await listDAccounts(); // 觸發節流同步
+  } catch (e: any) {
+    return reply.send({ ok: false, error: String(e?.message ?? e) });
+  }
+  reply.send(await dbDiagnostics());
 });
 
 await registerAdpreview(app);

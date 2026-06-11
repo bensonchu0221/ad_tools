@@ -21,6 +21,8 @@ function getPool(): mysql.Pool | null {
           password: TIMEOFF_DB_PASSWORD,
           database,
           connectionLimit: 3,
+          // Cloud SQL(MySQL 8.4) 走 TCP 需 SSL（unix socket 不用）
+          ssl: { rejectUnauthorized: false },
         }
   );
   return pool;
