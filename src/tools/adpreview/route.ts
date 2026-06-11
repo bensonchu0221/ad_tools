@@ -140,12 +140,15 @@ export async function registerAdpreview(app: FastifyInstance) {
   });
   var fileInput = document.querySelector('input[name="image"]');
   if (fileInput) fileInput.addEventListener('focus', function () { setMode('upload'); });
-  list.addEventListener('click', function (e) {
+  // 用 mousedown（非 click）：mousedown 會先讓輸入框失焦 → dropdown(:focus-within) 關閉
+  // → mouseup 時元素已消失，click 永遠不會觸發。preventDefault 保住焦點、先完成選取。
+  list.addEventListener('mousedown', function (e) {
     var t = e.target.closest('a[data-name]');
     if (!t) return;
+    e.preventDefault();
     search.value = t.getAttribute('data-name');
     hidden.value = t.getAttribute('data-name');
-    document.activeElement.blur(); // 關閉 dropdown
+    search.blur(); // 選完再關閉 dropdown
   });
 })();
 </script>`)
