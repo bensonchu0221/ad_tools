@@ -125,6 +125,21 @@ export async function registerAdpreview(app: FastifyInstance) {
     hidden.value = '';
     render(search.value.trim());
   });
+
+  // UX：操作哪一區就自動切到該模式（radio 變成狀態顯示，不必手點）
+  function setMode(v) {
+    var r = document.querySelector('input[name="mode"][value="' + v + '"]');
+    if (r && !r.disabled) r.checked = true;
+  }
+  ['accSearch'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('focus', function () { setMode('popin'); });
+  });
+  document.querySelectorAll('input[name="campaignId"], input[name="assetId"]').forEach(function (el) {
+    el.addEventListener('focus', function () { setMode('popin'); });
+  });
+  var fileInput = document.querySelector('input[name="image"]');
+  if (fileInput) fileInput.addEventListener('focus', function () { setMode('upload'); });
   list.addEventListener('click', function (e) {
     var t = e.target.closest('a[data-name]');
     if (!t) return;
