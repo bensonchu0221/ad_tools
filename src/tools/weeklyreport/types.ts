@@ -113,6 +113,7 @@ export interface ReportResult {
   weekly: MetricAgg[]; // index 對應 periods
   periods: string[]; // 各週標籤 YYYY/MM/DD ~ YYYY/MM/DD
   assets: AssetAgg[]; // 按 spend 降序
+  images: Map<string, { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' } | null>; // 已下載素材圖（key=原URL），xlsx 縮圖重用
   audiences: Map<string, MetricAgg>; // key=campaign_name(D)/groupname(R)
   dRaw: DRow[];
   rRaw: RRow[];

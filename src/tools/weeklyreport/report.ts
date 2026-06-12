@@ -3,6 +3,7 @@
 import { fetchReport } from '../../core/rixbee.js';
 import { getAccessToken, getCampaigns, getAdLists, getDateReports } from '../../core/popin.js';
 import { getDAccountToken } from '../../core/store.js';
+import { downloadImages, clusterImageUrls } from './imagehash.js';
 import type { UserType } from '../../core/rixbee.js';
 import {
   R_BEHAVIOR_MAP,
@@ -332,23 +333,38 @@ export async function buildReport(
     addTo(weekly[group], day.imp, day.click, day.spend, day.cv, day.mcv, day.mcv2);
   }
 
-  // ---- Section 3：素材分析（以標題為鍵聚合，spend 降序）----
+  // ---- Section 3：素材分析（以「圖片 × 文案」為鍵聚合，spend 降序）----
+  // 同一張圖在 D/R 兩平台 URL 不同，先下載＋感知雜湊分群，再以（圖片群, title）配對聚合
+  onPhase?.('下載素材縮圖中…');
+  const images = await downloadImages([
+    ...dRaw.map((r) => r.ad_image ?? ''),
+    ...rRaw.map((r) => r.assetimage),
+  ]);
+  const imageKeys = await clusterImageUrls(images); // URL → identity key（空 URL 不在 map 內）
   const assetMap = new Map<string, AssetAgg>();
-  for (const row of dRaw) {
-    const title = row.ad_title ?? '';
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
-    if (!assetMap.has(title)) {
-      assetMap.set(title, { asset_title: title, asset_image: row.ad_image ?? '', ...emptyAgg() });
+  const addAsset = (
+    imageUrl: string,
+    title: string,
+    imp: number,
+    click: number,
+    spend: number,
+    cv: number,
+    mcv: number,
+    mcv2: number
+  ) => {
+    const key = `${imageKeys.get(imageUrl) ?? 'noimg'} ${title}`;
+    if (!assetMap.has(key)) {
+      assetMap.set(key, { asset_title: title, asset_image: imageUrl, ...emptyAgg() });
     }
-    addTo(assetMap.get(title)!, num(row.imp), num(row.click), num(row.charge), cv, mcv, mcv2);
+    addTo(assetMap.get(key)!, imp, click, spend, cv, mcv, mcv2);
+  };
+  for (const row of dRaw) {
+    const [cv, mcv, mcv2] = calcConversions(row, buckets);
+    addAsset(row.ad_image ?? '', row.ad_title ?? '', num(row.imp), num(row.click), num(row.charge), cv, mcv, mcv2);
   }
   for (const row of rRaw) {
-    const title = row.assettitle;
     const [cv, mcv, mcv2] = calcConversions(row, buckets);
-    if (!assetMap.has(title)) {
-      assetMap.set(title, { asset_title: title, asset_image: row.assetimage, ...emptyAgg() });
-    }
-    addTo(assetMap.get(title)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
+    addAsset(row.assetimage, row.assettitle, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
   const assets = [...assetMap.values()].sort((a, b) => b.spend - a.spend);
 
@@ -367,7 +383,7 @@ export async function buildReport(
     addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
 
-  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, audiences, dRaw, rRaw };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, dRaw, rRaw };
 }
 
 /** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用） */

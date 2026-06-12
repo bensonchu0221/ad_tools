@@ -127,29 +127,6 @@ function writeSummarySheet(
   for (let r = 3; r <= row; r++) ws.getRow(r).height = 40;
 }
 
-/** 下載素材縮圖（去重；單張失敗回 null 不中斷） */
-async function downloadImages(urls: string[]): Promise<Map<string, { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' } | null>> {
-  const unique = [...new Set(urls.filter(Boolean))];
-  const out = new Map<string, { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' } | null>();
-  await Promise.all(
-    unique.map(async (url) => {
-      try {
-        // 照舊：縮圖一律換成 300x157 的縮版
-        const fetchUrl = url.replace(/__scv1__\d+x\d+/, '__scv1__300x157');
-        const res = await fetch(fetchUrl, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = Buffer.from(await res.arrayBuffer());
-        const type = res.headers.get('content-type') ?? '';
-        const extension = type.includes('png') ? 'png' : type.includes('gif') ? 'gif' : 'jpeg';
-        out.set(url, { buffer: buf, extension });
-      } catch {
-        out.set(url, null);
-      }
-    })
-  );
-  return out;
-}
-
 /** 產出整份週報 Excel（Buffer） */
 export async function buildXlsx(
   result: ReportResult,
@@ -177,9 +154,8 @@ export async function buildXlsx(
     result.periods.map((p, i) => ({ label: p, m: result.weekly[i] }))
   );
 
-  // ---------- Sheet 3：素材分析（含縮圖） ----------
-  onPhase?.('下載素材縮圖中…');
-  const images = await downloadImages(result.assets.map((a) => a.asset_image));
+  // ---------- Sheet 3：素材分析（含縮圖；圖已在 report.ts 分群時下載好） ----------
+  const images = result.images;
 
   const s3 = wb.addWorksheet('素材分析');
   s3.getCell('A1').value = '文案表現';
