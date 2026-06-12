@@ -16,7 +16,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function batchFetch(
   requests: BatchRequest[],
-  { batchSize = 3, maxRetries = 3 }: { batchSize?: number; maxRetries?: number } = {}
+  {
+    batchSize = 3,
+    maxRetries = 3,
+    timeoutMs = 30_000,
+  }: { batchSize?: number; maxRetries?: number; timeoutMs?: number } = {}
 ): Promise<string[]> {
   const results: string[] = new Array(requests.length).fill('');
 
@@ -29,7 +33,12 @@ export async function batchFetch(
         let attempt = 0;
         while (true) {
           try {
-            const res = await fetch(req.url, req.init);
+            // 單一請求逾時保護：沒有 timeout 的話，一支請求 hang 住會卡死整批
+            // Promise.all（背景 job 因此無聲卡死）。逾時走 retry，重試用盡回空字串。
+            const res = await fetch(req.url, {
+              ...req.init,
+              signal: req.init?.signal ?? AbortSignal.timeout(timeoutMs),
+            });
             const text = await res.text();
             // popin 流量限制 → 重試
             if (text.includes('"code":1') && text.includes(FLOW_LIMIT) && attempt < maxRetries) {

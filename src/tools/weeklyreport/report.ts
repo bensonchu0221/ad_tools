@@ -148,7 +148,7 @@ async function fetchRData(input: WeeklyReportInput): Promise<RRow[]> {
 }
 
 /** 抓 D 報表（照舊 discovery.php main()：campaign → ad → date_reporting，列補帳號/活動/素材欄位） */
-async function fetchDData(input: WeeklyReportInput): Promise<DRow[]> {
+async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) => void): Promise<DRow[]> {
   const token = await getDAccountToken(input.dAccountName);
   if (!token) throw new Error(`找不到 D 帳號「${input.dAccountName}」的 token`);
 
@@ -168,6 +168,7 @@ async function fetchDData(input: WeeklyReportInput): Promise<DRow[]> {
     camMap.set(String(cam.mongo_id), cam);
   }
 
+  onPhase?.(`抓 D 廣告清單中…（${camMap.size}/${campaigns.length} 個 campaign 在走期內）`);
   const ads = await getAdLists(accessToken, [...camMap.keys()]);
   const adMap = new Map<string, any>();
   const items: { campaignId: string; adId: string }[] = [];
@@ -176,7 +177,20 @@ async function fetchDData(input: WeeklyReportInput): Promise<DRow[]> {
     items.push({ campaignId: String(ad.campaign), adId: String(ad.mongo_id) });
   }
 
-  const reports = await getDateReports(accessToken, items, ymd(input.startDate), ymd(input.endDate));
+  // 分塊抓報表並回報進度：4A 帳號可能有數百支廣告，整段要數分鐘，
+  // 不分塊的話 phase 不會動，使用者無法分辨「慢」還是「卡死」
+  const CHUNK = 30;
+  const reports: any[][] = [];
+  for (let i = 0; i < items.length; i += CHUNK) {
+    onPhase?.(`抓 D 報表中…（${Math.min(i + CHUNK, items.length)}/${items.length} 支廣告）`);
+    const chunk = await getDateReports(
+      accessToken,
+      items.slice(i, i + CHUNK),
+      ymd(input.startDate),
+      ymd(input.endDate)
+    );
+    reports.push(...chunk);
+  }
 
   const rows: DRow[] = [];
   for (let i = 0; i < items.length; i++) {
@@ -203,7 +217,7 @@ export async function buildReport(
   onPhase?.('抓取 R / D 報表中…');
   const [rRaw, dRaw] = await Promise.all([
     input.rUserIds.length ? fetchRData(input) : Promise.resolve([]),
-    input.dAccountName ? fetchDData(input) : Promise.resolve([]),
+    input.dAccountName ? fetchDData(input, onPhase) : Promise.resolve([]),
   ]);
 
   onPhase?.('整合計算中…');

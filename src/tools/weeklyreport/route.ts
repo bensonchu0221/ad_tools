@@ -295,14 +295,31 @@ export async function registerWeeklyReport(app: FastifyInstance) {
 
     // 背景產出（不卡住回應；錯誤寫進 job 給輪詢端顯示）
     void (async () => {
+      // watchdog：背景 job 卡死時轉成明確錯誤，不讓使用者面對永遠不動的 phase
+      const watchdog = setTimeout(() => {
+        const j = jobStore.get(jobId);
+        if (j && !j.buffer && !j.error) {
+          app.log.error({ jobId, lastPhase: j.phase }, 'weeklyreport job watchdog timeout');
+          updateJob(jobId, { error: `產生逾時（超過 10 分鐘，卡在「${j.phase}」）。請縮小日期範圍或稍後再試。` });
+        }
+      }, 10 * 60 * 1000);
+
+      // phase 同步寫進伺服器日誌：線上卡住時可從 log 直接看出規模與卡點
+      const onPhase = (phase: string) => {
+        app.log.info({ jobId, phase }, 'weeklyreport progress');
+        updateJob(jobId, { phase });
+      };
       try {
-        const result = await buildReport(input, (phase) => updateJob(jobId, { phase }));
-        const buffer = await buildXlsx(result, buckets, (phase) => updateJob(jobId, { phase }));
+        const result = await buildReport(input, onPhase);
+        const buffer = await buildXlsx(result, buckets, onPhase);
         const fileName = `dr_weekly_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.xlsx`;
-        updateJob(jobId, { phase: '完成', fileName, buffer });
+        // watchdog 已標錯誤的話不要覆蓋成完成
+        if (!jobStore.get(jobId)?.error) updateJob(jobId, { phase: '完成', fileName, buffer });
       } catch (e: any) {
         app.log.error(e, 'weeklyreport generate failed');
         updateJob(jobId, { error: String(e?.message ?? e) });
+      } finally {
+        clearTimeout(watchdog);
       }
     })();
 
