@@ -33,11 +33,10 @@ steps:
       - '--add-cloudsql-instances=popinpoc1:asia-east1:internal-tool'
       # token 庫(新)：Cloud SQL ad_tools.d_tokens（socket）；OLDDB=舊 dctool DB(AWS)，唯讀鏡像來源
       - '--update-env-vars=GOOGLE_REDIRECT_URL=https://ad-tools-439393162392.asia-east1.run.app/auth/google/callback,ALLOWED_EMAIL_DOMAINS=popin.cc;broadciel.com,TIMEOFF_DB_SOCKET=/cloudsql/popinpoc1:asia-east1:internal-tool,TIMEOFF_DB_NAME=timeoff,TIMEOFF_DB_USER=popin,DB_SOCKET=/cloudsql/popinpoc1:asia-east1:internal-tool,DB_NAME=ad_tools,DB_USER=popin,OLDDB_HOST=13.231.111.229,OLDDB_PORT=3001,OLDDB_USER=dev,OLDDB_NAME=popin_tw_new'
-      - '--update-secrets=GOOGLE_CLIENT_ID=ad-tools-google-client-id:latest,GOOGLE_CLIENT_SECRET=ad-tools-google-client-secret:latest,SESSION_SECRET=ad-tools-session-secret:latest,TIMEOFF_DB_PASSWORD=ad-tools-timeoff-db-password:latest,DB_PASSWORD=ad-tools-timeoff-db-password:latest,OLDDB_PASSWORD=ad-tools-dctool-db-password:latest'
+      # R(rixbee) token：週報工具用，三種帳號類型各一組（userid 用程式內預設 7161/7168/7153）
+      - '--update-secrets=GOOGLE_CLIENT_ID=ad-tools-google-client-id:latest,GOOGLE_CLIENT_SECRET=ad-tools-google-client-secret:latest,SESSION_SECRET=ad-tools-session-secret:latest,TIMEOFF_DB_PASSWORD=ad-tools-timeoff-db-password:latest,DB_PASSWORD=ad-tools-timeoff-db-password:latest,OLDDB_PASSWORD=ad-tools-dctool-db-password:latest,RIXBEE_AGENCY_TOKEN=rixbee-agency-token:latest,RIXBEE_DIRECT_TOKEN=rixbee-direct-token:latest,RIXBEE_SUPER_TOKEN=rixbee-super-token:latest'
       # 清掉早期遺留的無效 env
       - '--remove-env-vars=ALLOWED_EMAIL_DOMAIN'
-      # R(rixbee) token（之後需要時走 Secret Manager）：
-      # - '--update-secrets=RIXBEE_AGENCY_TOKEN=rixbee-agency-token:latest,RIXBEE_DIRECT_TOKEN=rixbee-direct-token:latest'
 
 images:
   - 'asia-east1-docker.pkg.dev/popinpoc1/cloud-run-source-deploy/ad_tools:$COMMIT_SHA'

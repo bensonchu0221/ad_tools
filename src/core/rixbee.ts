@@ -4,7 +4,7 @@ import { batchFetch } from './http.js';
 
 const BASE = 'https://broadciel.rpt.rixbeedesk.com/api/report/v1';
 
-export type UserType = 'agency' | 'direct';
+export type UserType = 'agency' | 'direct' | 'super';
 
 interface Cred {
   userId: string;
@@ -12,11 +12,17 @@ interface Cred {
 }
 
 function cred(type: UserType): Cred {
-  // 預設值對應原程式（agency 7161 / direct 7168）；正式環境用 env 覆蓋
+  // 預設值對應原程式（agency 7161 / direct 7168 / super 7153）；正式環境用 env 覆蓋
   if (type === 'direct') {
     return {
       userId: process.env.RIXBEE_DIRECT_USERID ?? '7168',
       token: process.env.RIXBEE_DIRECT_TOKEN ?? '',
+    };
+  }
+  if (type === 'super') {
+    return {
+      userId: process.env.RIXBEE_SUPER_USERID ?? '7153',
+      token: process.env.RIXBEE_SUPER_TOKEN ?? '',
     };
   }
   return {
@@ -24,6 +30,15 @@ function cred(type: UserType): Cred {
     token: process.env.RIXBEE_AGENCY_TOKEN ?? '',
   };
 }
+
+// R API 錯誤碼 → 中文訊息（照舊 rixbee.php errorMapping）
+const R_ERROR_MAP: Record<string, string> = {
+  '1000': 'R API 異常，請再試一次，持續錯誤請通知你的 IT',
+  '1001': '金鑰驗證錯誤，持續錯誤請通知你的 IT',
+  '1002': '取得 R 報表異常，請截圖通知你的 IT',
+  '1003': 'R API 每日使用到達上限，明天再試（或通知你的 IT）',
+  '1006': '系統資料異常，請截圖通知你的 IT',
+};
 
 function dateRange(start: string, end: string): string[] {
   const days: string[] = [];
@@ -66,13 +81,20 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
   const texts = await batchFetch(reqs);
   const rows: any[] = [];
   for (const t of texts) {
+    let json: any;
     try {
-      const json = JSON.parse(t);
-      const data = json?.data?.data;
-      if (Array.isArray(data)) rows.push(...data);
+      json = JSON.parse(t);
     } catch {
-      /* 忽略單筆 */
+      continue; // 非 JSON 忽略單筆
     }
+    // 照舊 rixbee.php：status.code != 0 即視為錯誤中止（例如金鑰錯誤、每日上限）
+    const code = json?.status?.code;
+    if (code !== undefined && code !== 0) {
+      const msg = R_ERROR_MAP[String(code)] ?? 'R API 出現異常，請截圖通知你的 IT';
+      throw new Error(`${msg}（${code} ${json?.status?.message ?? ''}）`);
+    }
+    const data = json?.data?.data;
+    if (Array.isArray(data)) rows.push(...data);
   }
   return rows;
 }

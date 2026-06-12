@@ -6,6 +6,7 @@ import formbody from '@fastify/formbody';
 import { registerAuth } from './core/auth.js';
 import { layout } from './core/html.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
+import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyreport/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics } from './core/store.js';
@@ -19,6 +20,7 @@ interface Tool {
 }
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW },
+  { name: 'D&R 週報', desc: '整合 Discovery + Rixbee 報表產出 Excel 週報', href: WEEKLYREPORT },
   // 站外既有工具（各自獨立服務，僅選單連結）
   { name: 'R 大量上傳 (Broadciel)', desc: 'r_bulk_upload', href: 'https://r-bulk-upload.example/', external: true },
 ];
@@ -71,6 +73,7 @@ app.get('/health/db', async (req, reply) => {
 });
 
 await registerAdpreview(app);
+await registerWeeklyReport(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));

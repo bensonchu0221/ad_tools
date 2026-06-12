@@ -137,6 +137,32 @@ export async function fetchCreativeDetail(
   };
 }
 
+/**
+ * 批次取多個 (campaign, ad) 在日期區間的 date_reporting 報表列。
+ * 回傳與 items 順序對應的二維陣列。日期格式照舊 dctool：YYYYMMDD。
+ * batchFetch 內建 ReportFlowLimit.operateTooMuch 重試（對應舊 discovery.php batch=3）。
+ */
+export async function getDateReports(
+  accessToken: string,
+  items: { campaignId: string; adId: string }[],
+  startDate: string, // YYYYMMDD
+  endDate: string // YYYYMMDD
+): Promise<any[][]> {
+  const reqs = items.map(({ campaignId, adId }) => ({
+    url: `${BASE}/discovery/api/v2/ad/${campaignId}/${adId}/${startDate}/${endDate}/date_reporting`,
+    init: { headers: { Authorization: `Bearer ${accessToken}` } },
+  }));
+  const texts = await batchFetch(reqs, { batchSize: 3 });
+  return texts.map((t) => {
+    try {
+      const json = JSON.parse(t);
+      return Array.isArray(json?.data) ? json.data : json?.data ? [json.data] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 /** popin 圖片網址正規化：移除 __scv 後綴並補回副檔名（對應舊 ad_preview.php） */
 export function normalizePopinImage(url: string): string {
   const m = url.match(/\.([a-zA-Z0-9]+)(?:__scv.*)?$/);
