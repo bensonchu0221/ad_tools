@@ -209,8 +209,13 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
   const accessToken = await getAccessToken(token);
   const campaigns = await getCampaigns(accessToken);
 
-  // campaign 結束超過 N 個月就不抓報表（照舊概念，門檻表單可選；老帳號 campaign 動輒數百個）
+  // 跳過走期內不可能有資料的 campaign（老帳號動輒數百個，全抓要數分鐘）。三條規則：
+  // 1) end_date + N 個月早於走期開始（照舊概念，門檻表單可選）——但很多 campaign 設 2099 不限期，靠不住
+  // 2) created_at 晚於走期結束（建立前不可能投放，100% 安全）
+  // 3) updated_at 早於走期開始 30 天（實證：投放中系統會更新 updated_at；status 欄位不可用——
+  //    當下停用的 campaign 走期內可能投放過，實測 34 個有資料者中 25 個 status=0）
   const startTs = new Date(`${input.startDate}T00:00:00`).getTime();
+  const endRangeTs = new Date(`${input.endDate}T23:59:59`).getTime();
   const camMap = new Map<string, any>();
   for (const cam of campaigns) {
     const endTs = parseLooseDate(cam.end_date);
@@ -219,6 +224,10 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
       expire.setMonth(expire.getMonth() + input.expireMonths);
       if (startTs > expire.getTime()) continue;
     }
+    const createdTs = parseLooseDate(cam.created_at);
+    if (createdTs !== null && createdTs > endRangeTs) continue;
+    const updatedTs = parseLooseDate(cam.updated_at);
+    if (updatedTs !== null && updatedTs < startTs - 30 * 86400000) continue;
     camMap.set(String(cam.mongo_id), cam);
   }
 
