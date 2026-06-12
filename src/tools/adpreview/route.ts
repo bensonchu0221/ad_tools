@@ -3,7 +3,6 @@ import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { MEDIA, findMedia } from './media.js';
 import {
-  shootPreview,
   renderPreviewHtml,
   saveHtmlPreview,
   getHtmlPreview,
@@ -91,12 +90,6 @@ export async function registerAdpreview(app: FastifyInstance) {
 
   <div class="card bg-base-100 shadow-sm">
     <div class="card-body">
-      <label class="label">輸出方式</label>
-      <select name="output" class="select select-bordered w-full">
-        <option value="html">網頁預覽（在頁面中顯示已替換的網頁，自行截圖）</option>
-        <option value="widget">下載 PNG：整個 popin 區塊</option>
-        <option value="card">下載 PNG：只截廣告卡</option>
-      </select>
       <button type="submit" class="btn btn-primary w-full mt-2" id="genBtn">產生預覽</button>
       <div class="text-xs opacity-60 text-center" id="genHint"></div>
     </div>
@@ -111,13 +104,10 @@ export async function registerAdpreview(app: FastifyInstance) {
   var search = document.getElementById('accSearch');
   var hidden = document.getElementById('accValue');
   var list = document.getElementById('accList');
-  if (!search || search.disabled) return;
+  // 注意：不可在這裡整段 return（曾因 DB 未設定→搜尋框 disabled→提早退出，
+  // 導致下方的 AJAX submit handler 都沒掛上、表單走原生 POST）
+  var comboEnabled = !!(search && !search.disabled);
   var accounts = [];
-
-  fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (data) {
-    accounts = data;
-    render('');
-  });
 
   function render(keyword) {
     var kw = keyword.toLowerCase();
@@ -130,10 +120,17 @@ export async function registerAdpreview(app: FastifyInstance) {
     }).join('') || '<li class="menu-disabled"><a>無符合帳號</a></li>';
   }
 
-  search.addEventListener('input', function () {
-    hidden.value = '';
-    render(search.value.trim());
-  });
+  if (comboEnabled) {
+    fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (data) {
+      accounts = data;
+      render('');
+    });
+
+    search.addEventListener('input', function () {
+      hidden.value = '';
+      render(search.value.trim());
+    });
+  }
 
   // UX：操作哪一區就自動切到該模式（radio 變成狀態顯示，不必手點）
   function setMode(v) {
@@ -151,7 +148,7 @@ export async function registerAdpreview(app: FastifyInstance) {
   if (fileInput) fileInput.addEventListener('focus', function () { setMode('upload'); });
   // 用 mousedown（非 click）：mousedown 會先讓輸入框失焦 → dropdown(:focus-within) 關閉
   // → mouseup 時元素已消失，click 永遠不會觸發。preventDefault 保住焦點、先完成選取。
-  list.addEventListener('mousedown', function (e) {
+  if (comboEnabled) list.addEventListener('mousedown', function (e) {
     var t = e.target.closest('a[data-name]');
     if (!t) return;
     e.preventDefault();
@@ -164,7 +161,7 @@ export async function registerAdpreview(app: FastifyInstance) {
   var testBtn = document.getElementById('testFetchBtn');
   var resultBox = document.getElementById('testFetchResult');
   if (testBtn) testBtn.addEventListener('click', function () {
-    var account = hidden.value || search.value.trim();
+    var account = (hidden && hidden.value) || (search ? search.value.trim() : '');
     var campaignId = document.querySelector('input[name="campaignId"]').value.trim();
     var assetId = document.querySelector('input[name="assetId"]').value.trim();
     if (!account || !campaignId || !assetId) {
@@ -217,14 +214,6 @@ export async function registerAdpreview(app: FastifyInstance) {
     area.innerHTML = '<div class="max-w-3xl mx-auto px-4"><div class="alert alert-error text-sm whitespace-pre-wrap">' + msg + '</div></div>';
     setBusy(false);
   }
-  function downloadBlob(blob) {
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'ad_preview.png';
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
   form.addEventListener('submit', function (ev) {
     ev.preventDefault();
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -232,18 +221,6 @@ export async function registerAdpreview(app: FastifyInstance) {
 
     var fd = new FormData(form);
     fd.append('clientWidth', String(window.innerWidth)); // 後端用此寬度渲染 → 所見即所得
-    var output = fd.get('output');
-
-    if (output === 'widget' || output === 'card') {
-      // PNG：同步等檔案下載
-      genHint.textContent = '產生 PNG 中…約 10-20 秒';
-      fetch('${BASE_PATH}/generate', { method: 'POST', body: fd }).then(function (r) {
-        var ct = r.headers.get('content-type') || '';
-        if (ct.indexOf('image/png') !== -1) return r.blob().then(downloadBlob);
-        return r.json().then(function (j) { throw new Error(j.error || '產生失敗'); });
-      }).then(function () { setBusy(false); }).catch(function (e) { showError(e.message); });
-      return;
-    }
 
     // 網頁預覽：job 模式 + 實況直播
     area.innerHTML =
@@ -504,22 +481,9 @@ function resetForm() {
         });
       }
 
-      const shootInput = {
-        url,
-        material,
-        scope: (fields.output === 'card' ? 'card' : 'widget') as 'card' | 'widget',
-      };
+      const shootInput = { url, material };
 
-      if (fields.output === 'widget' || fields.output === 'card') {
-        // PNG 下載：同步等結果（前端 fetch→blob→下載）
-        const png = await shootPreview(shootInput, { viewportWidth: clientWidth });
-        return reply
-          .type('image/png')
-          .header('Content-Disposition', 'attachment; filename="ad_preview.png"')
-          .send(png);
-      }
-
-      // 預設：整頁 HTML 預覽 → job 模式，立即回 jobId，背景產生並實況直播
+      // 整頁 HTML 預覽 → job 模式，立即回 jobId，背景產生並實況直播
       const jobId = randomUUID();
       createJob(jobId);
       void (async () => {

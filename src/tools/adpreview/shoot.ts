@@ -53,7 +53,6 @@ export interface ShootInput {
   url: string;
   /** 素材以 Promise 傳入：popin API 抓素材與開頁/捲動並行，等到要替換時才 await */
   material: Material | Promise<Material>;
-  scope?: 'widget' | 'card'; // PNG 模式用：截整個 popin 區塊或單張卡片
 }
 
 export interface OpenOpts {
@@ -224,21 +223,13 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
   }
 }
 
-export async function shootPreview(input: ShootInput, opts: OpenOpts = {}): Promise<Buffer> {
-  const { page, context } = await openAndSwap(input, { deviceScaleFactor: 2, ...opts });
-  try {
-    const selector = input.scope === 'card' ? '#__preview_target__' : POPIN.widget;
-    const el = (await page.$(selector)) || (await page.$('#__preview_target__'));
-    const buf = el ? await el.screenshot({ type: 'png' }) : await page.screenshot({ type: 'png' });
-    return buf;
-  } finally {
-    await context.close();
-  }
-}
-
 /**
- * 整頁 HTML 預覽：換完素材後序列化整頁 DOM。
+ * 整頁 HTML 預覽：換完素材後序列化整頁 DOM（凍結）。
  * - 移除所有 <script>：防止 widget 重繪蓋掉替換內容、避免在 iframe 內執行第三方 JS
+ * - 中和內嵌 iframe：留言區/廣告/GTM 等是「活的」第三方 app（如 cnyes 留言區是另一個
+ *   Next.js app），在使用者瀏覽器載入後可能掛掉並顯示 "Application error"——
+ *   凍結時把 src 改 about:blank（保留框框尺寸不破版）
+ * - 移除 noscript：凍結頁無 JS，noscript 內容（如 GTM iframe）會被瀏覽器啟用
  * - 注入 <base href=媒體 origin>：讓相對路徑的圖/CSS 從媒體站載入
  */
 export async function renderPreviewHtml(input: ShootInput, opts: OpenOpts = {}): Promise<string> {
@@ -248,6 +239,15 @@ export async function renderPreviewHtml(input: ShootInput, opts: OpenOpts = {}):
     if (cdp) await cdp.send('Page.stopScreencast').catch(() => {});
     await page.evaluate((origin) => {
       document.querySelectorAll('script').forEach((s) => s.remove());
+      document.querySelectorAll('noscript').forEach((n) => n.remove());
+      document.querySelectorAll('iframe').forEach((f) => {
+        const r = f.getBoundingClientRect();
+        // 固定原尺寸再清空 src，避免破版
+        (f as HTMLIFrameElement).style.width = `${Math.round(r.width)}px`;
+        (f as HTMLIFrameElement).style.height = `${Math.round(r.height)}px`;
+        f.setAttribute('src', 'about:blank');
+        f.removeAttribute('srcdoc');
+      });
       document.querySelectorAll('base').forEach((b) => b.remove());
       const base = document.createElement('base');
       base.href = origin + '/';
