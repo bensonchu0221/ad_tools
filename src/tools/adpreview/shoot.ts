@@ -1,9 +1,13 @@
 // 在真實媒體頁的 popin 廣告位換素材：截圖 / 整頁 HTML 預覽（含 CDP 實況直播）
-import { chromium, type Browser, type CDPSession } from 'playwright';
-import { POPIN } from './media.js';
+import { chromium, devices, type Browser, type CDPSession } from 'playwright';
+import { POPIN, type Device } from './media.js';
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+// 手機模擬用 Android 描述檔（引擎是 chromium，比 iPhone 描述檔一致）：UA/viewport 412×839/isMobile/hasTouch
+const MOBILE = devices['Pixel 7'];
+export const MOBILE_VIEWPORT_WIDTH = MOBILE.viewport.width;
 
 let browserPromise: Promise<Browser> | null = null;
 function getBrowser(): Promise<Browser> {
@@ -13,10 +17,13 @@ function getBrowser(): Promise<Browser> {
 
 /** 診斷：從伺服器端載入 URL，回報 popin 是否有 render（測機房 IP 是否被擋）。 */
 export async function probePopin(
-  url: string
+  url: string,
+  device: Device = 'desktop'
 ): Promise<{ cardCount: number; adCount: number; ms: number; error?: string }> {
   const browser = await getBrowser();
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, userAgent: UA });
+  const context = await browser.newContext(
+    device === 'mobile' ? { ...MOBILE } : { viewport: { width: 1280, height: 900 }, userAgent: UA }
+  );
   const page = await context.newPage();
   const t0 = Date.now();
   try {
@@ -56,6 +63,7 @@ export interface ShootInput {
 }
 
 export interface OpenOpts {
+  device?: Device; // mobile 時用手機描述檔開頁，忽略 viewportWidth
   viewportWidth?: number; // 後端渲染寬度（前端傳 innerWidth，所見即所得）
   deviceScaleFactor?: number;
   onPhase?: (phase: string) => void; // 直播：階段文字
@@ -65,16 +73,23 @@ export interface OpenOpts {
 /** 共用流程：開真實頁 → 捲動找 popin（早停）→ 鎖定廣告卡 → 換素材。回傳已替換的 page。 */
 async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
   const onPhase = opts.onPhase ?? (() => {});
-  const width = Math.min(Math.max(opts.viewportWidth ?? 1280, 800), 1920);
+  const mobile = opts.device === 'mobile';
+  const width = mobile
+    ? MOBILE.viewport.width
+    : Math.min(Math.max(opts.viewportWidth ?? 1280, 800), 1920);
   const t0 = Date.now();
   const lap = (name: string) => console.log(`[adpreview] ${name}: ${Date.now() - t0}ms`);
 
   const browser = await getBrowser();
-  const context = await browser.newContext({
-    viewport: { width, height: 900 },
-    deviceScaleFactor: opts.deviceScaleFactor ?? 2,
-    userAgent: UA,
-  });
+  const context = await browser.newContext(
+    mobile
+      ? { ...MOBILE, deviceScaleFactor: opts.deviceScaleFactor ?? MOBILE.deviceScaleFactor }
+      : {
+          viewport: { width, height: 900 },
+          deviceScaleFactor: opts.deviceScaleFactor ?? 2,
+          userAgent: UA,
+        }
+  );
   const page = await context.newPage();
   let cdp: CDPSession | null = null;
   try {

@@ -52,8 +52,9 @@ app.get('/health/popin', async (req, reply) => {
   const key = (req.query as any).key;
   if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
   const url = (req.query as any).url || findMedia('cnyes')?.url;
-  const result = await probePopin(url);
-  reply.send({ url, ...result });
+  const device = (req.query as any).device === 'mobile' ? 'mobile' : 'desktop';
+  const result = await probePopin(url, device);
+  reply.send({ url, device, ...result });
 });
 
 // 診斷：token DB 與舊庫同步狀態（需 DIAG_KEY 金鑰）。會觸發一次同步。

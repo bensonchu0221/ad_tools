@@ -9,6 +9,7 @@ import {
   createJob,
   updateJob,
   getJob,
+  MOBILE_VIEWPORT_WIDTH,
   type Material,
 } from './shoot.js';
 import { fetchCreativeDetail } from '../../core/popin.js';
@@ -32,7 +33,10 @@ export async function registerAdpreview(app: FastifyInstance) {
   app.get(BASE_PATH, async (_req, reply) => {
     const hasDb = dbAvailable();
     const mediaOpts = MEDIA.map(
-      (m) => `<option value="${m.id}">${m.name}${m.verified ? '' : '（未驗證）'}</option>`
+      (m) =>
+        `<option value="${m.id}" data-device="${m.device ?? 'desktop'}">${m.name}${
+          m.device === 'mobile' ? '（手機）' : ''
+        }${m.verified ? '' : '（未驗證）'}</option>`
     ).join('');
 
     reply.type('text/html').send(
@@ -49,6 +53,15 @@ export async function registerAdpreview(app: FastifyInstance) {
       <select name="mediaId" class="select select-bordered w-full">${mediaOpts}</select>
       <label class="label">或，自己貼一個現在有 popin 廣告的網址（優先採用）</label>
       <input name="customUrl" class="input input-bordered w-full" placeholder="https://...">
+      <label class="label">裝置（選到「（手機）」媒體會自動切換）</label>
+      <div class="flex gap-6">
+        <label class="label cursor-pointer justify-start gap-2">
+          <input type="radio" name="device" value="desktop" class="radio radio-sm" checked> 桌機
+        </label>
+        <label class="label cursor-pointer justify-start gap-2">
+          <input type="radio" name="device" value="mobile" class="radio radio-sm"> 手機
+        </label>
+      </div>
     </div>
   </div>
 
@@ -146,6 +159,15 @@ export async function registerAdpreview(app: FastifyInstance) {
   });
   var fileInput = document.querySelector('input[name="image"]');
   if (fileInput) fileInput.addEventListener('focus', function () { setMode('upload'); });
+
+  // 選到手機版位媒體 → 裝置自動切手機（仍可手動改回）
+  var mediaSel = document.querySelector('select[name="mediaId"]');
+  if (mediaSel) mediaSel.addEventListener('change', function () {
+    var opt = mediaSel.selectedOptions[0];
+    var d = (opt && opt.getAttribute('data-device')) || 'desktop';
+    var r = document.querySelector('input[name="device"][value="' + d + '"]');
+    if (r) r.checked = true;
+  });
   // 用 mousedown（非 click）：mousedown 會先讓輸入框失焦 → dropdown(:focus-within) 關閉
   // → mouseup 時元素已消失，click 永遠不會觸發。preventDefault 保住焦點、先完成選取。
   if (comboEnabled) list.addEventListener('mousedown', function (e) {
@@ -221,6 +243,7 @@ export async function registerAdpreview(app: FastifyInstance) {
 
     var fd = new FormData(form);
     fd.append('clientWidth', String(window.innerWidth)); // 後端用此寬度渲染 → 所見即所得
+    var isMobile = fd.get('device') === 'mobile';
 
     // 網頁預覽：job 模式 + 實況直播
     area.innerHTML =
@@ -253,7 +276,11 @@ export async function registerAdpreview(app: FastifyInstance) {
                 '<div class="max-w-3xl mx-auto px-4 mb-2 flex items-center justify-between">' +
                   '<span class="text-sm opacity-70">已替換素材的真實頁（已凍結）。已自動捲到廣告位，請用 ⌘⇧4 截圖；換媒體選項可直接重產。</span>' +
                   '<a class="btn btn-sm btn-outline shrink-0" href="' + s.viewUrl + '" target="_blank">另開新分頁</a></div>' +
-                '<iframe id="previewFrame" src="' + s.viewUrl + '" sandbox="allow-same-origin" class="bg-white border-y border-base-300" style="width:100%;height:88vh"></iframe>';
+                '<iframe id="previewFrame" src="' + s.viewUrl + '" sandbox="allow-same-origin" class="bg-white border-y border-base-300" style="' +
+                  (isMobile
+                    ? 'width:${MOBILE_VIEWPORT_WIDTH}px;max-width:100%;height:88vh;display:block;margin:0 auto'
+                    : 'width:100%;height:88vh') +
+                  '"></iframe>';
               var ifr = document.getElementById('previewFrame');
               ifr.addEventListener('load', function () {
                 try {
@@ -451,6 +478,7 @@ function resetForm() {
 
       const advertiserName = fields.advertiserName?.trim() || undefined;
       const clientWidth = Number(fields.clientWidth) || 1280;
+      const device = fields.device === 'mobile' ? ('mobile' as const) : ('desktop' as const);
 
       // 素材以 Promise 組裝：popin 模式的 API 抓取與「開頁/捲動」並行，省掉串行等待
       let material: Promise<Material>;
@@ -489,6 +517,7 @@ function resetForm() {
       void (async () => {
         try {
           const html = await renderPreviewHtml(shootInput, {
+            device,
             viewportWidth: clientWidth,
             onPhase: (p) => updateJob(jobId, { phase: p }),
             onFrame: (f) => updateJob(jobId, { frame: f }),
