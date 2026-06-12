@@ -41,8 +41,9 @@ function getPool(): mysql.Pool | null {
           password: DB_PASSWORD,
           database,
           connectionLimit: 5,
-          // Cloud SQL(MySQL 8.4) 走 TCP 需 SSL，否則 caching_sha2_password 會拒絕
-          ssl: { rejectUnauthorized: false },
+          // Cloud SQL(MySQL 8.4) 走 TCP 需 SSL，否則 caching_sha2_password 會拒絕。
+          // 例外：本機經 cloud-sql-proxy（通道已加密，MySQL 層不支援再開 TLS）設 DB_SSL=off
+          ...(process.env.DB_SSL === 'off' ? {} : { ssl: { rejectUnauthorized: false } }),
         }
   );
   return pool;
