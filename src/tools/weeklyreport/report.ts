@@ -182,6 +182,7 @@ async function fetchRData(input: WeeklyReportInput, userType: UserType): Promise
       assettitle: String(item.cr_title ?? ''),
       assetimage: String(item.cr_image ?? ''),
       AdAssets: String(item.cr_name ?? ''), // 歷史 quirk：舊程式此欄放 cr_name
+      cpg_name: String(item.cpg_name ?? ''), // 真 campaign 名稱，進 Raw 的 campaign_name 欄
       brandname: String(item.user_name ?? ''),
       Spend: num(item.payment_revenue),
       Impressions: num(item.impression),

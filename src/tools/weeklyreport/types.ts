@@ -60,6 +60,7 @@ export interface RRow {
   assettitle: string;
   assetimage: string;
   AdAssets: string; // 歷史 quirk：舊程式放的是 cr_name（非 cpg_name）
+  cpg_name: string; // 真正的 campaign 名稱（Raw_Data 的 campaign_name 欄用）
   brandname: string;
   Spend: number;
   Impressions: number;
