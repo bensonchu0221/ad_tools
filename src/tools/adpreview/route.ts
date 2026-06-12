@@ -2,7 +2,16 @@
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { MEDIA, findMedia } from './media.js';
-import { shootPreview, renderPreviewHtml, saveHtmlPreview, getHtmlPreview } from './shoot.js';
+import {
+  shootPreview,
+  renderPreviewHtml,
+  saveHtmlPreview,
+  getHtmlPreview,
+  createJob,
+  updateJob,
+  getJob,
+  type Material,
+} from './shoot.js';
 import { fetchCreativeDetail } from '../../core/popin.js';
 import { layout } from '../../core/html.js';
 import {
@@ -93,6 +102,9 @@ export async function registerAdpreview(app: FastifyInstance) {
     </div>
   </div>
 </form>
+
+<!-- 結果區：全寬（突破 max-w 容器），產生時顯示實況直播，完成切換成 iframe -->
+<div id="resultArea" class="mt-6" style="width:100vw;position:relative;left:50%;transform:translateX(-50%)"></div>
 
 <script>
 (function () {
@@ -190,11 +202,94 @@ export async function registerAdpreview(app: FastifyInstance) {
     });
   });
 
-  // 送出時顯示產生中（開真實頁需 20-40 秒）
-  document.querySelector('form[action$="/generate"]').addEventListener('submit', function () {
-    var btn = document.getElementById('genBtn');
-    btn.classList.add('btn-disabled');
-    document.getElementById('genHint').textContent = '產生中…開啟真實媒體頁約需 20-40 秒，請勿關閉頁面';
+  // ---------- AJAX 產生：同頁實況直播 → 完成切換成全寬 iframe（表單保留，可換媒體重產） ----------
+  var form = document.querySelector('form[action$="/generate"]');
+  var genBtn = document.getElementById('genBtn');
+  var genHint = document.getElementById('genHint');
+  var area = document.getElementById('resultArea');
+  var pollTimer = null;
+
+  function setBusy(busy) {
+    genBtn.classList.toggle('btn-disabled', busy);
+    genHint.textContent = busy ? '產生中…請看下方實況畫面' : '';
+  }
+  function showError(msg) {
+    area.innerHTML = '<div class="max-w-3xl mx-auto px-4"><div class="alert alert-error text-sm whitespace-pre-wrap">' + msg + '</div></div>';
+    setBusy(false);
+  }
+  function downloadBlob(blob) {
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'ad_preview.png';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    setBusy(true);
+
+    var fd = new FormData(form);
+    fd.append('clientWidth', String(window.innerWidth)); // 後端用此寬度渲染 → 所見即所得
+    var output = fd.get('output');
+
+    if (output === 'widget' || output === 'card') {
+      // PNG：同步等檔案下載
+      genHint.textContent = '產生 PNG 中…約 10-20 秒';
+      fetch('${BASE_PATH}/generate', { method: 'POST', body: fd }).then(function (r) {
+        var ct = r.headers.get('content-type') || '';
+        if (ct.indexOf('image/png') !== -1) return r.blob().then(downloadBlob);
+        return r.json().then(function (j) { throw new Error(j.error || '產生失敗'); });
+      }).then(function () { setBusy(false); }).catch(function (e) { showError(e.message); });
+      return;
+    }
+
+    // 網頁預覽：job 模式 + 實況直播
+    area.innerHTML =
+      '<div class="max-w-3xl mx-auto px-4 mb-2 flex items-center gap-3">' +
+        '<span class="loading loading-spinner loading-sm"></span>' +
+        '<span id="livePhase" class="text-sm">送出中…</span></div>' +
+      '<div class="bg-base-300 flex justify-center">' +
+        '<img id="liveFrame" alt="實況畫面" style="max-width:100%"></div>';
+    area.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    fetch('${BASE_PATH}/generate', { method: 'POST', body: fd })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) throw new Error(j.error || '產生失敗');
+        var phaseEl = document.getElementById('livePhase');
+        var frameEl = document.getElementById('liveFrame');
+        pollTimer = setInterval(function () {
+          fetch('${BASE_PATH}/job/' + j.jobId).then(function (r) { return r.json(); }).then(function (s) {
+            if (!s.ok || s.error) {
+              clearInterval(pollTimer); pollTimer = null;
+              showError(s.error || 'job 失敗');
+              return;
+            }
+            if (phaseEl) phaseEl.textContent = s.phase;
+            if (s.frame && frameEl) frameEl.src = 'data:image/jpeg;base64,' + s.frame;
+            if (s.viewUrl) {
+              clearInterval(pollTimer); pollTimer = null;
+              setBusy(false);
+              area.innerHTML =
+                '<div class="max-w-3xl mx-auto px-4 mb-2 flex items-center justify-between">' +
+                  '<span class="text-sm opacity-70">已替換素材的真實頁（已凍結）。已自動捲到廣告位，請用 ⌘⇧4 截圖；換媒體選項可直接重產。</span>' +
+                  '<a class="btn btn-sm btn-outline shrink-0" href="' + s.viewUrl + '" target="_blank">另開新分頁</a></div>' +
+                '<iframe id="previewFrame" src="' + s.viewUrl + '" sandbox="allow-same-origin" class="bg-white border-y border-base-300" style="width:100%;height:88vh"></iframe>';
+              var ifr = document.getElementById('previewFrame');
+              ifr.addEventListener('load', function () {
+                try {
+                  var t = ifr.contentDocument.getElementById('__preview_target__');
+                  if (t) t.scrollIntoView({ block: 'center' }); // 自動捲到廣告位
+                } catch (e) {}
+              });
+              area.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          }).catch(function () { /* 單次輪詢失敗忽略，下次再試 */ });
+        }, 500);
+      })
+      .catch(function (e) { showError(e.message); });
   });
 })();
 </script>`)
@@ -375,71 +470,82 @@ function resetForm() {
     try {
       // 決定要開的網址
       const url = fields.customUrl?.trim() || findMedia(fields.mediaId)?.url;
-      if (!url) {
-        return reply.code(400).type('text/html').send(layout('錯誤', `<div class="alert alert-error">請選媒體或貼網址</div><a class="btn mt-4" href="${BASE_PATH}">返回</a>`));
-      }
+      if (!url) return reply.send({ ok: false, error: '請選媒體或貼網址' });
 
-      // 決定素材
-      let image: string;
-      let title: string;
       const advertiserName = fields.advertiserName?.trim() || undefined;
+      const clientWidth = Number(fields.clientWidth) || 1280;
 
+      // 素材以 Promise 組裝：popin 模式的 API 抓取與「開頁/捲動」並行，省掉串行等待
+      let material: Promise<Material>;
       if (fields.mode === 'popin') {
-        if (!fields.account) throw new Error('請先搜尋並選擇 D 帳號');
-        const token = await getDAccountToken(fields.account);
-        if (!token) throw new Error(`找不到帳號「${fields.account}」的 token，請至 token 管理頁確認`);
-        // 與「試抓素材」共用同一函式：錯誤訊息逐層明確、圖片網址經伺服器端驗證
-        const detail = await fetchCreativeDetail(
-          token,
-          fields.campaignId?.trim() ?? '',
-          fields.assetId?.trim() ?? ''
-        );
-        image = detail.imageUrl;
-        title = fields.title?.trim() || detail.title;
+        if (!fields.account) return reply.send({ ok: false, error: '請先搜尋並選擇 D 帳號' });
+        material = (async () => {
+          const token = await getDAccountToken(fields.account);
+          if (!token) throw new Error(`找不到帳號「${fields.account}」的 token，請至 token 管理頁確認`);
+          // 與「試抓素材」共用同一函式：錯誤訊息逐層明確、圖片網址經伺服器端驗證
+          const detail = await fetchCreativeDetail(
+            token,
+            fields.campaignId?.trim() ?? '',
+            fields.assetId?.trim() ?? ''
+          );
+          return {
+            image: detail.imageUrl,
+            title: fields.title?.trim() || detail.title,
+            advertiserName,
+          };
+        })();
+        material.catch(() => {}); // 先掛 handler 防 unhandled rejection；實際錯誤於 await 時處理
       } else {
-        if (!imageBuf) throw new Error('請上傳廣告圖片');
-        image = `data:${imageMime};base64,${imageBuf.toString('base64')}`;
-        title = fields.title?.trim() || '（未填標題）';
+        if (!imageBuf) return reply.send({ ok: false, error: '請上傳廣告圖片' });
+        material = Promise.resolve({
+          image: `data:${imageMime};base64,${imageBuf.toString('base64')}`,
+          title: fields.title?.trim() || '（未填標題）',
+          advertiserName,
+        });
       }
 
       const shootInput = {
         url,
-        image,
-        title,
-        advertiserName,
+        material,
         scope: (fields.output === 'card' ? 'card' : 'widget') as 'card' | 'widget',
       };
 
       if (fields.output === 'widget' || fields.output === 'card') {
-        // PNG 下載（原行為）
-        const png = await shootPreview(shootInput);
+        // PNG 下載：同步等結果（前端 fetch→blob→下載）
+        const png = await shootPreview(shootInput, { viewportWidth: clientWidth });
         return reply
           .type('image/png')
           .header('Content-Disposition', 'attachment; filename="ad_preview.png"')
           .send(png);
       }
 
-      // 預設：整頁 HTML 預覽（iframe 顯示，AM 自行截圖）
-      const html = await renderPreviewHtml(shootInput);
-      const id = randomUUID();
-      saveHtmlPreview(id, html);
-      reply.type('text/html').send(
-        layout('網頁預覽', `
-<div class="flex items-center justify-between my-2">
-  <div class="breadcrumbs text-sm"><ul><li><a href="/">工具選單</a></li><li><a href="${BASE_PATH}">廣告預覽截圖</a></li><li>網頁預覽</li></ul></div>
-  <div class="flex gap-2">
-    <a class="btn btn-sm" href="${BASE_PATH}">重新產生</a>
-    <a class="btn btn-sm btn-outline" href="${BASE_PATH}/view/${id}" target="_blank">另開新分頁</a>
-  </div>
-</div>
-<div class="alert alert-info text-sm mb-2">以下是「已替換素材」的真實媒體頁（已凍結，不會再變動）。請捲動到廣告位置後用 Mac 截圖（⌘⇧4）。預覽保留 15 分鐘。</div>
-<iframe src="${BASE_PATH}/view/${id}" sandbox="allow-same-origin" class="w-full bg-white rounded-box border border-base-300" style="height:85vh"></iframe>`)
-      );
+      // 預設：整頁 HTML 預覽 → job 模式，立即回 jobId，背景產生並實況直播
+      const jobId = randomUUID();
+      createJob(jobId);
+      void (async () => {
+        try {
+          const html = await renderPreviewHtml(shootInput, {
+            viewportWidth: clientWidth,
+            onPhase: (p) => updateJob(jobId, { phase: p }),
+            onFrame: (f) => updateJob(jobId, { frame: f }),
+          });
+          const viewId = randomUUID();
+          saveHtmlPreview(viewId, html);
+          updateJob(jobId, { phase: '完成', viewUrl: `${BASE_PATH}/view/${viewId}`, frame: null });
+        } catch (e: any) {
+          updateJob(jobId, { error: String(e?.message ?? e) });
+        }
+      })();
+      reply.send({ ok: true, jobId });
     } catch (err: any) {
-      reply
-        .code(500)
-        .type('text/html')
-        .send(layout('產生失敗', `<div class="alert alert-error">產生失敗：${esc(err.message)}</div><a class="btn mt-4" href="${BASE_PATH}">返回重試</a>`));
+      reply.send({ ok: false, error: String(err?.message ?? err) });
     }
+  });
+
+  // ---------- 產生 job 狀態（實況直播輪詢） ----------
+  app.get(`${BASE_PATH}/job/:id`, async (req, reply) => {
+    const job = getJob((req.params as any).id);
+    if (!job) return reply.send({ ok: false, error: 'job 不存在或已過期，請重新產生' });
+    reply.send({ ok: true, phase: job.phase, frame: job.frame, viewUrl: job.viewUrl, error: job.error });
   });
 }

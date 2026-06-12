@@ -1,5 +1,5 @@
-// 在真實媒體頁的 popin 廣告位換素材並截圖（Phase 0 POC 服務化）
-import { chromium, type Browser } from 'playwright';
+// 在真實媒體頁的 popin 廣告位換素材：截圖 / 整頁 HTML 預覽（含 CDP 實況直播）
+import { chromium, type Browser, type CDPSession } from 'playwright';
 import { POPIN } from './media.js';
 
 const UA =
@@ -43,35 +43,81 @@ export async function probePopin(
   }
 }
 
-export interface ShootInput {
-  url: string;
+export interface Material {
   image: string; // 圖片 URL 或 data URI
   title: string;
   advertiserName?: string;
-  scope?: 'widget' | 'card'; // 截整個 popin 區塊或單張卡片
 }
 
-/** 共用流程：開真實頁 → 等 popin → 換素材。回傳已完成替換的 page（呼叫端負責 close context）。 */
-async function openAndSwap(input: ShootInput, deviceScaleFactor = 2) {
+export interface ShootInput {
+  url: string;
+  /** 素材以 Promise 傳入：popin API 抓素材與開頁/捲動並行，等到要替換時才 await */
+  material: Material | Promise<Material>;
+  scope?: 'widget' | 'card'; // PNG 模式用：截整個 popin 區塊或單張卡片
+}
+
+export interface OpenOpts {
+  viewportWidth?: number; // 後端渲染寬度（前端傳 innerWidth，所見即所得）
+  deviceScaleFactor?: number;
+  onPhase?: (phase: string) => void; // 直播：階段文字
+  onFrame?: (jpegBase64: string) => void; // 直播：CDP screencast 截幀
+}
+
+/** 共用流程：開真實頁 → 捲動找 popin（早停）→ 鎖定廣告卡 → 換素材。回傳已替換的 page。 */
+async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
+  const onPhase = opts.onPhase ?? (() => {});
+  const width = Math.min(Math.max(opts.viewportWidth ?? 1280, 800), 1920);
+  const t0 = Date.now();
+  const lap = (name: string) => console.log(`[adpreview] ${name}: ${Date.now() - t0}ms`);
+
   const browser = await getBrowser();
   const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 },
-    deviceScaleFactor,
+    viewport: { width, height: 900 },
+    deviceScaleFactor: opts.deviceScaleFactor ?? 2,
     userAgent: UA,
   });
   const page = await context.newPage();
+  let cdp: CDPSession | null = null;
   try {
-    await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    // popin 模組通常在內文下方，捲動觸發 lazy-load
-    for (let i = 0; i < 8; i++) {
-      await page.mouse.wheel(0, 1600);
-      await page.waitForTimeout(800);
+    // 實況直播：CDP screencast，每幀回傳 jpeg base64
+    if (opts.onFrame) {
+      cdp = await context.newCDPSession(page);
+      cdp.on('Page.screencastFrame', (ev: any) => {
+        opts.onFrame!(ev.data);
+        cdp!.send('Page.screencastFrameAck', { sessionId: ev.sessionId }).catch(() => {});
+      });
+      await cdp.send('Page.startScreencast', {
+        format: 'jpeg',
+        quality: 45,
+        maxWidth: Math.min(width, 1280),
+        maxHeight: 900,
+        everyNthFrame: 2,
+      });
     }
-    await page.waitForSelector(POPIN.card, { timeout: 30000 });
-    await page.waitForTimeout(2500);
 
-    // 步驟一：先選定廣告卡並捲進視窗，讓 lazy-load 縮圖有機會載入（否則換圖會撲空）
+    onPhase('開啟媒體頁面…');
+    await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    lap('goto');
+
+    // 捲動找 popin：出現即早停（取代盲捲 8×800ms）
+    onPhase('捲動尋找 popin 廣告位…');
+    let foundCard = false;
+    for (let i = 0; i < 14 && !foundCard; i++) {
+      await page.mouse.wheel(0, 2200);
+      await page.waitForTimeout(250);
+      foundCard = await page.evaluate((sel) => !!document.querySelector(sel), POPIN.card);
+    }
+    if (!foundCard) {
+      // 捲完還沒出現：再給一次機會等它 render
+      await page.waitForSelector(POPIN.card, { timeout: 15000 }).catch(() => {
+        throw new Error('找不到 popin 廣告位（該頁可能目前沒有出 popin 廣告，請換一頁或換網址）');
+      });
+    }
+    await page.waitForTimeout(1000); // 等 widget 內容填滿
+    lap('found popin');
+
+    // 鎖定廣告卡並捲進視窗（讓 lazy 縮圖載入）
+    onPhase('鎖定廣告卡…');
     const found = await page.evaluate((sel) => {
       const cards = [...document.querySelectorAll(sel.card)] as HTMLElement[];
       const adCard = cards.find((c) => c.classList.contains(sel.adCardClass)) || cards[0];
@@ -81,9 +127,31 @@ async function openAndSwap(input: ShootInput, deviceScaleFactor = 2) {
       return true;
     }, POPIN);
     if (!found) throw new Error('找不到 popin 廣告位（該頁可能目前沒有出 popin 廣告，請換一頁或換網址）');
-    await page.waitForTimeout(1500);
 
-    // 步驟二：替換素材（背景圖/IMG 都試；都沒有就強制設在縮圖容器上），回傳替換統計
+    // 輪詢等 lazy 縮圖出現（取代固定 1500ms；逾時照走，有強制設圖 fallback）
+    await page
+      .waitForFunction(
+        (imgBoxSel) => {
+          const box = document.querySelector('#__preview_target__ ' + imgBoxSel);
+          if (!box) return true; // 沒有縮圖容器就不用等
+          if (box.querySelector('img')) return true;
+          const els = [box, ...box.querySelectorAll('*')];
+          return els.some((el) => {
+            const bg = getComputedStyle(el as HTMLElement).backgroundImage;
+            return !!bg && bg !== 'none';
+          });
+        },
+        POPIN.imgBox,
+        { timeout: 2000 }
+      )
+      .catch(() => {});
+    lap('card ready');
+
+    // 此刻才需要素材：popin API 多半已在開頁期間並行完成
+    onPhase('替換素材…');
+    const material = await input.material;
+    lap('material ready');
+
     const result = await page.evaluate(
       ({ sel, image, title, advertiserName }) => {
         const adCard = document.getElementById('__preview_target__') as HTMLElement | null;
@@ -137,7 +205,7 @@ async function openAndSwap(input: ShootInput, deviceScaleFactor = 2) {
 
         return { ok: true, swappedImg, forcedImg, swappedTitle };
       },
-      { sel: POPIN, image: input.image, title: input.title, advertiserName: input.advertiserName }
+      { sel: POPIN, image: material.image, title: material.title, advertiserName: material.advertiserName }
     );
 
     if (!result.ok) throw new Error('找不到 popin 廣告位（該頁可能目前沒有出 popin 廣告，請換一頁或換網址）');
@@ -145,19 +213,19 @@ async function openAndSwap(input: ShootInput, deviceScaleFactor = 2) {
       throw new Error('找到 popin 廣告卡但無法替換素材（卡片結構不符，請換一頁或回報）');
     }
     console.log(
-      `[adpreview] swap 完成: img=${result.swappedImg} forced=${result.forcedImg} title=${result.swappedTitle}`
+      `[adpreview] swap 完成: img=${result.swappedImg} forced=${result.forcedImg} title=${result.swappedTitle} (${Date.now() - t0}ms)`
     );
 
-    await page.waitForTimeout(600); // 等新圖載入
-    return { page, context };
+    await page.waitForTimeout(500); // 等新圖載入
+    return { page, context, cdp };
   } catch (e) {
     await context.close();
     throw e;
   }
 }
 
-export async function shootPreview(input: ShootInput): Promise<Buffer> {
-  const { page, context } = await openAndSwap(input);
+export async function shootPreview(input: ShootInput, opts: OpenOpts = {}): Promise<Buffer> {
+  const { page, context } = await openAndSwap(input, { deviceScaleFactor: 2, ...opts });
   try {
     const selector = input.scope === 'card' ? '#__preview_target__' : POPIN.widget;
     const el = (await page.$(selector)) || (await page.$('#__preview_target__'));
@@ -173,9 +241,11 @@ export async function shootPreview(input: ShootInput): Promise<Buffer> {
  * - 移除所有 <script>：防止 widget 重繪蓋掉替換內容、避免在 iframe 內執行第三方 JS
  * - 注入 <base href=媒體 origin>：讓相對路徑的圖/CSS 從媒體站載入
  */
-export async function renderPreviewHtml(input: ShootInput): Promise<string> {
-  const { page, context } = await openAndSwap(input, 1);
+export async function renderPreviewHtml(input: ShootInput, opts: OpenOpts = {}): Promise<string> {
+  const { page, context, cdp } = await openAndSwap(input, { deviceScaleFactor: 1, ...opts });
   try {
+    opts.onPhase?.('凍結頁面…');
+    if (cdp) await cdp.send('Page.stopScreencast').catch(() => {});
     await page.evaluate((origin) => {
       document.querySelectorAll('script').forEach((s) => s.remove());
       document.querySelectorAll('base').forEach((b) => b.remove());
@@ -196,7 +266,6 @@ const HTML_MAX = 20;
 const htmlStore = new Map<string, { html: string; ts: number }>();
 
 export function saveHtmlPreview(id: string, html: string): void {
-  // 清過期 + 超量先進先出
   const now = Date.now();
   for (const [k, v] of htmlStore) if (now - v.ts > HTML_TTL_MS) htmlStore.delete(k);
   while (htmlStore.size >= HTML_MAX) htmlStore.delete(htmlStore.keys().next().value!);
@@ -211,4 +280,39 @@ export function getHtmlPreview(id: string): string | null {
     return null;
   }
   return v.html;
+}
+
+// ---------- 產生 job 暫存（實況直播用；TTL 10 分鐘、上限 20 筆） ----------
+export interface PreviewJob {
+  phase: string;
+  frame: string | null; // 最新一幀 jpeg base64
+  viewUrl: string | null;
+  error: string | null;
+  ts: number;
+}
+
+const JOB_TTL_MS = 10 * 60 * 1000;
+const JOB_MAX = 20;
+const jobStore = new Map<string, PreviewJob>();
+
+export function createJob(id: string): void {
+  const now = Date.now();
+  for (const [k, v] of jobStore) if (now - v.ts > JOB_TTL_MS) jobStore.delete(k);
+  while (jobStore.size >= JOB_MAX) jobStore.delete(jobStore.keys().next().value!);
+  jobStore.set(id, { phase: '準備中…', frame: null, viewUrl: null, error: null, ts: now });
+}
+
+export function updateJob(id: string, patch: Partial<PreviewJob>): void {
+  const j = jobStore.get(id);
+  if (j) Object.assign(j, patch, { ts: Date.now() });
+}
+
+export function getJob(id: string): PreviewJob | null {
+  const j = jobStore.get(id);
+  if (!j) return null;
+  if (Date.now() - j.ts > JOB_TTL_MS) {
+    jobStore.delete(id);
+    return null;
+  }
+  return j;
 }
