@@ -40,15 +40,17 @@ const R_ERROR_MAP: Record<string, string> = {
   '1006': '系統資料異常，請截圖通知你的 IT',
 };
 
-function dateRange(start: string, end: string): string[] {
-  const days: string[] = [];
-  const d = new Date(start);
+/** 照舊 rixbee.php：日期範圍切成 7 天一段（含頭尾），減少請求數 */
+function weekChunks(start: string, end: string): { from: string; to: string }[] {
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const chunks: { from: string; to: string }[] = [];
   const e = new Date(end);
-  while (d <= e) {
-    days.push(d.toISOString().slice(0, 10));
-    d.setDate(d.getDate() + 1);
+  for (let d = new Date(start); d <= e; d.setDate(d.getDate() + 7)) {
+    const to = new Date(d);
+    to.setDate(to.getDate() + 6);
+    chunks.push({ from: fmt(d), to: fmt(to > e ? e : to) });
   }
-  return days;
+  return chunks;
 }
 
 export interface ReportOptions {
@@ -71,10 +73,10 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
   const dimStr = dimensions.map((d) => `&dimensions[]=${d}`).join('');
   const metStr = metrics.map((m) => `&metrics[]=${m}`).join('');
 
-  const reqs = dateRange(opts.startDate, opts.endDate).map((day) => ({
+  const reqs = weekChunks(opts.startDate, opts.endDate).map(({ from, to }) => ({
     url:
       `${BASE}?x-userid=${userId}&x-authorization=${token}` +
-      `&start_date=${day}&end_date=${day}&timezone=UTC+8&currency=TWD` +
+      `&start_date=${from}&end_date=${to}&timezone=UTC+8&currency=TWD` +
       dimStr + metStr + accountStr,
   }));
 

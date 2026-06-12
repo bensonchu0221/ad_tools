@@ -6,7 +6,7 @@ import { layout } from '../../core/html.js';
 import { dbAvailable, listDAccounts } from '../../core/store.js';
 import { buildReport } from './report.js';
 import { buildXlsx } from './xlsx.js';
-import { R_EVENTS, D_EVENTS, type WeeklyReportInput, type RUserType } from './types.js';
+import { R_EVENTS, D_EVENTS, type WeeklyReportInput } from './types.js';
 
 export const BASE_PATH = '/tools/weeklyreport';
 
@@ -16,6 +16,7 @@ interface ReportJob {
   error: string | null;
   fileName: string | null;
   buffer: Buffer | null;
+  warnings: string[];
   ts: number;
 }
 const JOB_TTL_MS = 10 * 60 * 1000;
@@ -26,7 +27,7 @@ function createJob(id: string): void {
   const now = Date.now();
   for (const [k, v] of jobStore) if (now - v.ts > JOB_TTL_MS) jobStore.delete(k);
   while (jobStore.size >= JOB_MAX) jobStore.delete(jobStore.keys().next().value!);
-  jobStore.set(id, { phase: '準備中…', error: null, fileName: null, buffer: null, ts: now });
+  jobStore.set(id, { phase: '準備中…', error: null, fileName: null, buffer: null, warnings: [], ts: now });
 }
 
 function updateJob(id: string, patch: Partial<ReportJob>): void {
@@ -62,12 +63,13 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       ${hasDb ? '' : '<div class="text-xs text-warning">未設定資料庫，D 帳號暫不可用（仍可只跑 R）</div>'}
       <label class="label">Rixbee Account ID（可多組，逗號分隔；可留空）</label>
       <input name="rAid" id="rAid" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219">
-      <label class="label">Rixbee 帳號類型</label>
-      <div class="flex gap-6">
-        <label class="label cursor-pointer justify-start gap-2"><input type="radio" name="rAtype" value="agency" class="radio radio-sm" checked> 台客</label>
-        <label class="label cursor-pointer justify-start gap-2"><input type="radio" name="rAtype" value="direct" class="radio radio-sm"> 4A</label>
-        <label class="label cursor-pointer justify-start gap-2"><input type="radio" name="rAtype" value="super" class="radio radio-sm"> Super</label>
-      </div>
+      <div class="text-xs opacity-60">帳號類型（台客/4A/Super）會自動偵測，不必選</div>
+      <label class="label">略過已結束的 campaign（D 端，結束超過 N 個月不抓報表）</label>
+      <select id="expireMonths" class="select select-bordered w-full max-w-xs">
+        <option value="1" selected>1 個月（最快）</option>
+        <option value="3">3 個月</option>
+        <option value="6">6 個月</option>
+      </select>
     </div>
   </div>
 
@@ -203,11 +205,11 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     var body = new URLSearchParams({
       account: account,
       rAid: rAid,
-      rAtype: (document.querySelector('input[name="rAtype"]:checked') || {}).value || 'agency',
       bucketsJson: JSON.stringify({ cv: bucketValues('cv'), mcv: bucketValues('mcv'), mcv2: bucketValues('mcv2') }),
       startDate: startDate,
       endDate: endDate,
       weekStart: document.getElementById('weekStart').value,
+      expireMonths: document.getElementById('expireMonths').value,
     });
 
     genBtn.classList.add('btn-disabled');
@@ -229,7 +231,10 @@ export async function registerWeeklyReport(app: FastifyInstance) {
           } else if (j.done) {
             clearInterval(polling);
             genBtn.classList.remove('btn-disabled');
-            statusBox.innerHTML = '<div class="alert alert-success text-sm">完成！</div>' +
+            var warnHtml = (j.warnings || []).map(function (w) {
+              return '<div class="alert alert-warning text-sm mt-2">' + w + '</div>';
+            }).join('');
+            statusBox.innerHTML = '<div class="alert alert-success text-sm">完成！</div>' + warnHtml +
               '<a class="btn btn-success w-full mt-2" href="${BASE_PATH}/download/' + d.jobId + '">下載 ' + j.fileName + '</a>';
             window.location = '${BASE_PATH}/download/' + d.jobId;
           } else {
@@ -283,11 +288,11 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     const input: WeeklyReportInput = {
       dAccountName: account,
       rUserIds: rAid ? rAid.split(',').map((s) => s.trim()).filter(Boolean) : [],
-      rUserType: (['agency', 'direct', 'super'].includes(b.rAtype) ? b.rAtype : 'agency') as RUserType,
       buckets,
       startDate,
       endDate,
       weekStart: Math.min(7, Math.max(1, Number(b.weekStart) || 1)),
+      expireMonths: [1, 3, 6].includes(Number(b.expireMonths)) ? Number(b.expireMonths) : 1,
     };
 
     const jobId = randomUUID();
@@ -314,7 +319,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         const buffer = await buildXlsx(result, buckets, onPhase);
         const fileName = `dr_weekly_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.xlsx`;
         // watchdog 已標錯誤的話不要覆蓋成完成
-        if (!jobStore.get(jobId)?.error) updateJob(jobId, { phase: '完成', fileName, buffer });
+        if (!jobStore.get(jobId)?.error) {
+          updateJob(jobId, { phase: '完成', fileName, buffer, warnings: result.warnings });
+        }
       } catch (e: any) {
         app.log.error(e, 'weeklyreport generate failed');
         updateJob(jobId, { error: String(e?.message ?? e) });
@@ -330,7 +337,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
   app.get(`${BASE_PATH}/job/:id`, async (req, reply) => {
     const j = jobStore.get((req.params as any).id);
     if (!j) return reply.send({ error: '工作不存在或已過期，請重新產生' });
-    reply.send({ phase: j.phase, error: j.error, done: !!j.buffer, fileName: j.fileName });
+    reply.send({ phase: j.phase, error: j.error, done: !!j.buffer, fileName: j.fileName, warnings: j.warnings });
   });
 
   // ---------- 下載 ----------

@@ -50,12 +50,16 @@ export async function getCampaigns(accessToken: string): Promise<any[]> {
 }
 
 /** 取得多個 campaign 的廣告清單，攤平回傳 */
-export async function getAdLists(accessToken: string, campaignIds: string[]): Promise<any[]> {
+export async function getAdLists(
+  accessToken: string,
+  campaignIds: string[],
+  opts?: { batchSize?: number }
+): Promise<any[]> {
   const reqs = campaignIds.map((cid) => ({
     url: `${BASE}/discovery/api/v2/ad/${cid}/lists`,
     init: { headers: { Authorization: `Bearer ${accessToken}` } },
   }));
-  const texts = await batchFetch(reqs);
+  const texts = await batchFetch(reqs, opts);
   const ads: any[] = [];
   for (const t of texts) {
     try {
@@ -152,11 +156,17 @@ export async function getDateReports(
     url: `${BASE}/discovery/api/v2/ad/${campaignId}/${adId}/${startDate}/${endDate}/date_reporting`,
     init: { headers: { Authorization: `Bearer ${accessToken}` } },
   }));
-  const texts = await batchFetch(reqs, { batchSize: 3 });
+  // batch 8：限流（operateTooMuch）由 batchFetch 自動重試兜底
+  const texts = await batchFetch(reqs, { batchSize: 8 });
   return texts.map((t) => {
     try {
       const json = JSON.parse(t);
-      return Array.isArray(json?.data) ? json.data : json?.data ? [json.data] : [];
+      const d = json?.data;
+      // 照舊 PHP json_decode(assoc)+foreach「值」：data 可能是 array 也可能是
+      // 物件（鍵值形式），物件要取 values 攤平，否則整包會被誤當成一列
+      if (Array.isArray(d)) return d.filter((x) => x && typeof x === 'object');
+      if (d && typeof d === 'object') return Object.values(d).filter((x) => x && typeof x === 'object');
+      return [];
     } catch {
       return [];
     }

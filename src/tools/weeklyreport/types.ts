@@ -3,15 +3,15 @@
 
 export type RUserType = 'agency' | 'direct' | 'super';
 
-/** 表單輸入（route 解析後傳給 report.ts） */
+/** 表單輸入（route 解析後傳給 report.ts）。R 帳號類型不收表單，管線內自動偵測。 */
 export interface WeeklyReportInput {
   dAccountName: string; // D 帳號名（空字串 = 不抓 D）
   rUserIds: string[]; // rixbee account ids（空陣列 = 不抓 R）
-  rUserType: RUserType;
   buckets: { cv: string[]; mcv: string[]; mcv2: string[] }; // 拖拉分桶：事件欄位名陣列
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD
   weekStart: number; // 週起始日 1(一)~7(日)
+  expireMonths: number; // campaign 結束超過 N 個月不抓報表（1/3/6）
 }
 
 /**
@@ -106,6 +106,7 @@ export interface AssetAgg extends MetricAgg {
 }
 
 export interface ReportResult {
+  warnings: string[]; // 給使用者看的提示（R 自動選用的類型、某端查無資料等）
   dateRangeString: string; // 報表走期：YYYY/MM/DD ~ YYYY/MM/DD
   daily: Map<string, MetricAgg>; // key=YYYYMMDD（已排序）
   weekly: MetricAgg[]; // index 對應 periods

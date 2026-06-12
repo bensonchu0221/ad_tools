@@ -3,6 +3,7 @@
 import { fetchReport } from '../../core/rixbee.js';
 import { getAccessToken, getCampaigns, getAdLists, getDateReports } from '../../core/popin.js';
 import { getDAccountToken } from '../../core/store.js';
+import type { UserType } from '../../core/rixbee.js';
 import {
   R_BEHAVIOR_MAP,
   type WeeklyReportInput,
@@ -12,6 +13,8 @@ import {
   type RRow,
   type DRow,
 } from './types.js';
+
+const R_TYPE_LABEL: Record<UserType, string> = { agency: '台客', direct: '4A', super: 'Super' };
 
 const num = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
@@ -27,6 +30,25 @@ function slashDate(d: Date): string {
 /** Date → YYYYMMDD */
 function compactDate(d: Date): string {
   return slashDate(d).replace(/\//g, '');
+}
+
+/**
+ * 寬容解析 campaign end_date：popin API 的日期格式不可靠（曾因 Date.parse
+ * 認不得導致過濾整批失效）。依序試 ISO/一般字串、YYYY/MM/DD、epoch 秒/毫秒。
+ * 解析不出回 null（呼叫端保留該 campaign，防誤殺）。
+ */
+export function parseLooseDate(v: any): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number' || /^\d{10,13}$/.test(String(v))) {
+    const n = Number(v);
+    return String(Math.trunc(n)).length >= 13 ? n : n * 1000; // 10 位=秒
+  }
+  const s = String(v).trim();
+  let ts = Date.parse(s);
+  if (Number.isFinite(ts)) return ts;
+  ts = Date.parse(s.replace(/\//g, '-')); // YYYY/MM/DD → YYYY-MM-DD
+  if (Number.isFinite(ts)) return ts;
+  return null;
 }
 
 /** 照舊 PHP：對列上所有欄位比對三桶，回傳累加後的 [cv, mcv, mcv2]（base 為列上既有 cv/mcv/mcv2） */
@@ -108,10 +130,42 @@ export function groupDatesByWeek(
   return { periods, dateMapping };
 }
 
+/**
+ * 自動偵測 R 帳號類型：對台客/4A 各打一支極小彙總 probe（無維度），
+ * 兩者都有資料（多組 ID 混型）→ 改用 Super（總管帳號看得到全部）；都沒有 → 試 Super；
+ * 三種都查無 → throw。probe 單型出錯（token 缺/錯）視為該型無資料。
+ */
+async function detectRUserType(input: WeeklyReportInput): Promise<UserType> {
+  const probe = async (userType: UserType) => {
+    try {
+      const rows = await fetchReport({
+        userType,
+        userIds: input.rUserIds,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        // 必帶 day 維度：無維度的彙總請求「查無資料也會回一列全 0」，會誤判型別
+        dimensions: ['day'],
+        metrics: [],
+      });
+      return rows.length > 0;
+    } catch {
+      return false;
+    }
+  };
+  const [hasAgency, hasDirect] = await Promise.all([probe('agency'), probe('direct')]);
+  if (hasAgency && hasDirect) return 'super';
+  if (hasAgency) return 'agency';
+  if (hasDirect) return 'direct';
+  if (await probe('super')) return 'super';
+  throw new Error(
+    `Rixbee Account ID（${input.rUserIds.join(', ')}）在台客/4A/Super 三種類型下都查無資料，請確認 ID 與日期範圍。`
+  );
+}
+
 /** 抓 R 報表並標準化成 RRow（照舊 rixbee.php 欄位對應；day 去 dash） */
-async function fetchRData(input: WeeklyReportInput): Promise<RRow[]> {
+async function fetchRData(input: WeeklyReportInput, userType: UserType): Promise<RRow[]> {
   const raw = await fetchReport({
-    userType: input.rUserType,
+    userType,
     userIds: input.rUserIds,
     startDate: input.startDate,
     endDate: input.endDate,
@@ -155,21 +209,21 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
   const accessToken = await getAccessToken(token);
   const campaigns = await getCampaigns(accessToken);
 
-  // 照舊：campaign 結束超過 1 個月就不抓報表（避免 campaign 太多 timeout）
+  // campaign 結束超過 N 個月就不抓報表（照舊概念，門檻表單可選；老帳號 campaign 動輒數百個）
   const startTs = new Date(`${input.startDate}T00:00:00`).getTime();
   const camMap = new Map<string, any>();
   for (const cam of campaigns) {
-    const endTs = Date.parse(cam.end_date ?? '');
-    if (Number.isFinite(endTs)) {
-      const plus1Month = new Date(endTs);
-      plus1Month.setMonth(plus1Month.getMonth() + 1);
-      if (startTs > plus1Month.getTime()) continue;
+    const endTs = parseLooseDate(cam.end_date);
+    if (endTs !== null) {
+      const expire = new Date(endTs);
+      expire.setMonth(expire.getMonth() + input.expireMonths);
+      if (startTs > expire.getTime()) continue;
     }
     camMap.set(String(cam.mongo_id), cam);
   }
 
   onPhase?.(`抓 D 廣告清單中…（${camMap.size}/${campaigns.length} 個 campaign 在走期內）`);
-  const ads = await getAdLists(accessToken, [...camMap.keys()]);
+  const ads = await getAdLists(accessToken, [...camMap.keys()], { batchSize: 8 });
   const adMap = new Map<string, any>();
   const items: { campaignId: string; adId: string }[] = [];
   for (const ad of ads) {
@@ -197,6 +251,8 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
     const cam = camMap.get(items[i].campaignId);
     const ad = adMap.get(items[i].adId);
     for (const data of reports[i]) {
+      // 防垃圾列：回應形狀異常時別把空殼塞進報表（曾整批產生日期空、全 0 的列）
+      if (!data || typeof data !== 'object' || !data.date) continue;
       rows.push({
         account_name: cam?.account ?? '',
         campaign_name: cam?.name ?? '',
@@ -214,11 +270,22 @@ export async function buildReport(
   input: WeeklyReportInput,
   onPhase?: (phase: string) => void
 ): Promise<ReportResult> {
+  const warnings: string[] = [];
+
   onPhase?.('抓取 R / D 報表中…');
+  const fetchR = async (): Promise<RRow[]> => {
+    if (!input.rUserIds.length) return [];
+    const userType = await detectRUserType(input); // 三種類型自動偵測，查無資料會 throw
+    warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
+    return fetchRData(input, userType);
+  };
   const [rRaw, dRaw] = await Promise.all([
-    input.rUserIds.length ? fetchRData(input) : Promise.resolve([]),
+    fetchR(),
     input.dAccountName ? fetchDData(input, onPhase) : Promise.resolve([]),
   ]);
+  if (input.dAccountName && dRaw.length === 0) {
+    warnings.push(`D 帳號「${input.dAccountName}」在走期內查無報表資料`);
+  }
 
   onPhase?.('整合計算中…');
   const { buckets } = input;
@@ -290,7 +357,7 @@ export async function buildReport(
     addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
 
-  return { dateRangeString, daily: sortedDaily, weekly, periods, assets, audiences, dRaw, rRaw };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, audiences, dRaw, rRaw };
 }
 
 /** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用） */
