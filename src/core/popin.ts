@@ -174,6 +174,40 @@ export async function getDateReports(
 }
 
 /**
+ * §3.4 Campaign Daily Report：用 campaign 層 date_reporting 取「裝置維度」細分。
+ * 唯一帶 platform_cv=1 才會回 pc_/mobile_/tablet_/xbox_ × 各轉換事件（ad 層拿不到）。
+ * 一次一個 campaign（文件限制），限流吃預設 10 req/s per IP（非 strict）。
+ * 回傳所有 campaign×日期的資料列攤平（每列含該日各裝置欄位），由呼叫端聚合。
+ * Video Ads / Wave 的 campaign 會回非 0 → 跳過（不影響其餘）。
+ */
+export async function getCampaignDeviceReports(
+  accessToken: string,
+  campaignIds: string[],
+  startDate: string, // YYYYMMDD
+  endDate: string // YYYYMMDD
+): Promise<any[]> {
+  const reqs = campaignIds.map((cid) => ({
+    url: `${BASE}/discovery/api/v2/campaign/${cid}/${startDate}/${endDate}/date_reporting?platform_cv=1`,
+    init: { headers: { Authorization: `Bearer ${accessToken}` } },
+  }));
+  const texts = await batchFetch(reqs, { batchSize: 8 });
+  const out: any[] = [];
+  for (const t of texts) {
+    try {
+      const json = JSON.parse(t);
+      if (String(json?.code) !== '0') continue; // Video/Wave campaign 回非 0，跳過
+      const d = json?.data;
+      // data 與 per-ad 同：以日期為鍵的物件，取 values 攤平
+      if (Array.isArray(d)) out.push(...d.filter((x) => x && typeof x === 'object'));
+      else if (d && typeof d === 'object') out.push(...Object.values(d).filter((x) => x && typeof x === 'object'));
+    } catch {
+      /* 單筆解析失敗略過（裝置分析非核心，不退回全打） */
+    }
+  }
+  return out;
+}
+
+/**
  * §3.6 Multiple ad reports：用 bulk 端點廉價列出「走期內實際有資料的 ad_id」。
  * 老帳號每週有資料的廣告極少（實測 345 支中僅 46 支），先用本函式建索引，
  * 貴的 per-ad date_reporting（1 req/s、且唯一含 cv_* 細分）只打這批 → 省約 87% 請求。

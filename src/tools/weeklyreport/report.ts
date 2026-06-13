@@ -1,7 +1,14 @@
 // D&R 週報資料管線：並行抓 R/D → 標準化 → 三桶轉換累加 → 五視角聚合
 // 忠實移植自 dctool get/rd_weekly_report.php + components/{rixbee,discovery}.php
 import { fetchReport } from '../../core/rixbee.js';
-import { getAccessToken, getCampaigns, getAdLists, getDateReports, getAdReportIndex } from '../../core/popin.js';
+import {
+  getAccessToken,
+  getCampaigns,
+  getAdLists,
+  getDateReports,
+  getAdReportIndex,
+  getCampaignDeviceReports,
+} from '../../core/popin.js';
 import { getDAccountToken } from '../../core/store.js';
 import { downloadImages, clusterImageUrls } from './imagehash.js';
 import type { UserType } from '../../core/rixbee.js';
@@ -79,6 +86,52 @@ function addTo(agg: MetricAgg, imp: number, click: number, spend: number, cv: nu
   agg.cv += cv;
   agg.mcv += mcv;
   agg.mcv2 += mcv2;
+}
+
+// 裝置維度（campaign 層 platform_cv=1 回應的欄位前綴）。R 端無此維度。
+// 只列 PC/Mobile：實測 API 對 Tablet/Xbox 不回 imp/click/charge/cv（僅 mcv+cv事件），
+// 曝光/花費恆為 0、整列意義有限，故不納入（見 poc/verify_d_device.mts）。
+const DEVICES = [
+  { prefix: 'pc', label: 'PC' },
+  { prefix: 'mobile', label: 'Mobile' },
+] as const;
+
+/** 4 裝置零值聚合（無 D 或查無裝置資料時用） */
+function emptyDeviceAgg(): Map<string, MetricAgg> {
+  return new Map(DEVICES.map((d) => [d.label, emptyAgg()]));
+}
+
+/**
+ * 把 campaign 層裝置回應列依裝置聚合。轉換口徑與 calcConversions 一致：
+ * 各裝置 cv/mcv 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
+ * mcv2 無 API 基底，純分桶。base 指標取 {prefix}_imp/click/charge。
+ * 只處理 PC/Mobile（DEVICES）：API 對 Tablet/Xbox 不回 base 指標，見 DEVICES 註解。
+ */
+function aggregateDevices(
+  deviceRows: any[],
+  buckets: WeeklyReportInput['buckets']
+): Map<string, MetricAgg> {
+  const agg = emptyDeviceAgg();
+  for (const row of deviceRows) {
+    for (const { prefix, label } of DEVICES) {
+      let cv = num(row[`${prefix}_cv`]);
+      let mcv = num(row[`${prefix}_mcv`]);
+      let mcv2 = 0;
+      for (const e of buckets.cv) cv += num(row[`${prefix}_${e}`]);
+      for (const e of buckets.mcv) mcv += num(row[`${prefix}_${e}`]);
+      for (const e of buckets.mcv2) mcv2 += num(row[`${prefix}_${e}`]);
+      addTo(
+        agg.get(label)!,
+        num(row[`${prefix}_imp`]),
+        num(row[`${prefix}_click`]),
+        num(row[`${prefix}_charge`]),
+        cv,
+        mcv,
+        mcv2
+      );
+    }
+  }
+  return agg;
 }
 
 /** 照舊 groupDatesByWeek：起始週前的零頭自成一組，之後每 7 天一組 */
@@ -209,8 +262,12 @@ async function fetchRData(
   });
 }
 
-/** 抓 D 報表（照舊 discovery.php main()：campaign → ad → date_reporting，列補帳號/活動/素材欄位） */
-async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) => void): Promise<DRow[]> {
+/** 抓 D 報表（照舊 discovery.php main()：campaign → ad → date_reporting，列補帳號/活動/素材欄位）。
+ *  另抓 campaign 層裝置維度（platform_cv=1）聚合成 deviceAgg（裝置分析工作表用）。 */
+async function fetchDData(
+  input: WeeklyReportInput,
+  onPhase?: (phase: string) => void
+): Promise<{ rows: DRow[]; deviceAgg: Map<string, MetricAgg> }> {
   const token = await getDAccountToken(input.dAccountName);
   if (!token) throw new Error(`找不到 D 帳號「${input.dAccountName}」的 token`);
 
@@ -272,12 +329,14 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
   }
 
   const rows: DRow[] = [];
+  const dataCampaignIds = new Set<string>(); // 實際有資料的 campaign（裝置抓取只打這批，省請求＋避開 Video/Wave 雜訊）
   for (let i = 0; i < items.length; i++) {
     const cam = camMap.get(items[i].campaignId);
     const ad = adMap.get(items[i].adId);
     for (const data of reports[i]) {
       // 防垃圾列：回應形狀異常時別把空殼塞進報表（曾整批產生日期空、全 0 的列）
       if (!data || typeof data !== 'object' || !data.date) continue;
+      dataCampaignIds.add(items[i].campaignId);
       rows.push({
         account_name: cam?.account ?? '',
         campaign_name: cam?.name ?? '',
@@ -287,7 +346,25 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
       });
     }
   }
-  return rows;
+
+  // 裝置維度：對「有資料的 campaign」打 campaign 層 platform_cv=1（ad 層無裝置×事件）。
+  // 失敗或查無只讓裝置分析空白，不影響主報表。
+  let deviceAgg = emptyDeviceAgg();
+  if (dataCampaignIds.size) {
+    onPhase?.(`抓 D 裝置維度中…（${dataCampaignIds.size} 個 campaign）`);
+    try {
+      const deviceRows = await getCampaignDeviceReports(
+        accessToken,
+        [...dataCampaignIds],
+        ymd(input.startDate),
+        ymd(input.endDate)
+      );
+      deviceAgg = aggregateDevices(deviceRows, input.buckets);
+    } catch {
+      onPhase?.('D 裝置維度抓取失敗，裝置分析略過');
+    }
+  }
+  return { rows, deviceAgg };
 }
 
 /** 主流程：並行抓 R+D → 日/週/素材/受眾聚合 ＋ raw */
@@ -304,10 +381,14 @@ export async function buildReport(
     warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
     return fetchRData(input, userType, (m) => warnings.push(m));
   };
-  const [rRaw, dRaw] = await Promise.all([
+  const [rRaw, dResult] = await Promise.all([
     fetchR(),
-    input.dAccountName ? fetchDData(input, onPhase) : Promise.resolve([]),
+    input.dAccountName
+      ? fetchDData(input, onPhase)
+      : Promise.resolve({ rows: [] as DRow[], deviceAgg: emptyDeviceAgg() }),
   ]);
+  const dRaw = dResult.rows;
+  const deviceAgg = dResult.deviceAgg;
   if (input.dAccountName && dRaw.length === 0) {
     warnings.push(`D 帳號「${input.dAccountName}」在走期內查無報表資料`);
   }
@@ -397,7 +478,7 @@ export async function buildReport(
     addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
 
-  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, dRaw, rRaw };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, dRaw, rRaw };
 }
 
 /** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用） */
