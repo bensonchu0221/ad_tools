@@ -147,6 +147,7 @@ async function detectRUserType(input: WeeklyReportInput): Promise<UserType> {
         // 必帶 day 維度：無維度的彙總請求「查無資料也會回一列全 0」，會誤判型別
         dimensions: ['day'],
         metrics: [],
+        maxRows: 1, // 只需判斷有無資料，每段拿 1 列即可（省流量；存在性判斷仍是 rows.length > 0）
       });
       return rows.length > 0;
     } catch {
@@ -164,7 +165,11 @@ async function detectRUserType(input: WeeklyReportInput): Promise<UserType> {
 }
 
 /** 抓 R 報表並標準化成 RRow（照舊 rixbee.php 欄位對應；day 去 dash） */
-async function fetchRData(input: WeeklyReportInput, userType: UserType): Promise<RRow[]> {
+async function fetchRData(
+  input: WeeklyReportInput,
+  userType: UserType,
+  onWarn?: (msg: string) => void
+): Promise<RRow[]> {
   const raw = await fetchReport({
     userType,
     userIds: input.rUserIds,
@@ -172,6 +177,7 @@ async function fetchRData(input: WeeklyReportInput, userType: UserType): Promise
     endDate: input.endDate,
     dimensions: ['day', 'country', 'group_id', 'cr_id', 'cpg_id', 'ad_channel', 'ad_target'],
     metrics: [], // 照舊：不帶 metrics 參數，API 回全部指標（含 behavior0-6）
+    onWarn, // 單段 total 破上限（資料被截斷）時收進 warnings
   });
   return raw.map((item: any) => {
     const row: RRow = {
@@ -288,7 +294,7 @@ export async function buildReport(
     if (!input.rUserIds.length) return [];
     const userType = await detectRUserType(input); // 三種類型自動偵測，查無資料會 throw
     warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
-    return fetchRData(input, userType);
+    return fetchRData(input, userType, (m) => warnings.push(m));
   };
   const [rRaw, dRaw] = await Promise.all([
     fetchR(),
