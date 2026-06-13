@@ -22,7 +22,8 @@ const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW },
   { name: 'D&R 週報', desc: '整合 Discovery + Rixbee 報表產出 Excel 週報', href: WEEKLYREPORT },
   // 站外既有工具（各自獨立服務，僅選單連結）
-  { name: 'R 大量上傳 (Broadciel)', desc: 'r_bulk_upload', href: 'https://r-bulk-upload.example/', external: true },
+  { name: 'R 大量上傳 (Broadciel)', desc: 'r_bulk_upload', href: 'https://cmp.pacnexus.net/cmp', external: true },
+  { name: 'Budget Hunter', desc: '神盾追速', href: 'https://cmp.pacnexus.net/bh', external: true }
 ];
 
 // trustProxy：Cloud Run 由 proxy 終結 TLS，必須信任 X-Forwarded-* 否則 secure cookie 不會送出
