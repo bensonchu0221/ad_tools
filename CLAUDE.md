@@ -32,6 +32,8 @@ popin 內部工具集（取代舊 dctool）。
 - **D campaign 過濾三規則**（老帳號數百個 campaign，全抓 7 分鐘→44 秒）：end_date+N 月（表單選 1/3/6，但很多帳號設 2099 不限期靠不住）、created_at 晚於走期（100% 安全）、updated_at 早於走期前 30 天（實證安全：投放中系統會更新它）。**status 欄位不可用**：當下停用的 campaign 走期內可能投放過（實測 34 個有資料者 25 個 status=0），舊 PHP 註解掉該行應是踩過坑
 - **R 帳號類型（台客/4A/Super）全自動偵測**，表單無此選項；probe 必帶 day 維度（無維度彙總「查無資料也回一列全 0」會誤判）；混型 ID 自動用 Super
 - date_reporting 回應 `data` 可能是 object：照舊 PHP `json_decode(assoc)+foreach` 取「值」（Object.values），用 Array.isArray 判斷會整包當一列（曾因此整份報表空白）
+- **D ad 層 bulk 預掃剪枝**（`popin.ts getAdReportIndex`）：老帳號每週實際有資料的廣告極少（實證 345 支→81 支有資料）；先用 §3.6 bulk 端點 `GET /discovery/api/v2/ad/{sd}/{ed}/date_reporting`（header `CampaignIds` 上限 10、`PageSize` 上限 100，分頁）列出有資料 ad_id，貴的 per-ad date_reporting（**1 req/s per IP，文件標 Strictest，且唯一含 cv_\* 細分**）只打這批 → per-ad 請求省 ~76%、實測端到端 42.7s→11.2s。bulk 缺 cv_* 只能當索引；任一組失敗 try/catch 退回全打（cv_* 仍由 per-ad 取，數字不變，已 poc 對數逐欄相等）。驗收：`poc/verify_d_prune.mts`
+- **popin 限流有兩種**：報表流量 `ReportFlowLimit.operateTooMuch`＋IP 速率 `IpLimit.operateTooMuch`（HTTP 429），兩者皆 `code:1 data:{}`。`http.ts batchFetch` 原本只重試前者，後者會被 `getDateReports` 當「查無資料」回 [] **靜默吞掉→報表數字短少**（併發撞 IP 限流時觸發，現行 per-ad 路徑就中招）；已改為 `status===429 || 訊息含 operateTooMuch` 一律退避重試
 - Excel `xlsx.ts`（ExcelJS）版型照舊 PHP：5 工作表、素材縮圖 300x157、Raw 30 欄；**歷史 quirk：AdAssets 欄放的是 cr_name**（照舊保留）
 - **素材分析以（圖片×文案）配對分組**（`imagehash.ts`）：同圖跨 D/R 平台 URL 不同，用 dHash+pHash 感知雜湊判同圖（兩者 Hamming ≤5/64 才併群，union-find）；縮圖矩陣必須面積平均、不能用 jimp resize（bilinear 大縮＝稀疏取樣，同圖不同尺寸 dHash 實測飆到 12）；下載失敗退回 URL 識別；圖在 report.ts 下載一次、xlsx 重用 buffer
 - R token 三組已在 Secret Manager（rixbee-agency/direct/super-token，userid 用程式預設 7161/7168/7153）；R API status.code != 0 會丟中文錯誤（金鑰錯/每日上限等）

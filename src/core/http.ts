@@ -6,7 +6,12 @@ export interface BatchRequest {
   init?: RequestInit;
 }
 
-const FLOW_LIMIT = '"msg":"ReportFlowLimit.operateTooMuch"';
+// popin 限流有兩種：報表流量限制 ReportFlowLimit.operateTooMuch、IP 速率限制
+// IpLimit.operateTooMuch（HTTP 429）。兩者都 code:1、data 為空，若不重試會被當「查無資料」
+// 靜默吞掉（getDateReports 對空 data 回 []），導致報表數字偷偷短少。一律以 429 或
+// 訊息含 operateTooMuch 判定為限流並重試。
+const isRateLimited = (status: number, text: string) =>
+  status === 429 || text.includes('operateTooMuch');
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -40,8 +45,8 @@ export async function batchFetch(
               signal: req.init?.signal ?? AbortSignal.timeout(timeoutMs),
             });
             const text = await res.text();
-            // popin 流量限制 → 重試
-            if (text.includes('"code":1') && text.includes(FLOW_LIMIT) && attempt < maxRetries) {
+            // popin 限流（IP/報表流量）→ 退避重試
+            if (isRateLimited(res.status, text) && attempt < maxRetries) {
               attempt++;
               await sleep(500 * attempt);
               continue;

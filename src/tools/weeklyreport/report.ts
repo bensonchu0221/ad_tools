@@ -1,7 +1,7 @@
 // D&R 週報資料管線：並行抓 R/D → 標準化 → 三桶轉換累加 → 五視角聚合
 // 忠實移植自 dctool get/rd_weekly_report.php + components/{rixbee,discovery}.php
 import { fetchReport } from '../../core/rixbee.js';
-import { getAccessToken, getCampaigns, getAdLists, getDateReports } from '../../core/popin.js';
+import { getAccessToken, getCampaigns, getAdLists, getDateReports, getAdReportIndex } from '../../core/popin.js';
 import { getDAccountToken } from '../../core/store.js';
 import { downloadImages, clusterImageUrls } from './imagehash.js';
 import type { UserType } from '../../core/rixbee.js';
@@ -242,10 +242,18 @@ async function fetchDData(input: WeeklyReportInput, onPhase?: (phase: string) =>
   onPhase?.(`抓 D 廣告清單中…（${camMap.size}/${campaigns.length} 個 campaign 在走期內）`);
   const ads = await getAdLists(accessToken, [...camMap.keys()], { batchSize: 8 });
   const adMap = new Map<string, any>();
-  const items: { campaignId: string; adId: string }[] = [];
-  for (const ad of ads) {
-    adMap.set(String(ad.mongo_id), ad);
-    items.push({ campaignId: String(ad.campaign), adId: String(ad.mongo_id) });
+  for (const ad of ads) adMap.set(String(ad.mongo_id), ad);
+
+  // bulk 預掃剪枝：老帳號每週實際有資料的廣告極少（實測 345→46）。先用 §3.6 bulk 端點
+  // 列出「有資料的 ad_id」，貴的 per-ad date_reporting（1 req/s、唯一含 cv_* 細分）只打這批。
+  // bulk 缺 cv_* 只能當索引；任一組失敗 → 退回全打（寧可慢不可漏，cv_* 仍由 per-ad 取得，數字不變）。
+  let items = ads.map((ad: any) => ({ campaignId: String(ad.campaign), adId: String(ad.mongo_id) }));
+  try {
+    const dataAdIds = await getAdReportIndex(accessToken, [...camMap.keys()], ymd(input.startDate), ymd(input.endDate));
+    items = items.filter((it) => dataAdIds.has(it.adId));
+    onPhase?.(`D 預掃完成：${items.length}/${ads.length} 支廣告走期內有資料`);
+  } catch {
+    onPhase?.('D 預掃失敗，改為全量抓取');
   }
 
   // 分塊抓報表並回報進度：4A 帳號可能有數百支廣告，整段要數分鐘，

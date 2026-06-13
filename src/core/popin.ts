@@ -173,6 +173,62 @@ export async function getDateReports(
   });
 }
 
+/**
+ * §3.6 Multiple ad reports：用 bulk 端點廉價列出「走期內實際有資料的 ad_id」。
+ * 老帳號每週有資料的廣告極少（實測 345 支中僅 46 支），先用本函式建索引，
+ * 貴的 per-ad date_reporting（1 req/s、且唯一含 cv_* 細分）只打這批 → 省約 87% 請求。
+ * 本端點只回 base 指標、不含 cv_*，故僅能當索引、不能取代 per-ad。
+ * CampaignIds header 上限 10 個／PageSize 上限 100（皆文件限制），逐頁抓到 total 取完。
+ * 任一筆解析失敗（batchFetch 失敗回空字串→JSON.parse 丟錯）會往外拋，由呼叫端退回全打。
+ */
+export async function getAdReportIndex(
+  accessToken: string,
+  campaignIds: string[],
+  startDate: string, // YYYYMMDD
+  endDate: string // YYYYMMDD
+): Promise<Set<string>> {
+  const groups: string[][] = [];
+  for (let i = 0; i < campaignIds.length; i += 10) groups.push(campaignIds.slice(i, i + 10));
+
+  const reqFor = (group: string[], page: number) => ({
+    url: `${BASE}/discovery/api/v2/ad/${startDate}/${endDate}/date_reporting`,
+    init: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        CampaignIds: group.join(','),
+        PageSize: '100',
+        CurrentPage: String(page),
+      },
+    },
+  });
+
+  const dataAdIds = new Set<string>();
+  // 解析單頁，收集 ad_id，回傳該組 total（供判斷是否還有後續頁）；失敗丟錯觸發退回全打
+  const parse = (text: string): number => {
+    const json = JSON.parse(text); // 空字串/壞回應 → throw
+    if (String(json?.code) !== '0') throw new Error(`bulk date_reporting code=${json?.code}`);
+    const detail = json?.data?.detail ?? [];
+    for (const r of detail) if (r?.ad_id != null) dataAdIds.add(String(r.ad_id));
+    return Number(json?.data?.total) || 0;
+  };
+
+  // 先平行抓各組第 1 頁，依 total 補抓超過 100 列的後續頁
+  // batchSize 4：bulk 端點受 IP 速率限制（IpLimit.operateTooMuch / 429），併發太高會狂重試；
+  // batchFetch 已會對 429 退避重試，這裡用較溫和的併發＋多一點重試額度減少抖動
+  const opts = { batchSize: 4, maxRetries: 5 };
+  const firstTexts = await batchFetch(groups.map((g) => reqFor(g, 1)), opts);
+  const morePages: ReturnType<typeof reqFor>[] = [];
+  firstTexts.forEach((text, gi) => {
+    const total = parse(text);
+    for (let page = 2; (page - 1) * 100 < total; page++) morePages.push(reqFor(groups[gi], page));
+  });
+  if (morePages.length) {
+    const moreTexts = await batchFetch(morePages, opts);
+    for (const text of moreTexts) parse(text);
+  }
+  return dataAdIds;
+}
+
 /** popin 圖片網址正規化：移除 __scv 後綴並補回副檔名（對應舊 ad_preview.php） */
 export function normalizePopinImage(url: string): string {
   const m = url.match(/\.([a-zA-Z0-9]+)(?:__scv.*)?$/);
