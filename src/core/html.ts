@@ -19,7 +19,7 @@ export function layout(title: string, body: string, opts: { nav?: boolean } = { 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
-<link rel="icon" type="image/png" href="${FAVICON_DATA_URI}" />
+<link rel="icon" type="image/x-icon" href="${FAVICON_DATA_URI}" />
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 </head>
