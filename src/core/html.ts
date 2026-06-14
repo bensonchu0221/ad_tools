@@ -1,5 +1,6 @@
 // 共用 HTML layout：全站 UI 統一使用 daisyUI（官方 CDN，無 build step）
 // https://daisyui.com/docs/cdn/
+import { FAVICON_DATA_URI } from './favicon.js';
 
 export function layout(title: string, body: string, opts: { nav?: boolean } = { nav: true }): string {
   const nav = opts.nav === false ? '' : `
@@ -18,6 +19,7 @@ export function layout(title: string, body: string, opts: { nav?: boolean } = { 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
+<link rel="icon" type="image/png" href="${FAVICON_DATA_URI}" />
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 </head>
