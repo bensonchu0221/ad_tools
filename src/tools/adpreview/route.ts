@@ -251,7 +251,7 @@ export async function registerAdpreview(app: FastifyInstance) {
         '<span class="loading loading-spinner loading-sm"></span>' +
         '<span id="livePhase" class="text-sm">送出中…</span></div>' +
       '<div class="bg-base-300 flex justify-center">' +
-        '<img id="liveFrame" alt="實況畫面" style="max-width:100%"></div>';
+        '<img id="liveFrame" alt="" style="max-width:100%;display:none"></div>';
     area.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
     fetch('${BASE_PATH}/generate', { method: 'POST', body: fd })
@@ -268,7 +268,7 @@ export async function registerAdpreview(app: FastifyInstance) {
               return;
             }
             if (phaseEl) phaseEl.textContent = s.phase;
-            if (s.frame && frameEl) frameEl.src = 'data:image/jpeg;base64,' + s.frame;
+            if (s.frame && frameEl) { frameEl.src = 'data:image/jpeg;base64,' + s.frame; frameEl.style.display = ''; }
             if (s.viewUrl) {
               clearInterval(pollTimer); pollTimer = null;
               setBusy(false);
