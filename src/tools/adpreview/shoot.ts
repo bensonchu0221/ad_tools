@@ -109,26 +109,58 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
       });
     }
 
-    onPhase('開啟媒體頁面…');
-    await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    lap('goto');
+    // popin 廣告是競價輪播：同一頁未必每次都中標出廣告卡（如中時常被 Taboola 中標），
+    // 故重試最多 ATTEMPTS 次、每次沒抽到真廣告卡就 reload 重抽，直到捲出 adCardClass 為止。
+    const ATTEMPTS = 3;
+    let cardState = { hasAny: false, hasAd: false };
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      onPhase(
+        attempt === 1 ? '開啟媒體頁面…' : `未出廣告，重新整理重抽（第 ${attempt}/${ATTEMPTS} 次）…`
+      );
+      if (attempt === 1) {
+        await page.goto(input.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      } else {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      }
+      lap(`goto#${attempt}`);
 
-    // 捲動找 popin：出現即早停（取代盲捲 8×800ms）
-    onPhase('捲動尋找 popin 廣告位…');
-    let foundCard = false;
-    for (let i = 0; i < 14 && !foundCard; i++) {
-      await page.mouse.wheel(0, 2200);
-      await page.waitForTimeout(250);
-      foundCard = await page.evaluate((sel) => !!document.querySelector(sel), POPIN.card);
+      // 捲動找 popin 廣告卡：出現廣告卡即早停（取代盲捲 8×800ms）
+      onPhase('捲動尋找 popin 廣告版位…');
+      for (let i = 0; i < 14; i++) {
+        await page.mouse.wheel(0, 2200);
+        await page.waitForTimeout(250);
+        cardState = await page.evaluate((sel) => {
+          const cards = [...document.querySelectorAll(sel.card)];
+          return {
+            hasAny: cards.length > 0,
+            hasAd: cards.some((c) => c.classList.contains(sel.adCardClass)),
+          };
+        }, POPIN);
+        if (cardState.hasAd) break;
+      }
+      // 捲完還沒出廣告卡：再給一次機會等 widget 晚載入才填上廣告
+      if (!cardState.hasAd) {
+        const appeared = await page
+          .waitForFunction(
+            (sel) =>
+              [...document.querySelectorAll(sel.card)].some((c) =>
+                c.classList.contains(sel.adCardClass)
+              ),
+            POPIN,
+            { timeout: 8000 }
+          )
+          .then(() => true)
+          .catch(() => false);
+        if (appeared) cardState.hasAd = true;
+      }
+      if (cardState.hasAd) break; // 抽到廣告卡 → 不再重試
     }
-    if (!foundCard) {
-      // 捲完還沒出現：再給一次機會等它 render
-      await page.waitForSelector(POPIN.card, { timeout: 15000 }).catch(() => {
-        throw new Error('找不到 popin 廣告位（該頁可能目前沒有出 popin 廣告，請換一頁或換網址）');
-      });
+    // ATTEMPTS 次都沒廣告卡：有普通推薦卡仍續行（下方 fallback cards[0]），全空才報錯
+    if (!cardState.hasAny) {
+      throw new Error('找不到 popin 廣告位（該頁可能目前沒有出 popin 廣告，請換一頁或換網址）');
     }
     await page.waitForTimeout(1000); // 等 widget 內容填滿
-    lap('found popin');
+    lap(cardState.hasAd ? 'found popin ad' : 'found popin (no ad card, fallback)');
 
     // 鎖定廣告卡並捲進視窗（讓 lazy 縮圖載入）
     onPhase('鎖定廣告卡…');
