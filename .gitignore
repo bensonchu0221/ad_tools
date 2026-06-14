@@ -3,3 +3,5 @@ dist/
 .env
 poc/
 *.log
+.DS_Store
+*.mhtml
