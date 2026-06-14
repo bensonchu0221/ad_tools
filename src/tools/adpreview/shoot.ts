@@ -125,6 +125,10 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
       lap(`goto#${attempt}`);
 
       // 捲動找 popin 廣告卡：出現廣告卡即早停（取代盲捲 8×800ms）
+      // 已知弱點：步距 2200 > viewport 900，每兩步間留 ~1300px 盲區從未進視窗；若某媒體的 popin
+      //   廣告位靠 IntersectionObserver「進視窗才載入」且剛好落在盲區，理論上會漏。目前 verified 媒體
+      //   皆未遇到（中時是 popin script 整個沒注入、非盲區，見 media.ts）。真遇到「widget 在卻抓不到」
+      //   再把步距縮到 ≤viewport 高度消盲區（找到即 break，正常情況不會變慢）。
       onPhase('捲動尋找 popin 廣告版位…');
       for (let i = 0; i < 14; i++) {
         await page.mouse.wheel(0, 2200);

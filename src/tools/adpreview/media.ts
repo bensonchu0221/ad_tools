@@ -45,9 +45,10 @@ export const MEDIA: Media[] = [
     device: 'mobile',
   },
   // 以下實測（2026-06-12）出不了 popin 卡片，保留入口、待找到能出的頁面再翻 verified：
-  // chinatimes：實測（2026-06-14）同一 URL headless 桌機×6＋手機 全 0 卡片（對照 cnyes headless
-  //   正常出卡），故非單純競價機率，而是 headless/自動化環境拿不到卡 → openAndSwap 的 reload 重抽
-  //   在同環境救不了；真人瀏覽器 reload 看得到是另一回事。維持 false
+  // chinatimes：實測（2026-06-14）此 URL 在 headless 環境連 popin script/widget 都沒被注入頁面
+  //   （慢捲消盲區×3 仍 popinScript:false widget:false card:0；對照 cnyes 同捲法穩定出 6 卡 3 廣告），
+  //   故非捲動快慢、也非競價機率，而是中時的 loader 對 headless/自動化不掛 popin → reload 或改捲動步距
+  //   都救不了；真人瀏覽器看得到是另一回事。維持 false
   { id: 'chinatimes', name: '中時新聞網', url: 'https://www.chinatimes.com/realtimenews/20260612002824-260410?chdtv', verified: false },
   // edh：popin 用跨域 iframe 模式（popin.cc/iframe/code.html）載入，不在主頁 DOM，現行替換方式搆不到
   { id: 'edh', name: '早安健康', url: 'https://www.edh.tw/articles/sCl1xVH', verified: false },
