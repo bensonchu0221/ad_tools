@@ -90,11 +90,15 @@ export async function syncFromDctool(): Promise<void> {
   try {
     await conn.beginTransaction();
     for (const r of list) {
+      // account_id 唯一：鏡像 upsert 但「不覆蓋已被手動(adtools)接管」的帳號——
+      // IF(現有 source='dctool', 用新值, 保留)。手動編輯過的 token/名稱不會被 30s 鏡像蓋回。
       await conn.query(
         `INSERT INTO ${TOKENS_DB}.d_tokens (account_id, account_name, account_source, token, source)
          VALUES (?, ?, ?, ?, 'dctool')
-         ON DUPLICATE KEY UPDATE account_name = VALUES(account_name),
-           account_source = VALUES(account_source), token = VALUES(token)`,
+         ON DUPLICATE KEY UPDATE
+           account_name   = IF(source = 'dctool', VALUES(account_name), account_name),
+           account_source = IF(source = 'dctool', VALUES(account_source), account_source),
+           token          = IF(source = 'dctool', VALUES(token), token)`,
         [String(r.account_id), r.account_name, r.account_source ?? null, r.Token]
       );
     }
@@ -186,8 +190,10 @@ export async function getDAccountToken(accountName: string): Promise<string | nu
 export async function addToken(input: { accountName: string; token: string; accountId?: string }): Promise<void> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
+  // account_id 唯一：手動新增＝upsert，無條件覆蓋並標記 adtools（接管該帳號，鏡像之後不再蓋）
   await p.query(
-    `INSERT INTO ${TOKENS_DB}.d_tokens (account_id, account_name, token, source) VALUES (?, ?, ?, 'adtools')`,
+    `INSERT INTO ${TOKENS_DB}.d_tokens (account_id, account_name, token, source) VALUES (?, ?, ?, 'adtools')
+     ON DUPLICATE KEY UPDATE account_name = VALUES(account_name), token = VALUES(token), source = 'adtools'`,
     [input.accountId || null, input.accountName.trim(), input.token.trim()]
   );
 }
