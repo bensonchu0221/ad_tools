@@ -59,9 +59,11 @@ popin 內部工具集（取代舊 dctool）。
 - Cloud SQL(MySQL 8.4) 走 TCP 必須帶 ssl 參數（caching_sha2_password）；unix socket 不用
 - **本機連 GCP DB（驗證用）**：`cloud-sql-proxy popinpoc1:asia-east1:internal-tool --port 3307 --quota-project popinpoc1`（`--quota-project` 必帶，本機 ADC 綁別的專案會 403）＋ `.env` 設 `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off`（走 proxy 時 MySQL 層不能再開 TLS，store.ts 有 DB_SSL=off 開關）；DB 密碼在 Secret Manager `ad-tools-timeoff-db-password`
 
-## 診斷端點（需 DIAG_KEY，在 Cloud Run env）
+## 診斷端點 / 排程 webhook（需 DIAG_KEY，在 Cloud Run env）
 - `/health/popin?key=...&url=...&device=mobile`：伺服器端實測該頁出不出 popin（機房 IP）
 - `/health/db?key=...`：token DB 與舊庫同步狀態
+- `/tools/adstream/cron?key=...`：AdStream 排程入口（Cloud Scheduler `adstream-daily` POST）
+- **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 待辦
 - 選單裡 r_bulk_upload 連結是 placeholder
