@@ -3,6 +3,7 @@
 popin 內部工具集（取代舊 dctool）。
 - tool#1＝廣告預覽：在「真實媒體文章頁」的 popin 廣告位換上廣告主素材後供 AM 截圖，取代舊 PPT 產出。
 - tool#2＝D&R 週報：整合 Discovery + Rixbee 報表產出 Excel（日/週/素材/受眾/Raw 五工作表），取代舊 weeklyreport。
+- tool#3＝AdStream（廣告凝視者）：多 D 帳戶 bulk 原始報表（13 欄）定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw。
 
 ## 溝通與程式規範
 - 一律使用繁體中文回答；重要業務邏輯加中文註解
@@ -33,6 +34,7 @@ popin 內部工具集（取代舊 dctool）。
 - **R 帳號類型（台客/4A/Super）全自動偵測**，表單無此選項；probe 必帶 day 維度（無維度彙總「查無資料也回一列全 0」會誤判）；混型 ID 自動用 Super
 - date_reporting 回應 `data` 可能是 object：照舊 PHP `json_decode(assoc)+foreach` 取「值」（Object.values），用 Array.isArray 判斷會整包當一列（曾因此整份報表空白）
 - **D ad 層 bulk 預掃剪枝**（`popin.ts getAdReportIndex`）：老帳號每週實際有資料的廣告極少（實證 345 支→81 支有資料）；先用 §3.6 bulk 端點 `GET /discovery/api/v2/ad/{sd}/{ed}/date_reporting`（header `CampaignIds` 上限 10、`PageSize` 上限 100，分頁）列出有資料 ad_id，貴的 per-ad date_reporting（**1 req/s per IP，文件標 Strictest，且唯一含 cv_\* 細分**）只打這批 → per-ad 請求省 ~76%、實測端到端 42.7s→11.2s。bulk 缺 cv_* 只能當索引；任一組失敗 try/catch 退回全打（cv_* 仍由 per-ad 取，數字不變，已 poc 對數逐欄相等）。驗收：`poc/verify_d_prune.mts`
+- **⚠️ bulk 端點單次日期區間上限 7 天**：>7 天回 `code=80008`（"The date range cannot exceed 7 days"）。`getAdReportBulk`／`getAdReportIndex` 已內部自動切 7 天一段（依序避免 IP 限流）再合併；`getAdReportIndex` 現直接複用 `getAdReportBulk` 取 ad_id。（修前週報 >7 天會靜默退回全打＝剪枝失效變慢，數字仍對）
 - **popin 限流有兩種**：報表流量 `ReportFlowLimit.operateTooMuch`＋IP 速率 `IpLimit.operateTooMuch`（HTTP 429），兩者皆 `code:1 data:{}`。`http.ts batchFetch` 原本只重試前者，後者會被 `getDateReports` 當「查無資料」回 [] **靜默吞掉→報表數字短少**（併發撞 IP 限流時觸發，現行 per-ad 路徑就中招）；已改為 `status===429 || 訊息含 operateTooMuch` 一律退避重試
 - Excel `xlsx.ts`（ExcelJS）版型照舊 PHP：5 工作表、素材縮圖 300x157、Raw 30 欄；**歷史 quirk：AdAssets 欄放的是 cr_name**（照舊保留）
 - **素材分析以（圖片×文案）配對分組**（`imagehash.ts`）：同圖跨 D/R 平台 URL 不同，用 dHash+pHash 感知雜湊判同圖（兩者 Hamming ≤5/64 才併群，union-find）；縮圖矩陣必須面積平均、不能用 jimp resize（bilinear 大縮＝稀疏取樣，同圖不同尺寸 dHash 實測飆到 12）；下載失敗退回 URL 識別；圖在 report.ts 下載一次、xlsx 重用 buffer
@@ -40,6 +42,17 @@ popin 內部工具集（取代舊 dctool）。
 - 產出走 job 輪詢（TTL 10 分＋10 分 watchdog），不同步回傳；Cloud Run 開 session-affinity（job 在 instance 記憶體）
 - 日期上限 30 天；D 列日期 `Y-m-d`、R 列 `Ymd`、daily 鍵 `Ymd`（移植時別搞混）
 - 驗證腳本：`poc/verify_weekly_d.mts`（D 管線+逐日對數）、`poc/verify_campaign_filter.mts`（過濾規則安全性實證）、`poc/verify_image_hash.mts`（感知雜湊分群；`REAL=1` 加跑真實素材，會連舊 DB 讀 token）
+
+## AdStream / 廣告凝視者核心（tool#3）
+- 目的：把多個 D 帳戶的 **bulk 原始報表（13 欄）** 定期 append 到使用者指定 Google Sheet 的固定分頁 **`d_bulk_raw_data`**。R 暫不做但保留擴充。
+- 程式：設定/狀態 `core/store.ts`（表 `adstream_configs`，本工具自管 CRUD + `markBulkRun`）；同步核心 `tools/adstream/run.ts`；路由/UI `tools/adstream/route.ts`（route base `/tools/adstream`）
+- 抓取欄位（實測 13 欄）：`date, imp, click, ctr, cpc, cpm, charge, cv, cvr, mcv, campaign_id, campaign_name, ad_id`（bulk 無 cv_*）；寫 sheet 時前面再補 `account_name, synced_at`（共 15 欄）
+- **增量規則**：每次抓「上次同步日隔天 → 昨天(T-1)」；無上次同步日就從設定的回補起始日起 → 首次回補/每日 T-1/漏跑補抓同一條規則涵蓋。`runConfig` 為**原子性**：任一帳號失敗即拋錯、不寫 sheet、呼叫端不推進 `last_synced_date`（避免部分成功推進造成資料缺漏或重跑重複 append）
+- 日期區間靠 `getAdReportBulk`（已自動切 7 天一段，見上 §週報 bulk 7 天限制）
+- **Google Sheet 寫入 `core/gsheets.ts`**：用 **ADC（無金鑰）**，線上自動用 Cloud Run SA `439393162392-compute@developer.gserviceaccount.com`、本機用開發者 gcloud 使用者憑證（測試 sheet 需分享給本人）。使用者需把該 SA 加為目標 Sheet **編輯者**；scope `spreadsheets`；`sheets/drive API` 已啟用；大量列分批 5000 append
+- **排程**：Cloud Scheduler job `adstream-daily`（asia-east1）每日 09:00 Asia/Taipei POST `…/tools/adstream/cron?key=<DIAG_KEY>`（cron 端點沿用 DIAG_KEY 守衛）；手動執行走 in-memory job 輪詢，但權威狀態寫 DB（`last_run_*`/`last_synced_date`）
+- 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
+- 驗證：`poc/probe_adstream_bulk.mts`（80008 根因＋切段）
 
 ## DB（D 帳號 token）
 - Cloud SQL `internal-tool` 的 `ad_tools.d_tokens`：`source='dctool'`＝舊 dctool DB（AWS 13.231.111.229:3001/popin_tw_new，唯讀）讀取時 30s 節流自動鏡像同步；`source='adtools'`＝自管可 CRUD
@@ -53,3 +66,4 @@ popin 內部工具集（取代舊 dctool）。
 ## 待辦
 - 選單裡 r_bulk_upload 連結是 placeholder
 - 週報資料層已本機全鏈路對數驗證（D+R，2026-06-13）；剩使用者線上 UI 重跑一次最終確認＋與後台對數
+- AdStream：線上端到端尚未成功跑過一次（部署後需把 SA 加為 Sheet 編輯者→建設定→立即執行驗證）；R 端尚未接
