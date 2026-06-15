@@ -263,6 +263,60 @@ export async function getAdReportIndex(
   return dataAdIds;
 }
 
+/**
+ * §3.6 Multiple ad reports（bulk）：抓回 detail[] 每列「全部欄位」。
+ * 與 getAdReportIndex 同端點/分頁/限流，但保留整列而非只取 ad_id，給 AdStream 用。
+ * 實測每列 13 欄：date, imp, click, ctr, cpc, cpm, charge, cv, cvr, mcv,
+ * campaign_id, campaign_name, ad_id（per-ad per-date，無 cv_* 細分）。
+ * CampaignIds header 上限 10／PageSize 上限 100，逐頁抓到 total 取完。
+ * 任一筆解析失敗會往外拋，由呼叫端決定如何處理。
+ */
+export async function getAdReportBulk(
+  accessToken: string,
+  campaignIds: string[],
+  startDate: string, // YYYYMMDD
+  endDate: string // YYYYMMDD
+): Promise<any[]> {
+  const groups: string[][] = [];
+  for (let i = 0; i < campaignIds.length; i += 10) groups.push(campaignIds.slice(i, i + 10));
+
+  const reqFor = (group: string[], page: number) => ({
+    url: `${BASE}/discovery/api/v2/ad/${startDate}/${endDate}/date_reporting`,
+    init: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        CampaignIds: group.join(','),
+        PageSize: '100',
+        CurrentPage: String(page),
+      },
+    },
+  });
+
+  const rows: any[] = [];
+  // 解析單頁，收集整列，回傳該組 total（供判斷是否還有後續頁）；失敗丟錯
+  const parse = (text: string): number => {
+    const json = JSON.parse(text); // 空字串/壞回應 → throw
+    if (String(json?.code) !== '0') throw new Error(`bulk date_reporting code=${json?.code}`);
+    const detail = json?.data?.detail ?? [];
+    for (const r of detail) if (r && typeof r === 'object') rows.push(r);
+    return Number(json?.data?.total) || 0;
+  };
+
+  // 併發與重試額度同 getAdReportIndex（bulk 受 IP 速率限制）
+  const opts = { batchSize: 4, maxRetries: 5 };
+  const firstTexts = await batchFetch(groups.map((g) => reqFor(g, 1)), opts);
+  const morePages: ReturnType<typeof reqFor>[] = [];
+  firstTexts.forEach((text, gi) => {
+    const total = parse(text);
+    for (let page = 2; (page - 1) * 100 < total; page++) morePages.push(reqFor(groups[gi], page));
+  });
+  if (morePages.length) {
+    const moreTexts = await batchFetch(morePages, opts);
+    for (const text of moreTexts) parse(text);
+  }
+  return rows;
+}
+
 /** popin 圖片網址正規化：移除 __scv 後綴並補回副檔名（對應舊 ad_preview.php） */
 export function normalizePopinImage(url: string): string {
   const m = url.match(/\.([a-zA-Z0-9]+)(?:__scv.*)?$/);

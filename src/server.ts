@@ -7,6 +7,7 @@ import { registerAuth } from './core/auth.js';
 import { layout } from './core/html.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyreport/route.js';
+import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics } from './core/store.js';
@@ -21,6 +22,7 @@ interface Tool {
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW },
   { name: 'D&R 週報', desc: '整合 Discovery + Rixbee 報表產出 Excel 週報', href: WEEKLYREPORT },
+  { name: '廣告凝視者', desc: '多 D 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM },
   // 站外既有工具（各自獨立服務，僅選單連結）
   { name: 'R 大量上傳 (Broadciel)', desc: 'r_bulk_upload', href: 'https://cmp.pacnexus.net/cmp', external: true },
   { name: 'Budget Hunter', desc: '神盾追速', href: 'https://cmp.pacnexus.net/bh', external: true }
@@ -81,6 +83,7 @@ app.get('/health/db', async (req, reply) => {
 
 await registerAdpreview(app);
 await registerWeeklyReport(app);
+await registerAdstream(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));
