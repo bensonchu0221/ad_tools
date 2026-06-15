@@ -56,7 +56,8 @@ popin 內部工具集（取代舊 dctool）。
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
 
 ## DB（D 帳號 token）
-- Cloud SQL `internal-tool` 的 `ad_tools.d_tokens`：`source='dctool'`＝舊 dctool DB（AWS 13.231.111.229:3001/popin_tw_new，唯讀）讀取時 30s 節流自動鏡像同步；`source='adtools'`＝自管可 CRUD
+- **共用庫 `nexus.d_tokens`**（Cloud SQL `internal-tool`，跨工具共用單一真相）：`source='dctool'`＝舊 dctool DB（AWS 13.231.111.229:3001/popin_tw_new，唯讀）讀取時 30s 節流自動鏡像同步；`source='adtools'`＝自管可 CRUD。`store.ts` 用常數 `TOKENS_DB`(預設 `nexus`，可 env 覆蓋) 限定表，本工具自管表(adstream_configs 等)仍在連線預設庫 `ad_tools`；同實例跨庫查，`popin` 有 *.* 權限
+- **整合沿革**：原本 D token 在兩處重複——`ad_tools.d_tokens`(本工具) 與 `budget_hunter.bh_d_account_token`(BH)，各自鏡像舊 AWS dctool 已開始漂移。2026-06-16 抽出共用 `nexus.d_tokens`(階段 1：本工具改讀寫它，`migrate_nexus_d_tokens.mts` 建庫+灌入)。**待辦階段 2**：Budget Hunter 改讀 `nexus.d_tokens`、停用 `bh_d_account_token`；穩定後收掉 legacy `ad_tools.d_tokens`(已不再寫入)
 - Cloud SQL(MySQL 8.4) 走 TCP 必須帶 ssl 參數（caching_sha2_password）；unix socket 不用
 - **本機連 GCP DB（驗證用）**：`cloud-sql-proxy popinpoc1:asia-east1:internal-tool --port 3307 --quota-project popinpoc1`（`--quota-project` 必帶，本機 ADC 綁別的專案會 403）＋ `.env` 設 `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off`（走 proxy 時 MySQL 層不能再開 TLS，store.ts 有 DB_SSL=off 開關）；DB 密碼在 Secret Manager `ad-tools-timeoff-db-password`
 

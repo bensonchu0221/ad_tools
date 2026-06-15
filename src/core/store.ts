@@ -1,9 +1,11 @@
-// D 帳號 token 儲存：新庫 ad_tools.d_tokens（Cloud SQL internal-tool）
+// D 帳號 token 儲存：共用庫 nexus.d_tokens（Cloud SQL internal-tool，跨工具共用單一真相）
 // 資料模型：
 //   source='dctool'  → 舊 dctool DB 的鏡像（唯讀，由 syncFromDctool 維護）
 //   source='adtools' → 本工具自管（可新增/修改/刪除）
 // 讀取帳號清單時自動觸發節流同步（30 秒）；同步失敗只記 log，回傳既有鏡像（stale 可用）。
 // 舊 DB 永遠唯讀，不寫入。
+// 注意：token 表放在共用庫 nexus（不是連線預設的 DB_NAME=ad_tools），故查詢一律用 ${TOKENS_DB} 限定；
+// adstream_configs 等本工具自管表仍在 ad_tools（連線預設庫）。同實例跨庫查，popin 有 *.* 權限。
 import mysql from 'mysql2/promise';
 
 export interface DAccountRow {
@@ -16,6 +18,8 @@ export interface DAccountRow {
 }
 
 const SYNC_TTL_MS = 30_000;
+// token 共用庫名（可用 env 覆蓋）；d_tokens 放這、其餘本工具表放連線預設庫
+const TOKENS_DB = process.env.TOKENS_DB ?? 'nexus';
 
 let pool: mysql.Pool | null = null;
 let oldPool: mysql.Pool | null = null;
@@ -87,7 +91,7 @@ export async function syncFromDctool(): Promise<void> {
     await conn.beginTransaction();
     for (const r of list) {
       await conn.query(
-        `INSERT INTO d_tokens (account_id, account_name, account_source, token, source)
+        `INSERT INTO ${TOKENS_DB}.d_tokens (account_id, account_name, account_source, token, source)
          VALUES (?, ?, ?, ?, 'dctool')
          ON DUPLICATE KEY UPDATE account_name = VALUES(account_name),
            account_source = VALUES(account_source), token = VALUES(token)`,
@@ -98,7 +102,7 @@ export async function syncFromDctool(): Promise<void> {
     const ids = list.map((r) => String(r.account_id));
     if (ids.length > 0) {
       await conn.query(
-        `DELETE FROM d_tokens WHERE source = 'dctool' AND account_id NOT IN (${ids.map(() => '?').join(',')})`,
+        `DELETE FROM ${TOKENS_DB}.d_tokens WHERE source = 'dctool' AND account_id NOT IN (${ids.map(() => '?').join(',')})`,
         ids
       );
     }
@@ -147,7 +151,7 @@ export async function listDAccounts(): Promise<DAccountRow[]> {
   await throttledSync();
   const [rows] = await p.query(
     `SELECT id, account_id, account_name, account_source, source, updated_time
-     FROM d_tokens ORDER BY account_name`
+     FROM ${TOKENS_DB}.d_tokens ORDER BY account_name`
   );
   return (rows as any[]).map((r) => ({
     id: r.id,
@@ -164,7 +168,7 @@ export async function getDAccountToken(accountName: string): Promise<string | nu
   const p = getPool();
   if (!p) return null;
   const [rows] = await p.query(
-    `SELECT token FROM d_tokens WHERE account_name = ?
+    `SELECT token FROM ${TOKENS_DB}.d_tokens WHERE account_name = ?
      ORDER BY source = 'adtools' DESC, updated_time DESC LIMIT 1`,
     [accountName]
   );
@@ -176,7 +180,7 @@ export async function addToken(input: { accountName: string; token: string; acco
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
   await p.query(
-    `INSERT INTO d_tokens (account_id, account_name, token, source) VALUES (?, ?, ?, 'adtools')`,
+    `INSERT INTO ${TOKENS_DB}.d_tokens (account_id, account_name, token, source) VALUES (?, ?, ?, 'adtools')`,
     [input.accountId || null, input.accountName.trim(), input.token.trim()]
   );
 }
@@ -193,7 +197,7 @@ export async function updateToken(id: number, input: { accountName: string; toke
   }
   params.push(id);
   const [res] = await p.query(
-    `UPDATE d_tokens SET ${sets.join(', ')} WHERE id = ? AND source = 'adtools'`,
+    `UPDATE ${TOKENS_DB}.d_tokens SET ${sets.join(', ')} WHERE id = ? AND source = 'adtools'`,
     params
   );
   return (res as any).affectedRows > 0; // dctool 鏡像列不可改
@@ -202,7 +206,7 @@ export async function updateToken(id: number, input: { accountName: string; toke
 export async function deleteToken(id: number): Promise<boolean> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
-  const [res] = await p.query(`DELETE FROM d_tokens WHERE id = ? AND source = 'adtools'`, [id]);
+  const [res] = await p.query(`DELETE FROM ${TOKENS_DB}.d_tokens WHERE id = ? AND source = 'adtools'`, [id]);
   return (res as any).affectedRows > 0; // dctool 鏡像列不可刪
 }
 
@@ -388,7 +392,7 @@ export async function dbDiagnostics() {
   const p = getPool();
   if (!p) return { ok: false, error: 'DB 未設定' };
   const [rows] = await p.query(
-    `SELECT source, COUNT(*) AS n FROM d_tokens GROUP BY source`
+    `SELECT source, COUNT(*) AS n FROM ${TOKENS_DB}.d_tokens GROUP BY source`
   );
   const counts: Record<string, number> = {};
   for (const r of rows as any[]) counts[r.source] = r.n;
