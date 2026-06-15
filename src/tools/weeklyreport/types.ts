@@ -115,7 +115,7 @@ export interface ReportResult {
   assets: AssetAgg[]; // 按 spend 降序
   images: Map<string, { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' } | null>; // 已下載素材圖（key=原URL），xlsx 縮圖重用
   audiences: Map<string, MetricAgg>; // key=campaign_name(D)/groupname(R)
-  deviceAgg: Map<string, MetricAgg>; // key=裝置(PC/Mobile/Tablet/Xbox)；僅 D 端（R 無裝置維度）
+  deviceAgg: Map<string, MetricAgg>; // key=裝置(PC/Mobile/Tablet/Others)；D 端只填 PC/Mobile，R 端 device_type 補滿四桶
   dRaw: DRow[];
   rRaw: RRow[];
 }

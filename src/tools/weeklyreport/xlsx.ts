@@ -252,15 +252,15 @@ export async function buildXlsx(
   for (let c = 2; c <= 13; c++) s4.getColumn(c).width = 14;
   for (let r = 3; r <= r4; r++) s4.getRow(r).height = 40;
 
-  // ---------- Sheet 5：裝置分析（D 端 campaign 層 platform_cv；裝置列 × 標準指標欄） ----------
-  // 沿用總覽版型；R 無裝置維度，故僅 D 端，於標題註明。
+  // ---------- Sheet 5：裝置分析（裝置列 × 標準指標欄） ----------
+  // 沿用總覽版型。D 端 campaign 層 platform_cv 只填得了 PC/Mobile；R 端 device_type 補 PC/Mobile/Tablet/Others。
   const sDevice = wb.addWorksheet('裝置分析');
   writeSummarySheet(
     sDevice,
     result.dateRangeString,
     [...result.deviceAgg.entries()].map(([label, m]) => ({ label, m }))
   );
-  sDevice.getCell('A1').value = `報表走期：${result.dateRangeString}（※裝置維度僅 D 端，R 無此資料）`;
+  sDevice.getCell('A1').value = `報表走期：${result.dateRangeString}（裝置：D 端僅 PC/Mobile，R 端 device_type 含 Tablet/Others）`;
 
   // ---------- Sheet 6：Raw_Data（D/R 合併原始列，欄位照舊 30 欄；無框線樣式照舊） ----------
   onPhase?.('產生 Excel 中…');

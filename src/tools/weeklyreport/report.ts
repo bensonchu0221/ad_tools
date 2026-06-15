@@ -88,24 +88,41 @@ function addTo(agg: MetricAgg, imp: number, click: number, spend: number, cv: nu
   agg.mcv2 += mcv2;
 }
 
-// 裝置維度（campaign 層 platform_cv=1 回應的欄位前綴）。R 端無此維度。
-// 只列 PC/Mobile：實測 API 對 Tablet/Xbox 不回 imp/click/charge/cv（僅 mcv+cv事件），
-// 曝光/花費恆為 0、整列意義有限，故不納入（見 poc/verify_d_device.mts）。
-const DEVICES = [
+// 裝置分析的固定桶與排序。D 端只填得了 PC/Mobile（campaign 層 platform_cv=1
+// 對 Tablet/Xbox 不回 imp/click/charge，僅 mcv+cv事件，見 poc/verify_d_device.mts）；
+// Tablet/Others 由 R 的 device_type 維度補上（見 R_DEVICE_BUCKET / fetchRDeviceAgg）。
+const DEVICE_LABELS = ['PC', 'Mobile', 'Tablet', 'Others'] as const;
+
+// D campaign 層裝置回應的欄位前綴 → 桶（只有 PC/Mobile 有 base 指標）
+const D_DEVICES = [
   { prefix: 'pc', label: 'PC' },
   { prefix: 'mobile', label: 'Mobile' },
 ] as const;
 
-/** 4 裝置零值聚合（無 D 或查無裝置資料時用） */
+// R device_type 代碼 → 裝置桶。文件(help_report)：2=Desktop、1=Mobile、5=Tablet、
+// 3=TV Device、7=Set Top Box。依需求 Desktop→PC、Mobile→Mobile、Tablet→Tablet、其餘→Others。
+// （代碼 4 文件同時標「Mobile」與「Connected Device」自相矛盾、實測也未出現，一律歸 Others。）
+const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5': 'Tablet' };
+const rDeviceBucket = (code: any): string => R_DEVICE_BUCKET[String(code)] ?? 'Others';
+
+/** 裝置桶零值聚合（PC/Mobile/Tablet/Others；無資料時用） */
 function emptyDeviceAgg(): Map<string, MetricAgg> {
-  return new Map(DEVICES.map((d) => [d.label, emptyAgg()]));
+  return new Map(DEVICE_LABELS.map((l) => [l, emptyAgg()]));
+}
+
+/** 把 from 的各裝置桶累加進 into（合併 D 與 R 的裝置聚合） */
+function mergeDeviceAgg(into: Map<string, MetricAgg>, from: Map<string, MetricAgg>) {
+  for (const [label, m] of from) {
+    const t = into.get(label);
+    if (t) addTo(t, m.imp, m.click, m.spend, m.cv, m.mcv, m.mcv2);
+  }
 }
 
 /**
  * 把 campaign 層裝置回應列依裝置聚合。轉換口徑與 calcConversions 一致：
  * 各裝置 cv/mcv 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
  * mcv2 無 API 基底，純分桶。base 指標取 {prefix}_imp/click/charge。
- * 只處理 PC/Mobile（DEVICES）：API 對 Tablet/Xbox 不回 base 指標，見 DEVICES 註解。
+ * 只處理 PC/Mobile（D_DEVICES）：API 對 Tablet/Xbox 不回 base 指標，見 D_DEVICES 註解。
  */
 function aggregateDevices(
   deviceRows: any[],
@@ -113,7 +130,7 @@ function aggregateDevices(
 ): Map<string, MetricAgg> {
   const agg = emptyDeviceAgg();
   for (const row of deviceRows) {
-    for (const { prefix, label } of DEVICES) {
+    for (const { prefix, label } of D_DEVICES) {
       let cv = num(row[`${prefix}_cv`]);
       let mcv = num(row[`${prefix}_mcv`]);
       let mcv2 = 0;
@@ -262,6 +279,46 @@ async function fetchRData(
   });
 }
 
+/**
+ * 抓 R 裝置維度（device_type）並依桶聚合（裝置分析工作表用）。
+ * 與主管線口徑一致：behaviorN 轉友善名後走 calcConversions；base 取 impression/click/payment_revenue。
+ * 失敗或查無只讓 R 部分留空，不影響主報表（故內部 try/catch 吞錯回零值聚合）。
+ */
+async function fetchRDeviceAgg(
+  input: WeeklyReportInput,
+  userType: UserType,
+  buckets: WeeklyReportInput['buckets']
+): Promise<Map<string, MetricAgg>> {
+  const agg = emptyDeviceAgg();
+  try {
+    const raw = await fetchReport({
+      userType,
+      userIds: input.rUserIds,
+      startDate: input.startDate,
+      endDate: input.endDate,
+      dimensions: ['device_type'],
+      metrics: [], // 照舊不帶 metrics＝回全部指標（含 behavior0-6）
+    });
+    for (const item of raw) {
+      const row: Record<string, any> = {};
+      for (const [behavior, name] of Object.entries(R_BEHAVIOR_MAP)) row[name] = num(item[behavior]);
+      const [cv, mcv, mcv2] = calcConversions(row, buckets);
+      addTo(
+        agg.get(rDeviceBucket(item.device_type))!,
+        num(item.impression),
+        num(item.click),
+        num(item.payment_revenue),
+        cv,
+        mcv,
+        mcv2
+      );
+    }
+  } catch {
+    /* R 裝置維度抓取失敗：保留零值聚合，不影響主報表 */
+  }
+  return agg;
+}
+
 /** 抓 D 報表（照舊 discovery.php main()：campaign → ad → date_reporting，列補帳號/活動/素材欄位）。
  *  另抓 campaign 層裝置維度（platform_cv=1）聚合成 deviceAgg（裝置分析工作表用）。 */
 async function fetchDData(
@@ -375,20 +432,27 @@ export async function buildReport(
   const warnings: string[] = [];
 
   onPhase?.('抓取 R / D 報表中…');
-  const fetchR = async (): Promise<RRow[]> => {
-    if (!input.rUserIds.length) return [];
+  const fetchR = async (): Promise<{ rows: RRow[]; deviceAgg: Map<string, MetricAgg> }> => {
+    if (!input.rUserIds.length) return { rows: [], deviceAgg: emptyDeviceAgg() };
     const userType = await detectRUserType(input); // 三種類型自動偵測，查無資料會 throw
     warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
-    return fetchRData(input, userType, (m) => warnings.push(m));
+    const [rows, deviceAgg] = await Promise.all([
+      fetchRData(input, userType, (m) => warnings.push(m)),
+      fetchRDeviceAgg(input, userType, input.buckets),
+    ]);
+    return { rows, deviceAgg };
   };
-  const [rRaw, dResult] = await Promise.all([
+  const [rResult, dResult] = await Promise.all([
     fetchR(),
     input.dAccountName
       ? fetchDData(input, onPhase)
       : Promise.resolve({ rows: [] as DRow[], deviceAgg: emptyDeviceAgg() }),
   ]);
+  const rRaw = rResult.rows;
   const dRaw = dResult.rows;
+  // 裝置分析：D 端 platform_cv 只填得了 PC/Mobile，R 端 device_type 補 PC/Mobile/Tablet/Others（同桶累加）
   const deviceAgg = dResult.deviceAgg;
+  mergeDeviceAgg(deviceAgg, rResult.deviceAgg);
   if (input.dAccountName && dRaw.length === 0) {
     warnings.push(`D 帳號「${input.dAccountName}」在走期內查無報表資料`);
   }
