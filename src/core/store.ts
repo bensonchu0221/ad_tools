@@ -213,7 +213,8 @@ export interface BulkConfigRow {
   name: string;
   sheetUrl: string;
   sheetId: string;
-  accountNames: string[]; // 多個 D 帳號名稱（對應 d_tokens.account_name）
+  accountNames: string[]; // 多個 D 帳號名稱（對應 d_tokens.account_name）；可空＝不抓 D
+  rUserIds: string[]; // 多個 Rixbee Account ID；可空＝不抓 R
   backfillStartDate: string; // YYYY-MM-DD
   lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過
   lastRunAt: string | null;
@@ -227,6 +228,7 @@ export interface BulkConfigInput {
   sheetUrl: string;
   sheetId: string;
   accountNames: string[];
+  rUserIds: string[];
   backfillStartDate: string; // YYYY-MM-DD
 }
 
@@ -241,6 +243,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       sheet_url TEXT NOT NULL,
       sheet_id VARCHAR(128) NOT NULL,
       account_names TEXT NOT NULL,
+      r_user_ids TEXT NULL,
       backfill_start_date DATE NOT NULL,
       last_synced_date DATE NULL,
       last_run_at DATETIME NULL,
@@ -249,11 +252,21 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) DEFAULT CHARSET=utf8mb4`
   );
+  // 既有表（早於 R 支援）補欄位：MySQL 無 ADD COLUMN IF NOT EXISTS，先查 information_schema
+  const dbName = process.env.DB_NAME ?? 'ad_tools';
+  const [cols] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'adstream_configs' AND column_name = 'r_user_ids'`,
+    [dbName]
+  );
+  if (((cols as any[])[0]?.c ?? 0) === 0) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN r_user_ids TEXT NULL AFTER account_names`);
+  }
   bulkSchemaReady = true;
 }
 
 // 日期欄位用 DATE_FORMAT 取字串，避免 mysql2 回 Date 物件帶時區誤差
-const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_names,
+const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_names, r_user_ids,
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
@@ -261,20 +274,23 @@ const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_names,
   DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
   FROM adstream_configs`;
 
-function mapBulkRow(r: any): BulkConfigRow {
-  let accountNames: string[] = [];
+function parseJsonArray(s: any): string[] {
   try {
-    const parsed = JSON.parse(r.account_names);
-    if (Array.isArray(parsed)) accountNames = parsed.map((x) => String(x));
+    const parsed = JSON.parse(s);
+    return Array.isArray(parsed) ? parsed.map((x) => String(x)) : [];
   } catch {
-    /* 容錯：舊資料或手填非 JSON 時當空 */
+    return []; // 容錯：舊資料/null/手填非 JSON 時當空
   }
+}
+
+function mapBulkRow(r: any): BulkConfigRow {
   return {
     id: r.id,
     name: r.name,
     sheetUrl: r.sheet_url,
     sheetId: r.sheet_id,
-    accountNames,
+    accountNames: parseJsonArray(r.account_names),
+    rUserIds: parseJsonArray(r.r_user_ids),
     backfillStartDate: r.backfill_start_date,
     lastSyncedDate: r.last_synced_date,
     lastRunAt: r.last_run_at,
@@ -306,13 +322,14 @@ export async function addBulkConfig(input: BulkConfigInput): Promise<number> {
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_names, backfill_start_date)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_names, r_user_ids, backfill_start_date)
+     VALUES (?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
       input.sheetId.trim(),
       JSON.stringify(input.accountNames),
+      JSON.stringify(input.rUserIds),
       input.backfillStartDate,
     ]
   );
@@ -325,13 +342,14 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
   await ensureBulkSchema(p);
   const [res] = await p.query(
     `UPDATE adstream_configs
-     SET name = ?, sheet_url = ?, sheet_id = ?, account_names = ?, backfill_start_date = ?
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_names = ?, r_user_ids = ?, backfill_start_date = ?
      WHERE id = ?`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
       input.sheetId.trim(),
       JSON.stringify(input.accountNames),
+      JSON.stringify(input.rUserIds),
       input.backfillStartDate,
       id,
     ]

@@ -8,7 +8,7 @@ import {
   type BulkConfigRow,
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
-import { runConfig, RAW_TAB } from './run.js';
+import { runConfig, RAW_TAB, R_RAW_TAB } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
@@ -51,8 +51,15 @@ async function executeAndRecord(
       await markBulkRun(config.id, { status: 'success', message: msg });
       return msg;
     }
-    const detail = res.accountStats.map((s) => `${s.account}: ${s.rows} 列`).join('；');
-    const msg = `同步 ${res.startDate}~${res.endDate}，共 ${res.rowCount} 列。${detail}`;
+    const rTypeLabel: Record<string, string> = { agency: '台客', direct: '4A', super: 'Super' };
+    const parts: string[] = [];
+    if (res.accountStats.length) {
+      parts.push(`D ${res.dRowCount} 列（${res.accountStats.map((s) => `${s.account}:${s.rows}`).join('、')}）`);
+    }
+    if (res.rStat) {
+      parts.push(`R ${res.rRowCount} 列（${rTypeLabel[res.rStat.userType] ?? res.rStat.userType}）`);
+    }
+    const msg = `同步 ${res.startDate}~${res.endDate}：${parts.join('；') || '無資料'}`;
     await markBulkRun(config.id, { status: 'success', message: msg, syncedDate: res.endDate });
     return msg;
   } catch (e: any) {
@@ -85,10 +92,11 @@ export async function registerAdstream(app: FastifyInstance) {
         : '<span class="badge badge-ghost badge-sm">未執行</span>';
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
-        `data-accounts="${esc(JSON.stringify(c.accountNames))}" data-backfill="${esc(c.backfillStartDate)}"`;
+        `data-accounts="${esc(JSON.stringify(c.accountNames))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}"`;
       return `<tr>
         <td>${esc(c.name)}</td>
-        <td class="text-xs">${c.accountNames.map((a) => esc(a)).join('<br>')}</td>
+        <td class="text-xs">${c.accountNames.map((a) => esc(a)).join('<br>') || '—'}</td>
+        <td class="text-xs">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
         <td class="text-xs"><a class="link" href="${esc(c.sheetUrl)}" target="_blank">開啟 ↗</a></td>
         <td class="text-xs">${c.backfillStartDate}</td>
         <td class="text-xs">${c.lastSyncedDate ?? '—'}</td>
@@ -104,7 +112,7 @@ export async function registerAdstream(app: FastifyInstance) {
 
     const listSection = configs.length
       ? `<div class="overflow-x-auto"><table class="table table-sm">
-          <thead><tr><th>名稱</th><th>D 帳號</th><th>Sheet</th><th>回補起始</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
+          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>Sheet</th><th>回補起始</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>`
       : '<div class="text-sm opacity-60">尚無設定</div>';
 
@@ -112,7 +120,7 @@ export async function registerAdstream(app: FastifyInstance) {
       layout('廣告凝視者', `
 <div class="breadcrumbs text-sm"><ul><li><a href="/">工具選單</a></li><li>廣告凝視者</li></ul></div>
 <h1 class="text-xl font-bold my-2">廣告凝視者 <span class="text-sm font-normal opacity-50">AdStream</span></h1>
-<p class="text-sm opacity-70 mb-4">把多個 D 帳號的 bulk 原始報表（13 欄）定期同步到指定 Google Sheet 的「${RAW_TAB}」分頁（append）。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
+<p class="text-sm opacity-70 mb-4">把多個 D 帳號 / R(Rixbee) 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」兩個分頁（append）。D、R 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
 
 <div class="alert alert-info text-sm mb-4">
   <span>請先把這個服務帳號加為你 Google Sheet 的<b>編輯者</b>：<code class="font-mono">${SA_EMAIL}</code></span>
@@ -142,6 +150,9 @@ ${dbError ? `<div class="alert alert-error text-sm mb-4">資料庫連線失敗�
       <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
     </div>
     <div id="chips" class="flex flex-wrap gap-2 mt-2"></div>
+
+    <label class="label">R(Rixbee) Account ID（可多組，逗號分隔；可留空。帳號類型自動偵測）</label>
+    <input id="rUserIds" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
 
     <label class="label">回補起始日（首次執行從這天補到昨天）</label>
     <input type="date" id="backfill" class="input input-bordered w-fit" ${hasDb ? '' : 'disabled'}>
@@ -231,6 +242,7 @@ ${listSection}
     editingId.value = '';
     document.getElementById('name').value = '';
     document.getElementById('sheetUrl').value = '';
+    document.getElementById('rUserIds').value = '';
     document.getElementById('backfill').value = '';
     selected = []; renderChips();
     testResult.innerHTML = ''; saveResult.innerHTML = '';
@@ -244,6 +256,7 @@ ${listSection}
       editingId.value = b.getAttribute('data-id');
       document.getElementById('name').value = b.getAttribute('data-name');
       document.getElementById('sheetUrl').value = b.getAttribute('data-sheet');
+      document.getElementById('rUserIds').value = b.getAttribute('data-rusers') || '';
       document.getElementById('backfill').value = b.getAttribute('data-backfill');
       try { selected = JSON.parse(b.getAttribute('data-accounts')) || []; } catch (e) { selected = []; }
       renderChips();
@@ -256,9 +269,10 @@ ${listSection}
   if (saveBtn) saveBtn.addEventListener('click', function () {
     var name = document.getElementById('name').value.trim();
     var sheetUrl = document.getElementById('sheetUrl').value.trim();
+    var rUserIds = document.getElementById('rUserIds').value.trim();
     var backfill = document.getElementById('backfill').value;
-    if (!name || !sheetUrl || !selected.length || !backfill) {
-      saveResult.innerHTML = '<span class="text-warning">名稱、Sheet 連結、至少一個帳號、回補起始日都要填</span>';
+    if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds)) {
+      saveResult.innerHTML = '<span class="text-warning">名稱、Sheet 連結、回補起始日必填；D 帳號與 R Account ID 至少擇一</span>';
       return;
     }
     saveResult.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 儲存中…';
@@ -269,6 +283,7 @@ ${listSection}
       body: new URLSearchParams({
         name: name, sheetUrl: sheetUrl, backfillStartDate: backfill,
         accountNamesJson: JSON.stringify(selected),
+        rUserIds: rUserIds,
       }),
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.ok) { location.reload(); }
@@ -344,13 +359,18 @@ ${listSection}
       const parsed = JSON.parse(body?.accountNamesJson ?? '[]');
       if (Array.isArray(parsed)) accountNames = parsed.map((x: any) => String(x)).filter(Boolean);
     } catch { /* 下方統一檢查 */ }
+    // R Account ID：逗號分隔文字輸入
+    const rUserIds = (body?.rUserIds ?? '')
+      .split(/[,，\s]+/)
+      .map((s: string) => s.trim())
+      .filter(Boolean);
 
     if (!name) return { error: '請填設定名稱' };
     const sheetId = parseSheetId(sheetUrl);
     if (!sheetId) return { error: '無法解析 Sheet 連結' };
-    if (!accountNames.length) return { error: '請至少選一個 D 帳號' };
+    if (!accountNames.length && !rUserIds.length) return { error: '請至少選一個 D 帳號或填一個 R Account ID' };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(backfillStartDate)) return { error: '回補起始日格式錯誤' };
-    return { input: { name, sheetUrl, sheetId, accountNames, backfillStartDate } };
+    return { input: { name, sheetUrl, sheetId, accountNames, rUserIds, backfillStartDate } };
   }
 
   // ---------- 新增 ----------

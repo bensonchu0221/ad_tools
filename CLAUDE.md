@@ -44,15 +44,16 @@ popin 內部工具集（取代舊 dctool）。
 - 驗證腳本：`poc/verify_weekly_d.mts`（D 管線+逐日對數）、`poc/verify_campaign_filter.mts`（過濾規則安全性實證）、`poc/verify_image_hash.mts`（感知雜湊分群；`REAL=1` 加跑真實素材，會連舊 DB 讀 token）
 
 ## AdStream / 廣告凝視者核心（tool#3）
-- 目的：把多個 D 帳戶的 **bulk 原始報表（13 欄）** 定期 append 到使用者指定 Google Sheet 的固定分頁 **`d_bulk_raw_data`**。R 暫不做但保留擴充。
-- 程式：設定/狀態 `core/store.ts`（表 `adstream_configs`，本工具自管 CRUD + `markBulkRun`）；同步核心 `tools/adstream/run.ts`；路由/UI `tools/adstream/route.ts`（route base `/tools/adstream`）
-- 抓取欄位（實測 13 欄）：`date, imp, click, ctr, cpc, cpm, charge, cv, cvr, mcv, campaign_id, campaign_name, ad_id`（bulk 無 cv_*）；寫 sheet 時前面再補 `account_name, synced_at`（共 15 欄）
-- **增量規則**：每次抓「上次同步日隔天 → 昨天(T-1)」；無上次同步日就從設定的回補起始日起 → 首次回補/每日 T-1/漏跑補抓同一條規則涵蓋。`runConfig` 為**原子性**：任一帳號失敗即拋錯、不寫 sheet、呼叫端不推進 `last_synced_date`（避免部分成功推進造成資料缺漏或重跑重複 append）
+- 目的：把多個 **D 帳戶 + R(Rixbee) 帳戶** 的 bulk 原始報表定期 append 到使用者指定 Google Sheet 的**兩個固定分頁**：D→**`d_bulk_raw_data`**、R→**`r_bulk_raw_data`**。一筆設定可同時含 D 與 R（擇一即可），共用同一個進度游標與同一份 Sheet。
+- 程式：設定/狀態 `core/store.ts`（表 `adstream_configs`，欄 `account_names`(D, JSON)/`r_user_ids`(R, JSON)，本工具自管 CRUD + `markBulkRun`）；同步核心 `tools/adstream/run.ts`；路由/UI `tools/adstream/route.ts`（route base `/tools/adstream`）
+- D 抓取欄位（實測 13 欄）：`date, imp, click, ctr, cpc, cpm, charge, cv, cvr, mcv, campaign_id, campaign_name, ad_id`（bulk 無 cv_*）；寫 sheet 前補 `account_name, synced_at`（共 15 欄）
+- R 抓取（`core/rixbee.ts fetchReport`，dimensions=day/country/group_id/cr_id/cpg_id/ad_channel/ad_target、metrics 空＝回全部含 behavior0-6）：實測 35 欄，**去掉每列重複的分頁 metadata `total_count`** → 34 欄；寫 sheet 前補 `synced_at`（共 35 欄）。R 帳號類型(台客/4A/Super)自動偵測（`run.ts detectRUserType`，搬自週報；混型用 Super），表單只填 Account ID。R token 走全域 env `RIXBEE_*`（非 d_tokens）
+- **增量規則**：每次抓「上次同步日隔天 → 昨天(T-1)」；無上次同步日就從設定的回補起始日起 → 首次回補/每日 T-1/漏跑補抓同一條規則涵蓋（D/R 共用此游標）。`runConfig` 為**原子性**：先全抓 D+R，任一段失敗即拋錯、兩分頁都不寫、呼叫端不推進 `last_synced_date`（避免部分成功推進造成資料缺漏或重跑重複 append）
 - 日期區間靠 `getAdReportBulk`（已自動切 7 天一段，見上 §週報 bulk 7 天限制）
 - **Google Sheet 寫入 `core/gsheets.ts`**：用 **ADC（無金鑰）**，線上自動用 Cloud Run SA `439393162392-compute@developer.gserviceaccount.com`、本機用開發者 gcloud 使用者憑證（測試 sheet 需分享給本人）。使用者需把該 SA 加為目標 Sheet **編輯者**；scope `spreadsheets`；`sheets/drive API` 已啟用；大量列分批 5000 append
 - **排程**：Cloud Scheduler job `adstream-daily`（asia-east1）每日 09:00 Asia/Taipei POST `…/tools/adstream/cron?key=<DIAG_KEY>`（cron 端點沿用 DIAG_KEY 守衛）；手動執行走 in-memory job 輪詢，但權威狀態寫 DB（`last_run_*`/`last_synced_date`）
 - 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
-- 驗證：`poc/probe_adstream_bulk.mts`（80008 根因＋切段）
+- 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
 
 ## DB（D 帳號 token）
 - Cloud SQL `internal-tool` 的 `ad_tools.d_tokens`：`source='dctool'`＝舊 dctool DB（AWS 13.231.111.229:3001/popin_tw_new，唯讀）讀取時 30s 節流自動鏡像同步；`source='adtools'`＝自管可 CRUD
@@ -68,4 +69,4 @@ popin 內部工具集（取代舊 dctool）。
 ## 待辦
 - 選單裡 r_bulk_upload 連結是 placeholder
 - 週報資料層已本機全鏈路對數驗證（D+R，2026-06-13）；剩使用者線上 UI 重跑一次最終確認＋與後台對數
-- AdStream：線上端到端尚未成功跑過一次（部署後需把 SA 加為 Sheet 編輯者→建設定→立即執行驗證）；R 端尚未接
+- AdStream：D 端線上已驗成功（2026-06-15，687 列）；R 端已接（資料層本機驗對映，線上端到端待跑一次）
