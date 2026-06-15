@@ -56,8 +56,9 @@ popin 內部工具集（取代舊 dctool）。
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
 
 ## DB（D 帳號 token）
-- **共用庫 `nexus.d_tokens`**（Cloud SQL `internal-tool`，跨工具共用單一真相）：`source='dctool'`＝舊 dctool DB（AWS 13.231.111.229:3001/popin_tw_new，唯讀）讀取時 30s 節流自動鏡像同步；`source='adtools'`＝自管可 CRUD。`store.ts` 用常數 `TOKENS_DB`(預設 `nexus`，可 env 覆蓋) 限定表，本工具自管表(adstream_configs 等)仍在連線預設庫 `ad_tools`；同實例跨庫查，`popin` 有 *.* 權限
-- **整合沿革**：原本 D token 在兩處重複——`ad_tools.d_tokens`(本工具) 與 `budget_hunter.bh_d_account_token`(BH)，各自鏡像舊 AWS dctool 已開始漂移。2026-06-16 抽出共用 `nexus.d_tokens`(階段 1：本工具改讀寫它，`migrate_nexus_d_tokens.mts` 建庫+灌入)。**待辦階段 2**：Budget Hunter 改讀 `nexus.d_tokens`、停用 `bh_d_account_token`；穩定後收掉 legacy `ad_tools.d_tokens`(已不再寫入)
+- **共用庫 `nexus.d_tokens`**（Cloud SQL `internal-tool`，跨工具共用單一真相）：**唯一鍵＝`account_id`（一帳號一列）**。`source` 是**守衛旗標**(非唯一鍵)：`dctool`＝舊 dctool 鏡像(可被覆蓋)、`adtools`＝手動接管(AE 在 BH 上傳 / ad_tools UI，受保護)。`store.ts` 用常數 `TOKENS_DB`(預設 `nexus`) 限定表，本工具自管表(adstream_configs 等)仍在連線預設庫 `ad_tools`；同實例跨庫查，`popin` 有 *.* 權限
+- **寫入規則（重要）**：①鏡像 sync(`syncFromDctool`) 30s 節流，`ON DUPLICATE KEY UPDATE` 帶 `IF(source='dctool', 新值, 保留)` → **只更新未被手動接管的帳號，不會蓋掉 AE/手動編輯的 token**；DELETE-missing 只刪 `source='dctool'`。②手動寫入(addToken / BH AE 上傳) 一律 by account_id upsert、無條件覆蓋並標 `source='adtools'`(接管)。讀取直接 by account_id 取單列(getDAccountToken/get_d_token 仍保留 adtools 優先排序當防呆)
+- **整合沿革**：原本 D token 在 `ad_tools.d_tokens` 與 `budget_hunter.bh_d_account_token` 兩處重複、各自鏡像舊 AWS dctool 已漂移。2026-06-16 抽出共用 `nexus.d_tokens`：階段1 本工具改讀寫；階段2 BH(`r_bulk_upload`/cmp-r) 也改讀寫、`BHDAccountToken` model 指 `nexus.d_tokens`+`get_d_token`/`get_d_token_map`；並把唯一鍵 `(source,account_id)`→`account_id`、收斂重複列(adtools 優先，刪 210 列 dctool→現 232 列=7 dctool+225 adtools)。遷移腳本：`poc/migrate_nexus_d_tokens.mts`(建庫灌入)、`reconcile_bh_into_nexus.mts`(併 BH)、`migrate_nexus_account_unique.mts`(換鍵)。**待辦**：BH 線上跑穩後 DROP legacy `ad_tools.d_tokens` 與 `budget_hunter.bh_d_account_token`(現留作 rollback)
 - Cloud SQL(MySQL 8.4) 走 TCP 必須帶 ssl 參數（caching_sha2_password）；unix socket 不用
 - **本機連 GCP DB（驗證用）**：`cloud-sql-proxy popinpoc1:asia-east1:internal-tool --port 3307 --quota-project popinpoc1`（`--quota-project` 必帶，本機 ADC 綁別的專案會 403）＋ `.env` 設 `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off`（走 proxy 時 MySQL 層不能再開 TLS，store.ts 有 DB_SSL=off 開關）；DB 密碼在 Secret Manager `ad-tools-timeoff-db-password`
 
