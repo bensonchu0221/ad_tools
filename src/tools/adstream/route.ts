@@ -122,42 +122,52 @@ export async function registerAdstream(app: FastifyInstance) {
 <h1 class="text-xl font-bold my-2">廣告凝視者 <span class="text-sm font-normal opacity-50">AdStream</span></h1>
 <p class="text-sm opacity-70 mb-4">把多個 D 帳號 / R(Rixbee) 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」兩個分頁（append）。D、R 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
 
-<div class="alert alert-info text-sm mb-4">
-  <span>請先把這個服務帳號加為你 Google Sheet 的<b>編輯者</b>：<code class="font-mono">${SA_EMAIL}</code></span>
+<div class="rounded-box border border-base-300 px-4 py-3 text-sm mb-4 opacity-80">
+  請先把這個服務帳號加為你 Google Sheet 的<b>編輯者</b>：<code class="font-mono">${SA_EMAIL}</code>
 </div>
 
 ${hasDb ? '' : '<div class="alert alert-warning text-sm mb-4">未設定資料庫，無法新增設定</div>'}
 ${dbError ? `<div class="alert alert-error text-sm mb-4">資料庫連線失敗：${esc(dbError)}</div>` : ''}
 
 <div class="card bg-base-100 shadow-sm mb-6">
-  <div class="card-body">
+  <div class="card-body gap-4">
     <h2 class="card-title text-base" id="formTitle">新增設定</h2>
     <input type="hidden" id="editingId" value="">
 
-    <label class="label">設定名稱</label>
-    <input id="name" class="input input-bordered w-full" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
-
-    <label class="label">Google Sheet 連結</label>
-    <div class="flex gap-2">
-      <input id="sheetUrl" class="input input-bordered w-full" placeholder="https://docs.google.com/spreadsheets/d/…" ${hasDb ? '' : 'disabled'}>
-      <button class="btn btn-outline" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>測試連線</button>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div>
+        <label class="label py-1"><span class="label-text font-medium">設定名稱</span></label>
+        <input id="name" class="input input-bordered w-full" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
+      </div>
+      <div>
+        <label class="label py-1"><span class="label-text font-medium">回補起始日</span></label>
+        <input type="date" id="backfill" class="input input-bordered w-full" ${hasDb ? '' : 'disabled'}>
+        <label class="label py-0"><span class="label-text-alt opacity-60">首次從這天補到昨天，之後每天抓 T-1</span></label>
+      </div>
     </div>
-    <div id="testResult" class="text-sm mt-1"></div>
 
-    <label class="label">D 帳號（可多選，輸入關鍵字搜尋後點選加入）</label>
+    <div>
+      <label class="label py-1"><span class="label-text font-medium">Google Sheet 連結</span></label>
+      <div class="join w-full">
+        <input id="sheetUrl" class="input input-bordered join-item w-full" placeholder="https://docs.google.com/spreadsheets/d/…" ${hasDb ? '' : 'disabled'}>
+        <button class="btn btn-outline join-item" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>測試連線</button>
+      </div>
+      <div id="testResult" class="text-sm mt-1"></div>
+    </div>
+
+    <div class="divider my-0 text-sm opacity-70">帳戶來源（D / R 至少擇一）</div>
+
+    <label class="label py-1 gap-2"><span class="badge badge-warning badge-sm">D</span><span class="label-text font-medium">Discovery 帳號</span><span class="label-text-alt opacity-60">可多選，搜尋後點選加入</span></label>
     <div class="dropdown w-full">
       <input id="accSearch" class="input input-bordered w-full" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
       <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
     </div>
     <div id="chips" class="flex flex-wrap gap-2 mt-2"></div>
 
-    <label class="label">R(Rixbee) Account ID（可多組，逗號分隔；可留空。帳號類型自動偵測）</label>
+    <label class="label py-1 gap-2"><span class="badge badge-info badge-sm">R</span><span class="label-text font-medium">Rixbee Account ID</span><span class="label-text-alt opacity-60">可多組，逗號分隔；類型自動偵測</span></label>
     <input id="rUserIds" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
 
-    <label class="label">回補起始日（首次執行從這天補到昨天）</label>
-    <input type="date" id="backfill" class="input input-bordered w-fit" ${hasDb ? '' : 'disabled'}>
-
-    <div class="mt-4 flex gap-2">
+    <div class="mt-2 flex gap-2">
       <button class="btn btn-primary" id="saveBtn" type="button" ${hasDb ? '' : 'disabled'}>儲存設定</button>
       <button class="btn btn-ghost hidden" id="cancelBtn" type="button">取消編輯</button>
     </div>

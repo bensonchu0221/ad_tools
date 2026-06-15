@@ -50,68 +50,72 @@ export async function registerWeeklyReport(app: FastifyInstance) {
 <h1 class="text-xl font-bold my-2">D&R 週報產生器</h1>
 <p class="text-sm opacity-70 mb-4">抓取 Discovery（D）與 Rixbee（R）兩邊報表整合後產出 Excel（日報/週報/素材/受眾/Raw）。D、R 至少擇一填寫。</p>
 
-<form id="wrForm" class="space-y-4">
+<form id="wrForm">
   <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title text-base">① 帳號</h2>
-      <label class="label">Discovery 帳號（輸入關鍵字搜尋，可留空）</label>
-      <div class="dropdown w-full">
-        <input id="accSearch" class="input input-bordered w-full" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
-        <input type="hidden" name="account" id="accValue">
-        <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
-      </div>
-      ${hasDb ? '' : '<div class="text-xs text-warning">未設定資料庫，D 帳號暫不可用（仍可只跑 R）</div>'}
-      <label class="label">Rixbee Account ID（可多組，逗號分隔；可留空）</label>
-      <input name="rAid" id="rAid" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219">
-      <div class="text-xs opacity-60">帳號類型（台客/4A/Super）會自動偵測，不必選</div>
-      <label class="label">略過已結束的 campaign（D 端，結束超過 N 個月不抓報表）</label>
-      <select id="expireMonths" class="select select-bordered w-full max-w-xs">
-        <option value="1" selected>1 個月（最快）</option>
-        <option value="3">3 個月</option>
-        <option value="6">6 個月</option>
-      </select>
-    </div>
-  </div>
+    <div class="card-body gap-4">
 
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title text-base">② CV / MCV / MCV2 轉換事件對應</h2>
+      <div>
+        <label class="label py-1 gap-2"><span class="badge badge-warning badge-sm">D</span><span class="label-text font-medium">Discovery 帳號</span><span class="label-text-alt opacity-60">輸入關鍵字搜尋，可留空</span></label>
+        <div class="dropdown w-full">
+          <input id="accSearch" class="input input-bordered w-full" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
+          <input type="hidden" name="account" id="accValue">
+          <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
+        </div>
+        ${hasDb ? '' : '<div class="text-xs text-warning mt-1">未設定資料庫，D 帳號暫不可用（仍可只跑 R）</div>'}
+      </div>
+      <div>
+        <label class="label py-1 gap-2"><span class="badge badge-info badge-sm">R</span><span class="label-text font-medium">Rixbee Account ID</span><span class="label-text-alt opacity-60">可多組，逗號分隔；類型自動偵測</span></label>
+        <input name="rAid" id="rAid" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219">
+      </div>
+      <div>
+        <label class="label py-1"><span class="label-text font-medium">略過已結束的 campaign</span><span class="label-text-alt opacity-60">D 端，結束超過 N 個月不抓報表</span></label>
+        <select id="expireMonths" class="select select-bordered w-full max-w-xs">
+          <option value="1" selected>1 個月（最快）</option>
+          <option value="3">3 個月</option>
+          <option value="6">6 個月</option>
+        </select>
+      </div>
+
+      <div class="divider my-0 text-sm opacity-70">轉換事件對應</div>
+
       <p class="text-xs opacity-60">把事件拖進下方的 CV / MCV / MCV2 框（或點一下事件循環切換位置）。沒分配的事件不計入轉換。</p>
-      <div class="text-sm font-semibold mt-2">事件池</div>
+      <div class="text-sm font-medium">事件池</div>
       <div id="eventPool" class="dnd-zone flex flex-wrap gap-2 p-3 rounded-box border border-base-300 bg-base-200 min-h-16" data-bucket="pool">
-        ${rChips}${dChips}
+        ${dChips}${rChips}
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-2">
-        <div><div class="text-sm font-semibold mb-1">CV</div>
+        <div><div class="text-sm font-medium mb-1">CV</div>
           <div class="dnd-zone flex flex-wrap gap-2 p-3 rounded-box border-2 border-dashed border-primary/40 min-h-20" data-bucket="cv"></div></div>
-        <div><div class="text-sm font-semibold mb-1">MCV</div>
+        <div><div class="text-sm font-medium mb-1">MCV</div>
           <div class="dnd-zone flex flex-wrap gap-2 p-3 rounded-box border-2 border-dashed border-secondary/40 min-h-20" data-bucket="mcv"></div></div>
-        <div><div class="text-sm font-semibold mb-1">MCV2</div>
+        <div><div class="text-sm font-medium mb-1">MCV2</div>
           <div class="dnd-zone flex flex-wrap gap-2 p-3 rounded-box border-2 border-dashed border-accent/40 min-h-20" data-bucket="mcv2"></div></div>
       </div>
-    </div>
-  </div>
 
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title text-base">③ 日期範圍（最多 30 天）</h2>
-      <div class="flex flex-wrap items-center gap-3">
-        <input type="date" id="startDate" class="input input-bordered" required>
-        <span>~</span>
-        <input type="date" id="endDate" class="input input-bordered" required>
+      <div class="divider my-0 text-sm opacity-70">日期範圍（最多 30 天）</div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label class="label py-1"><span class="label-text font-medium">日期範圍</span></label>
+          <div class="flex items-center gap-2">
+            <input type="date" id="startDate" class="input input-bordered w-full" required>
+            <span>~</span>
+            <input type="date" id="endDate" class="input input-bordered w-full" required>
+          </div>
+        </div>
+        <div>
+          <label class="label py-1"><span class="label-text font-medium">週起始日</span><span class="label-text-alt opacity-60">週報分組用</span></label>
+          <select id="weekStart" class="select select-bordered w-full">
+            <option value="1" selected>週一</option><option value="2">週二</option><option value="3">週三</option>
+            <option value="4">週四</option><option value="5">週五</option><option value="6">週六</option><option value="7">週日</option>
+          </select>
+        </div>
       </div>
-      <label class="label">週起始日（週報分組用）</label>
-      <select id="weekStart" class="select select-bordered w-full max-w-xs">
-        <option value="1" selected>週一</option><option value="2">週二</option><option value="3">週三</option>
-        <option value="4">週四</option><option value="5">週五</option><option value="6">週六</option><option value="7">週日</option>
-      </select>
-    </div>
-  </div>
 
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <button type="submit" class="btn btn-primary w-full" id="genBtn">產生週報 Excel</button>
-      <div id="status" class="mt-2"></div>
+      <div class="mt-2">
+        <button type="submit" class="btn btn-primary w-full" id="genBtn">產生週報 Excel</button>
+        <div id="status" class="mt-2"></div>
+      </div>
     </div>
   </div>
 </form>
