@@ -206,6 +206,165 @@ export async function deleteToken(id: number): Promise<boolean> {
   return (res as any).affectedRows > 0; // dctool 鏡像列不可刪
 }
 
+// ---------- AdStream 設定（adstream_configs；本工具自管） ----------
+
+export interface BulkConfigRow {
+  id: number;
+  name: string;
+  sheetUrl: string;
+  sheetId: string;
+  accountNames: string[]; // 多個 D 帳號名稱（對應 d_tokens.account_name）
+  backfillStartDate: string; // YYYY-MM-DD
+  lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過
+  lastRunAt: string | null;
+  lastRunStatus: string | null; // success / error / running
+  lastRunMessage: string | null;
+  createdAt: string;
+}
+
+export interface BulkConfigInput {
+  name: string;
+  sheetUrl: string;
+  sheetId: string;
+  accountNames: string[];
+  backfillStartDate: string; // YYYY-MM-DD
+}
+
+let bulkSchemaReady = false;
+/** 第一次操作時建表（idempotent）。 */
+async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
+  if (bulkSchemaReady) return;
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS adstream_configs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      sheet_url TEXT NOT NULL,
+      sheet_id VARCHAR(128) NOT NULL,
+      account_names TEXT NOT NULL,
+      backfill_start_date DATE NOT NULL,
+      last_synced_date DATE NULL,
+      last_run_at DATETIME NULL,
+      last_run_status VARCHAR(32) NULL,
+      last_run_message TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  bulkSchemaReady = true;
+}
+
+// 日期欄位用 DATE_FORMAT 取字串，避免 mysql2 回 Date 物件帶時區誤差
+const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_names,
+  DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
+  DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
+  DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
+  last_run_status, last_run_message,
+  DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+  FROM adstream_configs`;
+
+function mapBulkRow(r: any): BulkConfigRow {
+  let accountNames: string[] = [];
+  try {
+    const parsed = JSON.parse(r.account_names);
+    if (Array.isArray(parsed)) accountNames = parsed.map((x) => String(x));
+  } catch {
+    /* 容錯：舊資料或手填非 JSON 時當空 */
+  }
+  return {
+    id: r.id,
+    name: r.name,
+    sheetUrl: r.sheet_url,
+    sheetId: r.sheet_id,
+    accountNames,
+    backfillStartDate: r.backfill_start_date,
+    lastSyncedDate: r.last_synced_date,
+    lastRunAt: r.last_run_at,
+    lastRunStatus: r.last_run_status,
+    lastRunMessage: r.last_run_message,
+    createdAt: r.created_at,
+  };
+}
+
+export async function listBulkConfigs(): Promise<BulkConfigRow[]> {
+  const p = getPool();
+  if (!p) return [];
+  await ensureBulkSchema(p);
+  const [rows] = await p.query(`${BULK_SELECT} ORDER BY id DESC`);
+  return (rows as any[]).map(mapBulkRow);
+}
+
+export async function getBulkConfig(id: number): Promise<BulkConfigRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureBulkSchema(p);
+  const [rows] = await p.query(`${BULK_SELECT} WHERE id = ?`, [id]);
+  const r = (rows as any[])[0];
+  return r ? mapBulkRow(r) : null;
+}
+
+export async function addBulkConfig(input: BulkConfigInput): Promise<number> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureBulkSchema(p);
+  const [res] = await p.query(
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_names, backfill_start_date)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      input.name.trim(),
+      input.sheetUrl.trim(),
+      input.sheetId.trim(),
+      JSON.stringify(input.accountNames),
+      input.backfillStartDate,
+    ]
+  );
+  return (res as any).insertId;
+}
+
+export async function updateBulkConfig(id: number, input: BulkConfigInput): Promise<boolean> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureBulkSchema(p);
+  const [res] = await p.query(
+    `UPDATE adstream_configs
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_names = ?, backfill_start_date = ?
+     WHERE id = ?`,
+    [
+      input.name.trim(),
+      input.sheetUrl.trim(),
+      input.sheetId.trim(),
+      JSON.stringify(input.accountNames),
+      input.backfillStartDate,
+      id,
+    ]
+  );
+  return (res as any).affectedRows > 0;
+}
+
+export async function deleteBulkConfig(id: number): Promise<boolean> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureBulkSchema(p);
+  const [res] = await p.query(`DELETE FROM adstream_configs WHERE id = ?`, [id]);
+  return (res as any).affectedRows > 0;
+}
+
+/** 記錄一次執行結果；syncedDate 有給時一併更新 last_synced_date（同步進度的權威來源）。 */
+export async function markBulkRun(
+  id: number,
+  run: { status: 'success' | 'error' | 'running'; message?: string; syncedDate?: string | null }
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureBulkSchema(p);
+  const sets = ['last_run_at = NOW()', 'last_run_status = ?', 'last_run_message = ?'];
+  const params: any[] = [run.status, run.message ?? null];
+  if (run.syncedDate) {
+    sets.push('last_synced_date = ?');
+    params.push(run.syncedDate);
+  }
+  params.push(id);
+  await p.query(`UPDATE adstream_configs SET ${sets.join(', ')} WHERE id = ?`, params);
+}
+
 /** /health/db 診斷用 */
 export async function dbDiagnostics() {
   const p = getPool();
