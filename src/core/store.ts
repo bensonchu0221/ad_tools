@@ -153,7 +153,14 @@ export async function listDAccounts(): Promise<DAccountRow[]> {
     `SELECT id, account_id, account_name, account_source, source, updated_time
      FROM ${TOKENS_DB}.d_tokens ORDER BY account_name`
   );
-  return (rows as any[]).map((r) => ({
+  // 同一 account_id 可能有 dctool+adtools 兩列（共用庫雙來源）；下拉清單每個帳號只留一筆，adtools 優先
+  const byAcc = new Map<string, any>();
+  for (const r of rows as any[]) {
+    const key = String(r.account_id ?? r.account_name);
+    const ex = byAcc.get(key);
+    if (!ex || (r.source === 'adtools' && ex.source !== 'adtools')) byAcc.set(key, r);
+  }
+  return [...byAcc.values()].map((r) => ({
     id: r.id,
     accountId: r.account_id,
     accountName: r.account_name,
