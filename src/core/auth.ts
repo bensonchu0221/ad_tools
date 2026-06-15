@@ -161,10 +161,11 @@ export async function registerAuth(app: FastifyInstance) {
     reply.redirect('/login');
   });
 
-  // 守衛：未登入一律導向 /login（健康檢查與登入相關路由除外）
+  // 守衛：未登入一律導向 /login（除外：登入相關、健康檢查、排程 webhook）
+  // `/tools/*/cron`＝Cloud Scheduler 打的排程入口，沒有登入 cookie，靠各自 DIAG_KEY 守衛（同 /health 模式）
   app.addHook('preHandler', async (req, reply) => {
     const path = req.url.split('?')[0];
-    if (path === '/login' || path.startsWith('/auth/') || path.startsWith('/health')) return;
+    if (path === '/login' || path.startsWith('/auth/') || path.startsWith('/health') || path.endsWith('/cron')) return;
     if (!currentUser(req)) return reply.redirect('/login');
   });
 }
