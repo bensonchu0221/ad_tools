@@ -51,9 +51,7 @@ async function executeAndRecord(
       await markBulkRun(config.id, { status: 'success', message: msg });
       return msg;
     }
-    const detail = res.accountStats
-      .map((s) => `${s.account}: ${s.rows} 列${s.note ? `（${s.note}）` : ''}`)
-      .join('；');
+    const detail = res.accountStats.map((s) => `${s.account}: ${s.rows} 列`).join('；');
     const msg = `同步 ${res.startDate}~${res.endDate}，共 ${res.rowCount} 列。${detail}`;
     await markBulkRun(config.id, { status: 'success', message: msg, syncedDate: res.endDate });
     return msg;

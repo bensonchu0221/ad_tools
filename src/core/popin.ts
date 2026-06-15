@@ -263,19 +263,34 @@ export async function getAdReportIndex(
   return dataAdIds;
 }
 
+/** YYYYMMDD 加 n 天（UTC 純日期運算） */
+function addDaysCompact(ymd: string, n: number): string {
+  const dt = new Date(Date.UTC(+ymd.slice(0, 4), +ymd.slice(4, 6) - 1, +ymd.slice(6, 8)));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+/** 把 [sd, ed]（含端點）切成每段最多 maxDays 天的子區間 */
+function splitDateWindows(sd: string, ed: string, maxDays: number): [string, string][] {
+  const windows: [string, string][] = [];
+  let start = sd;
+  while (start <= ed) {
+    const end = addDaysCompact(start, maxDays - 1);
+    windows.push([start, end <= ed ? end : ed]);
+    start = addDaysCompact(end, 1);
+  }
+  return windows;
+}
+
 /**
- * §3.6 Multiple ad reports（bulk）：抓回 detail[] 每列「全部欄位」。
- * 與 getAdReportIndex 同端點/分頁/限流，但保留整列而非只取 ad_id，給 AdStream 用。
- * 實測每列 13 欄：date, imp, click, ctr, cpc, cpm, charge, cv, cvr, mcv,
- * campaign_id, campaign_name, ad_id（per-ad per-date，無 cv_* 細分）。
+ * 單一 ≤7 天區間：抓回 detail[] 每列「全部欄位」。
  * CampaignIds header 上限 10／PageSize 上限 100，逐頁抓到 total 取完。
- * 任一筆解析失敗會往外拋，由呼叫端決定如何處理。
  */
-export async function getAdReportBulk(
+async function fetchBulkWindow(
   accessToken: string,
   campaignIds: string[],
-  startDate: string, // YYYYMMDD
-  endDate: string // YYYYMMDD
+  startDate: string,
+  endDate: string
 ): Promise<any[]> {
   const groups: string[][] = [];
   for (let i = 0; i < campaignIds.length; i += 10) groups.push(campaignIds.slice(i, i + 10));
@@ -296,7 +311,9 @@ export async function getAdReportBulk(
   // 解析單頁，收集整列，回傳該組 total（供判斷是否還有後續頁）；失敗丟錯
   const parse = (text: string): number => {
     const json = JSON.parse(text); // 空字串/壞回應 → throw
-    if (String(json?.code) !== '0') throw new Error(`bulk date_reporting code=${json?.code}`);
+    if (String(json?.code) !== '0') {
+      throw new Error(`bulk date_reporting code=${json?.code}${json?.message ? ` ${json.message}` : ''}`);
+    }
     const detail = json?.data?.detail ?? [];
     for (const r of detail) if (r && typeof r === 'object') rows.push(r);
     return Number(json?.data?.total) || 0;
@@ -313,6 +330,27 @@ export async function getAdReportBulk(
   if (morePages.length) {
     const moreTexts = await batchFetch(morePages, opts);
     for (const text of moreTexts) parse(text);
+  }
+  return rows;
+}
+
+/**
+ * §3.6 Multiple ad reports（bulk）：抓回 detail[] 每列「全部欄位」。
+ * 與 getAdReportIndex 同端點/分頁/限流，但保留整列而非只取 ad_id，給 AdStream 用。
+ * 實測每列 13 欄：date, imp, click, ctr, cpc, cpm, charge, cv, cvr, mcv,
+ * campaign_id, campaign_name, ad_id（per-ad per-date，無 cv_* 細分）。
+ * ⚠️ bulk 端點單次區間上限 7 天（超過回 code=80008），故內部自動切 7 天一段（依序避免 IP 限流）。
+ * 任一筆解析失敗會往外拋，由呼叫端決定如何處理。
+ */
+export async function getAdReportBulk(
+  accessToken: string,
+  campaignIds: string[],
+  startDate: string, // YYYYMMDD
+  endDate: string // YYYYMMDD
+): Promise<any[]> {
+  const rows: any[] = [];
+  for (const [ws, we] of splitDateWindows(startDate, endDate, 7)) {
+    rows.push(...(await fetchBulkWindow(accessToken, campaignIds, ws, we)));
   }
   return rows;
 }

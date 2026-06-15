@@ -38,7 +38,7 @@ export interface RunResult {
   startDate: string | null;
   endDate: string | null;
   rowCount: number;
-  accountStats: { account: string; rows: number; note?: string }[];
+  accountStats: { account: string; rows: number }[];
 }
 
 /**
@@ -67,26 +67,20 @@ export async function runConfig(
   const accountStats: RunResult['accountStats'] = [];
   const allRows: (string | number)[][] = [];
 
+  // 原子性：任一帳號失敗就整批拋錯——不寫 sheet、呼叫端也不會推進 last_synced_date，
+  // 下次原樣重抓。避免「部分成功卻把進度推進」造成資料永久缺漏，或重跑時重複 append。
   for (const account of config.accountNames) {
     onPhase(`抓取帳號 ${account}（${startDate}~${endDate}）…`);
     const token = await getDAccountToken(account);
-    if (!token) {
-      accountStats.push({ account, rows: 0, note: '找不到 token，略過' });
-      continue;
+    if (!token) throw new Error(`帳號「${account}」找不到 token，請先到 D 帳號 token 管理新增`);
+    const accessToken = await getAccessToken(token);
+    const campaigns = await getCampaigns(accessToken);
+    const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
+    const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
+    for (const r of rows) {
+      allRows.push([account, syncedAt, ...BULK_COLS.map((c) => r[c] ?? '')]);
     }
-    try {
-      const accessToken = await getAccessToken(token);
-      const campaigns = await getCampaigns(accessToken);
-      const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
-      const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
-      for (const r of rows) {
-        allRows.push([account, syncedAt, ...BULK_COLS.map((c) => r[c] ?? '')]);
-      }
-      accountStats.push({ account, rows: rows.length });
-    } catch (e: any) {
-      // 單一帳號失敗不影響其他帳號；記在 note
-      accountStats.push({ account, rows: 0, note: `失敗：${String(e?.message ?? e)}` });
-    }
+    accountStats.push({ account, rows: rows.length });
   }
 
   if (allRows.length > 0) {
