@@ -427,6 +427,191 @@ export async function markBulkRun(
   await p.query(`UPDATE adstream_configs SET ${sets.join(', ')} WHERE id = ?`, params);
 }
 
+// ---------- 週報批次佇列（weekly_jobs；本工具自管） ----------
+// 一次排多份週報：使用者送出即入列（queued），由 cron worker 序列執行（全域並發=1）。
+// 解 popin API 限流的關鍵是「同一時間只有一份在跑」，不是「間隔多久」——並發鎖（claimNextWeeklyJob）才是防線。
+
+export type WeeklyJobStatus = 'queued' | 'running' | 'done' | 'failed';
+
+export interface WeeklyJobRow {
+  id: number;
+  status: WeeklyJobStatus;
+  createdBy: string | null;
+  paramsJson: string; // WeeklyReportInput 的 JSON（store 不解內容，worker 自行 parse）
+  label: string; // 顯示用：帳號名＋日期區間
+  gcsObject: string | null; // 完成後 GCS 物件路徑
+  fileName: string | null; // 下載檔名
+  phase: string | null; // 最後一次進度文字
+  error: string | null;
+  warnings: string[];
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  queueAhead?: number; // 非 DB 欄：此筆前面還有幾份未完成（queued/running），listWeeklyJobs 算給 UI
+}
+
+const WEEKLY_RUNNING_TIMEOUT_MIN = 10; // running 超過此分鐘數視為孤兒（instance 中途被回收），回收成 failed
+
+let weeklyJobsSchemaReady = false;
+async function ensureWeeklyJobsSchema(p: mysql.Pool): Promise<void> {
+  if (weeklyJobsSchemaReady) return;
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS weekly_jobs (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      status ENUM('queued','running','done','failed') NOT NULL DEFAULT 'queued',
+      created_by VARCHAR(255) NULL,
+      params_json MEDIUMTEXT NOT NULL,
+      label VARCHAR(255) NOT NULL,
+      gcs_object VARCHAR(512) NULL,
+      file_name VARCHAR(255) NULL,
+      phase VARCHAR(255) NULL,
+      error TEXT NULL,
+      warnings_json TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME NULL,
+      finished_at DATETIME NULL,
+      INDEX idx_status (status)
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  weeklyJobsSchemaReady = true;
+}
+
+const WEEKLY_SELECT = `SELECT id, status, created_by, params_json, label, gcs_object, file_name,
+  phase, error, warnings_json,
+  DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+  DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
+  DATE_FORMAT(finished_at, '%Y-%m-%d %H:%i:%s') AS finished_at
+  FROM weekly_jobs`;
+
+function mapWeeklyJobRow(r: any): WeeklyJobRow {
+  return {
+    id: r.id,
+    status: r.status,
+    createdBy: r.created_by ?? null,
+    paramsJson: r.params_json,
+    label: r.label,
+    gcsObject: r.gcs_object ?? null,
+    fileName: r.file_name ?? null,
+    phase: r.phase ?? null,
+    error: r.error ?? null,
+    warnings: parseJsonArray(r.warnings_json),
+    createdAt: r.created_at,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+  };
+}
+
+/** 入列一份週報，回傳 jobId。 */
+export async function enqueueWeeklyJob(input: {
+  label: string;
+  paramsJson: string;
+  createdBy?: string | null;
+}): Promise<number> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureWeeklyJobsSchema(p);
+  const [res] = await p.query(
+    `INSERT INTO weekly_jobs (status, created_by, params_json, label) VALUES ('queued', ?, ?, ?)`,
+    [input.createdBy ?? null, input.paramsJson, input.label]
+  );
+  return (res as any).insertId;
+}
+
+/**
+ * ownerEmail 有給＝只回該建立者的 job（一般使用者）；不給＝全部（管理者）。
+ * 每筆 queued 會帶 queueAhead＝全域佇列中排在它前面（id 較小）的未完成份數，供 UI 顯示「前面還有 N 份」。
+ */
+export async function listWeeklyJobs(ownerEmail?: string | null): Promise<WeeklyJobRow[]> {
+  const p = getPool();
+  if (!p) return [];
+  await ensureWeeklyJobsSchema(p);
+  const where = ownerEmail ? ' WHERE created_by = ?' : '';
+  const args = ownerEmail ? [ownerEmail] : [];
+  const [rows] = await p.query(`${WEEKLY_SELECT}${where} ORDER BY id DESC`, args);
+  // 全域佇列順序（queued/running，id 升序）：算每筆 queued 前面卡了幾份
+  const [active] = await p.query(
+    `SELECT id FROM weekly_jobs WHERE status IN ('queued','running') ORDER BY id ASC`
+  );
+  const activeIds = (active as any[]).map((r) => r.id as number);
+  return (rows as any[]).map((r) => {
+    const row = mapWeeklyJobRow(r);
+    if (row.status === 'queued') row.queueAhead = Math.max(0, activeIds.indexOf(row.id));
+    return row;
+  });
+}
+
+export async function getWeeklyJob(id: number): Promise<WeeklyJobRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureWeeklyJobsSchema(p);
+  const [rows] = await p.query(`${WEEKLY_SELECT} WHERE id = ?`, [id]);
+  const r = (rows as any[])[0];
+  return r ? mapWeeklyJobRow(r) : null;
+}
+
+/**
+ * 認領下一份要跑的 job（全域並發=1）。流程：
+ *   1. 回收逾時的 running（孤兒）→ failed
+ *   2. 原子 claim：唯有「目前無任何 running」時，才把最舊的 queued 設為 running
+ *   3. 取回剛 claim 的那筆（成功 claim 代表先前無 running，故當下唯一 running 即此筆）
+ * 回傳 null＝有別份正在跑、或佇列為空。
+ */
+export async function claimNextWeeklyJob(): Promise<WeeklyJobRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureWeeklyJobsSchema(p);
+
+  // 1. 逾時回收：避免孤兒 running 永遠卡住佇列
+  await p.query(
+    `UPDATE weekly_jobs SET status='failed',
+       error='執行逾時（超過 ${WEEKLY_RUNNING_TIMEOUT_MIN} 分鐘，可能伺服器中途回收），請重新產生',
+       finished_at=NOW()
+     WHERE status='running' AND started_at < NOW() - INTERVAL ${WEEKLY_RUNNING_TIMEOUT_MIN} MINUTE`
+  );
+
+  // 2. 原子 claim：NOT EXISTS(running) 保證並發=1；ORDER BY id 取最舊
+  const [res] = await p.query(
+    `UPDATE weekly_jobs SET status='running', started_at=NOW(), phase='開始執行…'
+     WHERE status='queued'
+       AND NOT EXISTS (SELECT 1 FROM (SELECT 1 FROM weekly_jobs WHERE status='running' LIMIT 1) AS r)
+     ORDER BY id ASC LIMIT 1`
+  );
+  if ((res as any).affectedRows === 0) return null; // 有份在跑 或 無 queued
+
+  // 3. 取回剛 claim 的那筆（此時全域唯一 running）
+  const [rows] = await p.query(`${WEEKLY_SELECT} WHERE status='running' ORDER BY started_at DESC LIMIT 1`);
+  const r = (rows as any[])[0];
+  return r ? mapWeeklyJobRow(r) : null;
+}
+
+export async function markWeeklyJobPhase(id: number, phase: string): Promise<void> {
+  const p = getPool();
+  if (!p) return;
+  await p.query(`UPDATE weekly_jobs SET phase = ? WHERE id = ?`, [phase, id]);
+}
+
+export async function markWeeklyJobDone(
+  id: number,
+  done: { gcsObject: string; fileName: string; warnings: string[] }
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE weekly_jobs SET status='done', gcs_object=?, file_name=?, warnings_json=?,
+       phase='完成', finished_at=NOW() WHERE id = ?`,
+    [done.gcsObject, done.fileName, JSON.stringify(done.warnings), id]
+  );
+}
+
+export async function markWeeklyJobFailed(id: number, error: string): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE weekly_jobs SET status='failed', error=?, finished_at=NOW() WHERE id = ?`,
+    [error, id]
+  );
+}
+
 /** /health/db 診斷用 */
 export async function dbDiagnostics() {
   const p = getPool();

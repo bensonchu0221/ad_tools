@@ -1,38 +1,34 @@
-// D&R 週報（tool#2）路由：表單頁（拖拉分桶）＋ job 產出流程 ＋ Excel 下載
+// D&R 週報（tool#2）路由：表單頁（拖拉分桶）＋ 佇列入列 ＋ 清單/下載 ＋ cron worker
 // 移植自 dctool page/weeklyreport.php + js/weeklyreport.js
+// 一次產多份：送出即入列 weekly_jobs(queued)，由 cron worker 全域並發=1 序列執行、產出存 GCS 待下載。
 import type { FastifyInstance } from 'fastify';
-import { randomUUID } from 'node:crypto';
 import { layout } from '../../core/html.js';
-import { dbAvailable, listDAccounts } from '../../core/store.js';
+import {
+  dbAvailable,
+  listDAccounts,
+  enqueueWeeklyJob,
+  listWeeklyJobs,
+  getWeeklyJob,
+  claimNextWeeklyJob,
+  markWeeklyJobPhase,
+  markWeeklyJobDone,
+  markWeeklyJobFailed,
+} from '../../core/store.js';
+import { uploadWeeklyXlsx, downloadWeekly } from '../../core/gcs.js';
+import { currentUser } from '../../core/auth.js';
 import { buildReport } from './report.js';
 import { buildXlsx } from './xlsx.js';
 import { R_EVENTS, D_EVENTS, type WeeklyReportInput } from './types.js';
 
 export const BASE_PATH = '/tools/weeklyreport';
 
-// ---------- job 暫存（照 adpreview shoot.ts 樣式；TTL 10 分鐘、上限 20 筆） ----------
-interface ReportJob {
-  phase: string;
-  error: string | null;
-  fileName: string | null;
-  buffer: Buffer | null;
-  warnings: string[];
-  ts: number;
-}
-const JOB_TTL_MS = 10 * 60 * 1000;
-const JOB_MAX = 20;
-const jobStore = new Map<string, ReportJob>();
+// 產出在 GCS 的保留天數（須與 bucket lifecycle 設定一致；顯示給使用者提醒及時下載）
+const RETENTION_DAYS = 14;
 
-function createJob(id: string): void {
-  const now = Date.now();
-  for (const [k, v] of jobStore) if (now - v.ts > JOB_TTL_MS) jobStore.delete(k);
-  while (jobStore.size >= JOB_MAX) jobStore.delete(jobStore.keys().next().value!);
-  jobStore.set(id, { phase: '準備中…', error: null, fileName: null, buffer: null, warnings: [], ts: now });
-}
-
-function updateJob(id: string, patch: Partial<ReportJob>): void {
-  const j = jobStore.get(id);
-  if (j) Object.assign(j, patch, { ts: Date.now() });
+// 清單過濾與下載權限：管理者看全部，其餘只看自己（同 adstream route）
+const ADMIN_EMAILS = ['benson@popin.cc'];
+function isAdmin(viewer: string | null): boolean {
+  return !viewer || ADMIN_EMAILS.includes(viewer);
 }
 
 export async function registerWeeklyReport(app: FastifyInstance) {
@@ -114,12 +110,27 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       </div>
 
       <div class="mt-2">
-        <button type="submit" class="btn btn-primary w-full" id="genBtn">產生週報 Excel</button>
+        <button type="submit" class="btn btn-primary w-full" id="genBtn">加入產生佇列</button>
         <div id="status" class="mt-2"></div>
       </div>
     </div>
   </div>
 </form>
+
+<div class="card bg-base-100 shadow-sm mt-4">
+  <div class="card-body gap-2">
+    <div class="flex items-center justify-between flex-wrap gap-1">
+      <h2 class="card-title text-base">產生佇列</h2>
+      <span class="text-xs opacity-60">產出檔案保留 ${RETENTION_DAYS} 天，逾期自動刪除，請及時下載</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="table table-sm">
+        <thead><tr><th>項目</th><th>狀態</th><th>建立時間</th><th class="text-right">下載</th></tr></thead>
+        <tbody id="jobRows"><tr><td colspan="4" class="text-center opacity-50">載入中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -184,11 +195,10 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     ).map(function (el) { return el.getAttribute('data-event'); });
   }
 
-  // ---------- 提交：AJAX 建 job → 輪詢 phase → 完成下載 ----------
+  // ---------- 提交：入列一份 → 重新整理佇列清單（不再原地等下載） ----------
   var form = document.getElementById('wrForm');
   var statusBox = document.getElementById('status');
   var genBtn = document.getElementById('genBtn');
-  var polling = null;
 
   form.addEventListener('submit', function (e) {
     e.preventDefault();
@@ -221,39 +231,49 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     });
 
     genBtn.classList.add('btn-disabled');
-    statusBox.innerHTML = '<div class="alert text-sm"><span class="loading loading-spinner loading-sm"></span> 建立工作中…</div>';
-    if (polling) clearInterval(polling);
+    statusBox.innerHTML = '<div class="alert text-sm"><span class="loading loading-spinner loading-sm"></span> 加入佇列中…</div>';
 
     fetch('${BASE_PATH}/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body,
     }).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d.ok) throw new Error(d.error || '建立失敗');
-      polling = setInterval(function () {
-        fetch('${BASE_PATH}/job/' + d.jobId).then(function (r) { return r.json(); }).then(function (j) {
-          if (j.error) {
-            clearInterval(polling);
-            genBtn.classList.remove('btn-disabled');
-            statusBox.innerHTML = '<div class="alert alert-error text-sm whitespace-pre-wrap">' + j.error + '</div>';
-          } else if (j.done) {
-            clearInterval(polling);
-            genBtn.classList.remove('btn-disabled');
-            var warnHtml = (j.warnings || []).map(function (w) {
-              return '<div class="alert alert-warning text-sm mt-2">' + w + '</div>';
-            }).join('');
-            statusBox.innerHTML = '<div class="alert alert-success text-sm">完成！</div>' + warnHtml +
-              '<a class="btn btn-success w-full mt-2" href="${BASE_PATH}/download/' + d.jobId + '">下載 ' + j.fileName + '</a>';
-            window.location = '${BASE_PATH}/download/' + d.jobId;
-          } else {
-            statusBox.innerHTML = '<div class="alert text-sm"><span class="loading loading-spinner loading-sm"></span> ' + j.phase + '</div>';
-          }
-        });
-      }, 1500);
+      genBtn.classList.remove('btn-disabled');
+      if (!d.ok) throw new Error(d.error || '加入失敗');
+      statusBox.innerHTML = '<div class="alert alert-success text-sm">已加入佇列，系統會依序產生，完成後可在下方下載</div>';
+      loadJobs();
     }).catch(function (err) {
       genBtn.classList.remove('btn-disabled');
       statusBox.innerHTML = '<div class="alert alert-error text-sm">' + err.message + '</div>';
     });
+  });
+
+  // ---------- 佇列清單：輪詢 /jobs 渲染 ----------
+  var jobRows = document.getElementById('jobRows');
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function statusCell(j) {
+    if (j.status === 'queued') return '<span class="badge badge-ghost badge-sm">排隊中' + (j.queueAhead > 0 ? '（前面還有 ' + j.queueAhead + ' 份）' : '') + '</span>';
+    if (j.status === 'running') return '<span class="badge badge-info badge-sm gap-1"><span class="loading loading-spinner loading-xs"></span>' + esc(j.phase || '產生中…') + '</span>';
+    if (j.status === 'done') return '<span class="badge badge-success badge-sm">完成</span>';
+    return '<span class="badge badge-error badge-sm" title="' + esc(j.error || '') + '">失敗</span>';
+  }
+  function loadJobs() {
+    fetch('${BASE_PATH}/jobs').then(function (r) { return r.json(); }).then(function (jobs) {
+      if (!jobs.length) { jobRows.innerHTML = '<tr><td colspan="4" class="text-center opacity-50">尚無紀錄</td></tr>'; return; }
+      jobRows.innerHTML = jobs.map(function (j) {
+        var dl = j.status === 'done'
+          ? '<a class="btn btn-xs btn-success" href="${BASE_PATH}/download/' + j.id + '">下載</a>'
+          : (j.status === 'failed' ? '<span class="text-xs opacity-50">—</span>' : '<span class="text-xs opacity-50">等待中</span>');
+        return '<tr><td class="text-sm">' + esc(j.label) + '</td><td>' + statusCell(j) + '</td><td class="text-xs opacity-60">' + esc(j.createdAt) + '</td><td class="text-right">' + dl + '</td></tr>';
+      }).join('');
+    });
+  }
+  loadJobs();
+  setInterval(loadJobs, 4000);
   });
 })();
 </script>`)
@@ -266,8 +286,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     reply.send(rows);
   });
 
-  // ---------- 建 job 並背景產出 ----------
+  // ---------- 入列一份週報（背景由 cron worker 序列執行） ----------
   app.post(`${BASE_PATH}/generate`, async (req, reply) => {
+    if (!dbAvailable()) return reply.send({ ok: false, error: '未設定資料庫，無法使用佇列' });
     const b = req.body as Record<string, string>;
     const account = (b.account ?? '').trim(); // account_id
     const accountName = (b.accountName ?? '').trim(); // 顯示用
@@ -305,58 +326,77 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       expireMonths: [1, 3, 6].includes(Number(b.expireMonths)) ? Number(b.expireMonths) : 1,
     };
 
-    const jobId = randomUUID();
-    createJob(jobId);
-
-    // 背景產出（不卡住回應；錯誤寫進 job 給輪詢端顯示）
-    void (async () => {
-      // watchdog：背景 job 卡死時轉成明確錯誤，不讓使用者面對永遠不動的 phase
-      const watchdog = setTimeout(() => {
-        const j = jobStore.get(jobId);
-        if (j && !j.buffer && !j.error) {
-          app.log.error({ jobId, lastPhase: j.phase }, 'weeklyreport job watchdog timeout');
-          updateJob(jobId, { error: `產生逾時（超過 10 分鐘，卡在「${j.phase}」）。請縮小日期範圍或稍後再試。` });
-        }
-      }, 10 * 60 * 1000);
-
-      // phase 同步寫進伺服器日誌：線上卡住時可從 log 直接看出規模與卡點
-      const onPhase = (phase: string) => {
-        app.log.info({ jobId, phase }, 'weeklyreport progress');
-        updateJob(jobId, { phase });
-      };
-      try {
-        const result = await buildReport(input, onPhase);
-        const buffer = await buildXlsx(result, buckets, onPhase);
-        const fileName = `dr_weekly_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.xlsx`;
-        // watchdog 已標錯誤的話不要覆蓋成完成
-        if (!jobStore.get(jobId)?.error) {
-          updateJob(jobId, { phase: '完成', fileName, buffer, warnings: result.warnings });
-        }
-      } catch (e: any) {
-        app.log.error(e, 'weeklyreport generate failed');
-        updateJob(jobId, { error: String(e?.message ?? e) });
-      } finally {
-        clearTimeout(watchdog);
-      }
-    })();
-
+    // label：帳號（D 名 / R ids）＋日期區間，清單顯示用
+    const who = accountName || (input.rUserIds.length ? `R:${input.rUserIds.join(',')}` : '');
+    const label = `${who} ${startDate}~${endDate}`.trim();
+    const jobId = await enqueueWeeklyJob({
+      label,
+      paramsJson: JSON.stringify(input),
+      createdBy: currentUser(req),
+    });
     reply.send({ ok: true, jobId });
   });
 
-  // ---------- 輪詢 ----------
-  app.get(`${BASE_PATH}/job/:id`, async (req, reply) => {
-    const j = jobStore.get((req.params as any).id);
-    if (!j) return reply.send({ error: '工作不存在或已過期，請重新產生' });
-    reply.send({ phase: j.phase, error: j.error, done: !!j.buffer, fileName: j.fileName, warnings: j.warnings });
+  // ---------- 佇列清單（管理者看全部、其餘只看自己） ----------
+  app.get(`${BASE_PATH}/jobs`, async (req, reply) => {
+    const viewer = currentUser(req);
+    const jobs = await listWeeklyJobs(isAdmin(viewer) ? null : viewer);
+    reply.send(
+      jobs.map((j) => ({
+        id: j.id,
+        status: j.status,
+        label: j.label,
+        phase: j.phase,
+        error: j.error,
+        queueAhead: j.queueAhead ?? 0,
+        createdAt: j.createdAt,
+      }))
+    );
   });
 
-  // ---------- 下載 ----------
+  // ---------- 下載（從 GCS proxy；沿用 OAuth 驗權限） ----------
   app.get(`${BASE_PATH}/download/:id`, async (req, reply) => {
-    const j = jobStore.get((req.params as any).id);
-    if (!j?.buffer) return reply.code(404).send('檔案不存在或已過期，請重新產生');
+    const id = Number((req.params as any).id);
+    const job = await getWeeklyJob(id);
+    if (!job || job.status !== 'done' || !job.gcsObject) {
+      return reply.code(404).send('檔案不存在或尚未完成');
+    }
+    const viewer = currentUser(req);
+    if (!isAdmin(viewer) && job.createdBy !== viewer) {
+      return reply.code(403).send('無權限下載此檔案');
+    }
+    const buffer = await downloadWeekly(job.gcsObject);
     reply
-      .header('Content-Disposition', `attachment; filename="${j.fileName}"`)
+      .header('Content-Disposition', `attachment; filename="${job.fileName}"`)
       .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-      .send(j.buffer);
+      .send(buffer);
+  });
+
+  // ---------- cron worker：認領一份 → 產出 → 存 GCS（Cloud Scheduler 用，需 DIAG_KEY） ----------
+  // 全域並發=1（claimNextWeeklyJob 保證），一次觸發只處理一份；避免 popin API 限流疊加。
+  app.post(`${BASE_PATH}/cron`, async (req, reply) => {
+    const key = (req.query as any).key;
+    if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+
+    const job = await claimNextWeeklyJob();
+    if (!job) return reply.send({ ok: true, idle: true }); // 有份在跑 或 佇列為空
+
+    try {
+      const input = JSON.parse(job.paramsJson) as WeeklyReportInput;
+      const onPhase = (phase: string) => {
+        app.log.info({ jobId: job.id, phase }, 'weeklyreport progress');
+        void markWeeklyJobPhase(job.id, phase);
+      };
+      const result = await buildReport(input, onPhase);
+      const buffer = await buildXlsx(result, input.buckets, onPhase);
+      const fileName = `dr_weekly_${input.startDate.replace(/-/g, '')}_${input.endDate.replace(/-/g, '')}.xlsx`;
+      const gcsObject = await uploadWeeklyXlsx(job.id, fileName, buffer);
+      await markWeeklyJobDone(job.id, { gcsObject, fileName, warnings: result.warnings });
+      reply.send({ ok: true, jobId: job.id, fileName });
+    } catch (e: any) {
+      app.log.error(e, 'weeklyreport cron job failed');
+      await markWeeklyJobFailed(job.id, String(e?.message ?? e));
+      reply.send({ ok: false, jobId: job.id, error: String(e?.message ?? e) });
+    }
   });
 }

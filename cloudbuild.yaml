@@ -25,7 +25,7 @@ steps:
       - '--allow-unauthenticated'
       - '--memory=2Gi'        # Chromium 較吃記憶體
       - '--cpu=2'
-      - '--timeout=120'
+      - '--timeout=600'        # 週報 cron worker 同步跑一份最壞 2~3 分鐘，需高於預設
       - '--no-cpu-throttling'
       - '--min-instances=1'   # 讓瀏覽器保溫
       - '--session-affinity'  # job 存在 instance 記憶體，輪詢要黏在同一台

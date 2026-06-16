@@ -76,3 +76,4 @@ popin 內部工具集（取代舊 dctool）。
 - 週報資料層已本機全鏈路對數驗證（D+R，2026-06-13）；剩使用者線上 UI 重跑一次最終確認＋與後台對數
 - AdStream：D 端線上已驗成功（2026-06-15，687 列）；R 端已接（資料層本機驗對映，線上端到端待跑一次）
 - AdStream D 端 2026-06-16 加 cv_* 11 欄＋ad_name（sheet 15→27 欄，走 per-ad）：**線上待驗**——需清空重抓（刪設定重建，游標回到回補起始日）後，確認 cv_*/ad_name 欄真有值（重點驗 bulk date 與 per-ad date 格式一致、merge 鍵對得上，否則 cv_*/ad_name 會全空/0）
+- 週報批次佇列（一次產多份）2026-06-16 實作：`weekly_jobs` 表＋GCS（`core/gcs.ts`，bucket popinpoc1-internal-tool/`weekly/`，lifecycle 14 天）＋cron worker（全域並發=1 防 popin 限流）＋清單 UI；規劃見 `docs/weekly_queue_plan.md`。Cloud Scheduler `weekly-queue-worker`（每 2 分、deadline 600s）、Cloud Run timeout 已調 600s。**線上端到端待驗**：入列→cron 認領產出→GCS proxy 下載；多份排隊時確認並發=1（claimNextWeeklyJob 的 NOT EXISTS(running) 原子鎖）真的不疊加撞 IP 限流
