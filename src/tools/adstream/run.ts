@@ -4,7 +4,7 @@
 // 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋（D/R 共用同一個進度游標）。
 import { getAccessToken, getCampaigns, getAdReportBulk } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
-import { getDAccountToken } from '../../core/store.js';
+import { getDAccountTokenById, listDAccounts } from '../../core/store.js';
 import { appendRows } from '../../core/gsheets.js';
 import type { BulkConfigRow } from '../../core/store.js';
 
@@ -117,17 +117,23 @@ export async function runConfig(
 
   // ---- 先全部抓取（D + R），全成功才寫，維持原子性 ----
 
+  // 設定存的是 account_id（穩定鍵）；取一份 id→名字對照，供 Sheet 的 account_name 欄與進度顯示用
+  const nameById = config.accountIds.length
+    ? new Map((await listDAccounts()).map((a) => [String(a.accountId), a.accountName]))
+    : new Map<string, string>();
+
   // D：每個帳號 → access token → 全 campaign → bulk 全欄位
-  for (const account of config.accountNames) {
-    onPhase(`抓取 D 帳號 ${account}（${startDate}~${endDate}）…`);
-    const token = await getDAccountToken(account);
-    if (!token) throw new Error(`D 帳號「${account}」找不到 token，請先到 D 帳號 token 管理新增`);
+  for (const accountId of config.accountIds) {
+    const accountName = nameById.get(String(accountId)) ?? accountId; // 顯示/寫表用；找不到退回 id
+    onPhase(`抓取 D 帳號 ${accountName}（${startDate}~${endDate}）…`);
+    const token = await getDAccountTokenById(accountId);
+    if (!token) throw new Error(`D 帳號 id=${accountId}（${accountName}）找不到 token，請先到 D 帳號 token 管理確認`);
     const accessToken = await getAccessToken(token);
     const campaigns = await getCampaigns(accessToken);
     const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
     const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
-    for (const r of rows) dRows.push([account, syncedAt, ...BULK_COLS.map((c) => r[c] ?? '')]);
-    accountStats.push({ account, rows: rows.length });
+    for (const r of rows) dRows.push([accountName, syncedAt, ...BULK_COLS.map((c) => r[c] ?? '')]);
+    accountStats.push({ account: accountName, rows: rows.length });
   }
 
   // R：自動偵測類型 → 抓全欄位（fetchReport 內部已切 7 天一段）

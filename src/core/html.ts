@@ -2,7 +2,13 @@
 // https://daisyui.com/docs/cdn/
 import { FAVICON_DATA_URI } from './favicon.js';
 
-export function layout(title: string, body: string, opts: { nav?: boolean } = { nav: true }): string {
+export function layout(
+  title: string,
+  body: string,
+  opts: { nav?: boolean; width?: string } = {}
+): string {
+  // 內容區寬度（預設 max-w-3xl；AdStream 等寬表格頁可傳較寬值，如 max-w-6xl）
+  const maxWidth = opts.width ?? 'max-w-3xl';
   const nav = opts.nav === false ? '' : `
   <div class="navbar bg-base-100 shadow-sm">
     <div class="flex-1">
@@ -25,7 +31,7 @@ export function layout(title: string, body: string, opts: { nav?: boolean } = { 
 </head>
 <body class="min-h-screen bg-base-200">
 ${nav}
-<main class="max-w-3xl mx-auto p-4">
+<main class="${maxWidth} mx-auto p-4">
 ${body}
 </main>
 </body>

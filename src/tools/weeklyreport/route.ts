@@ -61,6 +61,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
           <input type="hidden" name="account" id="accValue">
           <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
         </div>
+        <div class="label py-0"><span class="label-text-alt opacity-60">找不到帳號或 token？<a href="/tools/adpreview/tokens" class="link link-primary" target="_blank">管理 D 帳號 token →</a></span></div>
         ${hasDb ? '' : '<div class="text-xs text-warning mt-1">未設定資料庫，D 帳號暫不可用（仍可只跑 R）</div>'}
       </div>
       <div>
@@ -135,19 +136,20 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       return a.accountName.toLowerCase().indexOf(kw) !== -1;
     }).slice(0, 50);
     list.innerHTML = hits.map(function (a) {
-      return '<li><a data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + '</a></li>';
+      return '<li><a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + '</a></li>';
     }).join('') || '<li class="menu-disabled"><a>無符合帳號</a></li>';
   }
   if (comboEnabled) {
     fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = d; render(''); });
+    // 改用 account_id 當值（穩定鍵）：打字就清掉已選 id，逼使用者從清單重選
     search.addEventListener('input', function () { hidden.value = ''; render(search.value.trim()); });
     // mousedown（非 click）：原因同 adpreview——mousedown 失焦會讓 dropdown 先關掉
     list.addEventListener('mousedown', function (e) {
-      var t = e.target.closest('a[data-name]');
+      var t = e.target.closest('a[data-id]');
       if (!t) return;
       e.preventDefault();
       search.value = t.getAttribute('data-name');
-      hidden.value = t.getAttribute('data-name');
+      hidden.value = t.getAttribute('data-id');
       search.blur();
     });
   }
@@ -190,7 +192,8 @@ export async function registerWeeklyReport(app: FastifyInstance) {
 
   form.addEventListener('submit', function (e) {
     e.preventDefault();
-    var account = (hidden && hidden.value) || (search && !search.disabled ? search.value.trim() : '');
+    var account = (hidden && hidden.value) || ''; // account_id（需從清單選取才有值）
+    var accountName = (search && !search.disabled ? search.value.trim() : '');
     var rAid = document.getElementById('rAid').value.trim();
     var startDate = document.getElementById('startDate').value;
     var endDate = document.getElementById('endDate').value;
@@ -208,6 +211,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
 
     var body = new URLSearchParams({
       account: account,
+      accountName: accountName,
       rAid: rAid,
       bucketsJson: JSON.stringify({ cv: bucketValues('cv'), mcv: bucketValues('mcv'), mcv2: bucketValues('mcv2') }),
       startDate: startDate,
@@ -265,7 +269,8 @@ export async function registerWeeklyReport(app: FastifyInstance) {
   // ---------- 建 job 並背景產出 ----------
   app.post(`${BASE_PATH}/generate`, async (req, reply) => {
     const b = req.body as Record<string, string>;
-    const account = (b.account ?? '').trim();
+    const account = (b.account ?? '').trim(); // account_id
+    const accountName = (b.accountName ?? '').trim(); // 顯示用
     const rAid = (b.rAid ?? '').trim();
     if (!account && !rAid) return reply.send({ ok: false, error: 'D 帳號與 Rixbee Account ID 至少填一個' });
 
@@ -290,7 +295,8 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     if (days <= 0 || days > 30) return reply.send({ ok: false, error: '日期範圍需在 1～30 天內' });
 
     const input: WeeklyReportInput = {
-      dAccountName: account,
+      dAccountId: account,
+      dAccountName: accountName,
       rUserIds: rAid ? rAid.split(',').map((s) => s.trim()).filter(Boolean) : [],
       buckets,
       startDate,

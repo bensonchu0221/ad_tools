@@ -174,14 +174,15 @@ export async function listDAccounts(): Promise<DAccountRow[]> {
   }));
 }
 
-/** 取帳號 token；同名時本地(adtools)優先。 */
-export async function getDAccountToken(accountName: string): Promise<string | null> {
+/** 用 account_id 取 token（穩定數值鍵；同 id 多列時 adtools 優先）。
+ *  account_name 會隨鏡像/各工具寫入而漂移甚至壞編碼，故一律以 account_id 為查詢鍵（與 BH 一致）。 */
+export async function getDAccountTokenById(accountId: string): Promise<string | null> {
   const p = getPool();
   if (!p) return null;
   const [rows] = await p.query(
-    `SELECT token FROM ${TOKENS_DB}.d_tokens WHERE account_name = ?
+    `SELECT token FROM ${TOKENS_DB}.d_tokens WHERE account_id = ?
      ORDER BY source = 'adtools' DESC, updated_time DESC LIMIT 1`,
-    [accountName]
+    [accountId]
   );
   const r = (rows as any[])[0];
   return r ? r.token : null;
@@ -230,7 +231,7 @@ export interface BulkConfigRow {
   name: string;
   sheetUrl: string;
   sheetId: string;
-  accountNames: string[]; // 多個 D 帳號名稱（對應 d_tokens.account_name）；可空＝不抓 D
+  accountIds: string[]; // 多個 D 帳號 account_id（穩定鍵，對應 d_tokens.account_id）；可空＝不抓 D
   rUserIds: string[]; // 多個 Rixbee Account ID；可空＝不抓 R
   backfillStartDate: string; // YYYY-MM-DD
   lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過
@@ -244,7 +245,7 @@ export interface BulkConfigInput {
   name: string;
   sheetUrl: string;
   sheetId: string;
-  accountNames: string[];
+  accountIds: string[];
   rUserIds: string[];
   backfillStartDate: string; // YYYY-MM-DD
 }
@@ -259,7 +260,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       name VARCHAR(255) NOT NULL,
       sheet_url TEXT NOT NULL,
       sheet_id VARCHAR(128) NOT NULL,
-      account_names TEXT NOT NULL,
+      account_ids TEXT NULL,
       r_user_ids TEXT NULL,
       backfill_start_date DATE NOT NULL,
       last_synced_date DATE NULL,
@@ -269,21 +270,37 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) DEFAULT CHARSET=utf8mb4`
   );
-  // 既有表（早於 R 支援）補欄位：MySQL 無 ADD COLUMN IF NOT EXISTS，先查 information_schema
+  // 既有表補欄位：MySQL 無 ADD COLUMN IF NOT EXISTS，先查 information_schema
   const dbName = process.env.DB_NAME ?? 'ad_tools';
-  const [cols] = await p.query(
-    `SELECT COUNT(*) AS c FROM information_schema.columns
-     WHERE table_schema = ? AND table_name = 'adstream_configs' AND column_name = 'r_user_ids'`,
+  const hasCol = async (col: string) => {
+    const [cols] = await p.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns
+       WHERE table_schema = ? AND table_name = 'adstream_configs' AND column_name = ?`,
+      [dbName, col]
+    );
+    return ((cols as any[])[0]?.c ?? 0) > 0;
+  };
+  if (!(await hasCol('r_user_ids'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN r_user_ids TEXT NULL`);
+  }
+  // account_names → account_ids 遷移（by-id 改造）：補欄位，舊欄位放寬可空（資料轉換由 poc 腳本做）
+  if (!(await hasCol('account_ids'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN account_ids TEXT NULL`);
+  }
+  // 舊 account_names 欄保留當 rollback，但放寬可空（不再寫入）；只在仍為 NOT NULL 時改一次
+  const [legacyCol] = await p.query(
+    `SELECT is_nullable FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'adstream_configs' AND column_name = 'account_names'`,
     [dbName]
   );
-  if (((cols as any[])[0]?.c ?? 0) === 0) {
-    await p.query(`ALTER TABLE adstream_configs ADD COLUMN r_user_ids TEXT NULL AFTER account_names`);
+  if ((legacyCol as any[])[0]?.IS_NULLABLE === 'NO') {
+    await p.query(`ALTER TABLE adstream_configs MODIFY account_names TEXT NULL`);
   }
   bulkSchemaReady = true;
 }
 
 // 日期欄位用 DATE_FORMAT 取字串，避免 mysql2 回 Date 物件帶時區誤差
-const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_names, r_user_ids,
+const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids,
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
@@ -306,7 +323,7 @@ function mapBulkRow(r: any): BulkConfigRow {
     name: r.name,
     sheetUrl: r.sheet_url,
     sheetId: r.sheet_id,
-    accountNames: parseJsonArray(r.account_names),
+    accountIds: parseJsonArray(r.account_ids),
     rUserIds: parseJsonArray(r.r_user_ids),
     backfillStartDate: r.backfill_start_date,
     lastSyncedDate: r.last_synced_date,
@@ -339,13 +356,13 @@ export async function addBulkConfig(input: BulkConfigInput): Promise<number> {
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_names, r_user_ids, backfill_start_date)
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
       input.sheetId.trim(),
-      JSON.stringify(input.accountNames),
+      JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
     ]
@@ -359,13 +376,13 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
   await ensureBulkSchema(p);
   const [res] = await p.query(
     `UPDATE adstream_configs
-     SET name = ?, sheet_url = ?, sheet_id = ?, account_names = ?, r_user_ids = ?, backfill_start_date = ?
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, backfill_start_date = ?
      WHERE id = ?`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
       input.sheetId.trim(),
-      JSON.stringify(input.accountNames),
+      JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
       id,

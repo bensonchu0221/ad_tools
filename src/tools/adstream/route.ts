@@ -5,7 +5,7 @@ import { layout } from '../../core/html.js';
 import {
   dbAvailable, listDAccounts,
   listBulkConfigs, getBulkConfig, addBulkConfig, updateBulkConfig, deleteBulkConfig, markBulkRun,
-  type BulkConfigRow,
+  type BulkConfigRow, type DAccountRow,
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { runConfig, RAW_TAB, R_RAW_TAB } from './run.js';
@@ -75,14 +75,19 @@ export async function registerAdstream(app: FastifyInstance) {
     const hasDb = dbAvailable();
     // DB 連線可能臨時失敗（如 proxy 未開）；包起來讓表單仍可開啟，不整頁 500
     let configs: BulkConfigRow[] = [];
+    let accounts: DAccountRow[] = [];
     let dbError = '';
     if (hasDb) {
       try {
-        configs = await listBulkConfigs();
+        // 設定存 account_id，顯示需 id→名字對照
+        [configs, accounts] = await Promise.all([listBulkConfigs(), listDAccounts()]);
       } catch (e: any) {
         dbError = String(e?.message ?? e);
       }
     }
+    const nameById = new Map(accounts.map((a) => [String(a.accountId), a.accountName]));
+    // 設定清單裡的 D 帳號：id → 名字（找不到顯示 id），供 chip 與表格用
+    const accLabel = (id: string) => nameById.get(String(id)) ?? id;
 
     const rows = configs.map((c) => {
       const statusBadge =
@@ -90,12 +95,14 @@ export async function registerAdstream(app: FastifyInstance) {
         : c.lastRunStatus === 'error' ? '<span class="badge badge-error badge-sm">失敗</span>'
         : c.lastRunStatus === 'running' ? '<span class="badge badge-warning badge-sm">執行中</span>'
         : '<span class="badge badge-ghost badge-sm">未執行</span>';
+      // chip 還原用 [{id,name}]：編輯時不必等帳號清單載入即可顯示名字
+      const accPairs = c.accountIds.map((id) => ({ id: String(id), name: accLabel(id) }));
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
-        `data-accounts="${esc(JSON.stringify(c.accountNames))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}"`;
+        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}"`;
       return `<tr>
         <td>${esc(c.name)}</td>
-        <td class="text-xs">${c.accountNames.map((a) => esc(a)).join('<br>') || '—'}</td>
+        <td class="text-xs">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
         <td class="text-xs">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
         <td class="text-xs"><a class="link" href="${esc(c.sheetUrl)}" target="_blank">開啟 ↗</a></td>
         <td class="text-xs">${c.backfillStartDate}</td>
@@ -160,6 +167,7 @@ ${dbError ? `<div class="alert alert-error text-sm mb-4">資料庫連線失敗�
       <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
     </div>
     <div id="chips" class="flex flex-wrap gap-2 mt-2"></div>
+    <div class="label py-0"><span class="label-text-alt opacity-60">找不到帳號或 token？<a href="/tools/adpreview/tokens" class="link link-primary" target="_blank">管理 D 帳號 token →</a></span></div>
 
     <label class="label py-1 gap-2"><span class="badge badge-info badge-sm">R</span><span class="label-text font-medium">Rixbee Account ID</span><span class="label-text-alt opacity-60">可多組，逗號分隔；類型自動偵測</span></label>
     <input id="rUserIds" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
@@ -187,9 +195,11 @@ ${listSection}
   var accounts = [];
   var enabled = !!(search && !search.disabled);
 
+  // selected 元素＝{id, name}：顯示用 name、儲存用 id（穩定鍵）
+  function hasId(id) { return selected.some(function (s) { return s.id === id; }); }
   function renderChips() {
     chips.innerHTML = selected.map(function (a, i) {
-      return '<span class="badge badge-neutral gap-1">' + a +
+      return '<span class="badge badge-neutral gap-1">' + a.name +
         ' <button type="button" data-i="' + i + '" class="rmChip">✕</button></span>';
     }).join('');
   }
@@ -202,21 +212,21 @@ ${listSection}
   function renderList(kw) {
     var k = kw.toLowerCase();
     var hits = accounts.filter(function (a) {
-      return a.accountName.toLowerCase().indexOf(k) !== -1 && selected.indexOf(a.accountName) === -1;
+      return a.accountName.toLowerCase().indexOf(k) !== -1 && !hasId(String(a.accountId));
     }).slice(0, 50);
     list.innerHTML = hits.map(function (a) {
-      return '<li><a data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + '</a></li>';
+      return '<li><a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + '</a></li>';
     }).join('') || '<li class="menu-disabled"><a>無符合帳號</a></li>';
   }
   if (enabled) {
     fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = d; renderList(''); });
     search.addEventListener('input', function () { renderList(search.value.trim()); });
     list.addEventListener('mousedown', function (e) {
-      var t = e.target.closest('a[data-name]');
+      var t = e.target.closest('a[data-id]');
       if (!t) return;
       e.preventDefault();
-      var name = t.getAttribute('data-name');
-      if (selected.indexOf(name) === -1) { selected.push(name); renderChips(); }
+      var id = String(t.getAttribute('data-id'));
+      if (!hasId(id)) { selected.push({ id: id, name: t.getAttribute('data-name') }); renderChips(); }
       search.value = '';
       renderList('');
     });
@@ -289,7 +299,7 @@ ${listSection}
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         name: name, sheetUrl: sheetUrl, backfillStartDate: backfill,
-        accountNamesJson: JSON.stringify(selected),
+        accountIdsJson: JSON.stringify(selected.map(function (s) { return s.id; })),
         rUserIds: rUserIds,
       }),
     }).then(function (r) { return r.json(); }).then(function (d) {
@@ -339,7 +349,7 @@ ${listSection}
     });
   });
 })();
-</script>`)
+</script>`, { width: 'max-w-6xl' })
     );
   });
 
@@ -361,10 +371,10 @@ ${listSection}
     const name = (body?.name ?? '').trim();
     const sheetUrl = (body?.sheetUrl ?? '').trim();
     const backfillStartDate = (body?.backfillStartDate ?? '').trim();
-    let accountNames: string[] = [];
+    let accountIds: string[] = [];
     try {
-      const parsed = JSON.parse(body?.accountNamesJson ?? '[]');
-      if (Array.isArray(parsed)) accountNames = parsed.map((x: any) => String(x)).filter(Boolean);
+      const parsed = JSON.parse(body?.accountIdsJson ?? '[]');
+      if (Array.isArray(parsed)) accountIds = parsed.map((x: any) => String(x)).filter(Boolean);
     } catch { /* 下方統一檢查 */ }
     // R Account ID：逗號分隔文字輸入
     const rUserIds = (body?.rUserIds ?? '')
@@ -375,9 +385,9 @@ ${listSection}
     if (!name) return { error: '請填設定名稱' };
     const sheetId = parseSheetId(sheetUrl);
     if (!sheetId) return { error: '無法解析 Sheet 連結' };
-    if (!accountNames.length && !rUserIds.length) return { error: '請至少選一個 D 帳號或填一個 R Account ID' };
+    if (!accountIds.length && !rUserIds.length) return { error: '請至少選一個 D 帳號或填一個 R Account ID' };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(backfillStartDate)) return { error: '回補起始日格式錯誤' };
-    return { input: { name, sheetUrl, sheetId, accountNames, rUserIds, backfillStartDate } };
+    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, backfillStartDate } };
   }
 
   // ---------- 新增 ----------

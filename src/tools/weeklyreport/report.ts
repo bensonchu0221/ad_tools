@@ -9,7 +9,7 @@ import {
   getAdReportIndex,
   getCampaignDeviceReports,
 } from '../../core/popin.js';
-import { getDAccountToken } from '../../core/store.js';
+import { getDAccountTokenById } from '../../core/store.js';
 import { downloadImages, clusterImageUrls } from './imagehash.js';
 import type { UserType } from '../../core/rixbee.js';
 import {
@@ -325,8 +325,8 @@ async function fetchDData(
   input: WeeklyReportInput,
   onPhase?: (phase: string) => void
 ): Promise<{ rows: DRow[]; deviceAgg: Map<string, MetricAgg> }> {
-  const token = await getDAccountToken(input.dAccountName);
-  if (!token) throw new Error(`找不到 D 帳號「${input.dAccountName}」的 token`);
+  const token = await getDAccountTokenById(input.dAccountId);
+  if (!token) throw new Error(`找不到 D 帳號「${input.dAccountName || input.dAccountId}」(id=${input.dAccountId}) 的 token`);
 
   const accessToken = await getAccessToken(token);
   const campaigns = await getCampaigns(accessToken);
@@ -444,7 +444,7 @@ export async function buildReport(
   };
   const [rResult, dResult] = await Promise.all([
     fetchR(),
-    input.dAccountName
+    input.dAccountId
       ? fetchDData(input, onPhase)
       : Promise.resolve({ rows: [] as DRow[], deviceAgg: emptyDeviceAgg() }),
   ]);
@@ -453,8 +453,8 @@ export async function buildReport(
   // 裝置分析：D 端 platform_cv 只填得了 PC/Mobile，R 端 device_type 補 PC/Mobile/Tablet/Others（同桶累加）
   const deviceAgg = dResult.deviceAgg;
   mergeDeviceAgg(deviceAgg, rResult.deviceAgg);
-  if (input.dAccountName && dRaw.length === 0) {
-    warnings.push(`D 帳號「${input.dAccountName}」在走期內查無報表資料`);
+  if (input.dAccountId && dRaw.length === 0) {
+    warnings.push(`D 帳號「${input.dAccountName || input.dAccountId}」在走期內查無報表資料`);
   }
 
   onPhase?.('整合計算中…');

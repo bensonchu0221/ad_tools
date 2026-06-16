@@ -5,7 +5,8 @@ export type RUserType = 'agency' | 'direct' | 'super';
 
 /** 表單輸入（route 解析後傳給 report.ts）。R 帳號類型不收表單，管線內自動偵測。 */
 export interface WeeklyReportInput {
-  dAccountName: string; // D 帳號名（空字串 = 不抓 D）
+  dAccountId: string; // D 帳號 account_id（穩定鍵；空字串 = 不抓 D）
+  dAccountName: string; // D 帳號名（僅顯示/警告訊息用）
   rUserIds: string[]; // rixbee account ids（空陣列 = 不抓 R）
   buckets: { cv: string[]; mcv: string[]; mcv2: string[] }; // 拖拉分桶：事件欄位名陣列
   startDate: string; // YYYY-MM-DD

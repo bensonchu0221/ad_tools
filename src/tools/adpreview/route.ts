@@ -16,7 +16,7 @@ import { fetchCreativeDetail } from '../../core/popin.js';
 import { layout } from '../../core/html.js';
 import {
   listDAccounts,
-  getDAccountToken,
+  getDAccountTokenById,
   dbAvailable,
   addToken,
   updateToken,
@@ -88,7 +88,8 @@ export async function registerAdpreview(app: FastifyInstance) {
       <label class="label">D 帳號（輸入關鍵字搜尋）</label>
       <div class="dropdown w-full">
         <input id="accSearch" class="input input-bordered w-full" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
-        <input type="hidden" name="account" id="accValue">
+        <input type="hidden" name="account" id="accValue"><!-- account_id（穩定鍵） -->
+        <input type="hidden" name="accountName" id="accNameValue"><!-- 顯示用 -->
         <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
       </div>
       <div class="text-right"><a href="${BASE_PATH}/tokens" class="link link-primary text-sm">管理 D 帳號 token →</a></div>
@@ -116,6 +117,7 @@ export async function registerAdpreview(app: FastifyInstance) {
 (function () {
   var search = document.getElementById('accSearch');
   var hidden = document.getElementById('accValue');
+  var hiddenName = document.getElementById('accNameValue');
   var list = document.getElementById('accList');
   // 注意：不可在這裡整段 return（曾因 DB 未設定→搜尋框 disabled→提早退出，
   // 導致下方的 AJAX submit handler 都沒掛上、表單走原生 POST）
@@ -129,7 +131,7 @@ export async function registerAdpreview(app: FastifyInstance) {
     }).slice(0, 50);
     list.innerHTML = hits.map(function (a) {
       var badge = a.source === 'adtools' ? '<span class="badge badge-success badge-xs ml-1">自建</span>' : '';
-      return '<li><a data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + badge + '</a></li>';
+      return '<li><a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + badge + '</a></li>';
     }).join('') || '<li class="menu-disabled"><a>無符合帳號</a></li>';
   }
 
@@ -140,7 +142,7 @@ export async function registerAdpreview(app: FastifyInstance) {
     });
 
     search.addEventListener('input', function () {
-      hidden.value = '';
+      hidden.value = ''; hiddenName.value = ''; // 打字即清掉已選 id，逼從清單重選
       render(search.value.trim());
     });
   }
@@ -171,11 +173,12 @@ export async function registerAdpreview(app: FastifyInstance) {
   // 用 mousedown（非 click）：mousedown 會先讓輸入框失焦 → dropdown(:focus-within) 關閉
   // → mouseup 時元素已消失，click 永遠不會觸發。preventDefault 保住焦點、先完成選取。
   if (comboEnabled) list.addEventListener('mousedown', function (e) {
-    var t = e.target.closest('a[data-name]');
+    var t = e.target.closest('a[data-id]');
     if (!t) return;
     e.preventDefault();
     search.value = t.getAttribute('data-name');
-    hidden.value = t.getAttribute('data-name');
+    hidden.value = t.getAttribute('data-id');
+    hiddenName.value = t.getAttribute('data-name');
     search.blur(); // 選完再關閉 dropdown
   });
 
@@ -183,7 +186,8 @@ export async function registerAdpreview(app: FastifyInstance) {
   var testBtn = document.getElementById('testFetchBtn');
   var resultBox = document.getElementById('testFetchResult');
   if (testBtn) testBtn.addEventListener('click', function () {
-    var account = (hidden && hidden.value) || (search ? search.value.trim() : '');
+    var account = (hidden && hidden.value) || ''; // account_id（需從清單選取）
+    var accountName = (hiddenName && hiddenName.value) || '';
     var campaignId = document.querySelector('input[name="campaignId"]').value.trim();
     var assetId = document.querySelector('input[name="assetId"]').value.trim();
     if (!account || !campaignId || !assetId) {
@@ -197,7 +201,7 @@ export async function registerAdpreview(app: FastifyInstance) {
     fetch('${BASE_PATH}/fetch-creative', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ account: account, campaignId: campaignId, assetId: assetId }),
+      body: new URLSearchParams({ account: account, accountName: accountName, campaignId: campaignId, assetId: assetId }),
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.ok) {
         resultBox.innerHTML =
@@ -303,7 +307,7 @@ export async function registerAdpreview(app: FastifyInstance) {
   // ---------- 帳號清單 API（觸發節流同步） ----------
   app.get(`${BASE_PATH}/accounts`, async (_req, reply) => {
     const rows = await listDAccounts();
-    reply.send(rows.map((r) => ({ accountName: r.accountName, source: r.source })));
+    reply.send(rows.map((r) => ({ accountId: r.accountId, accountName: r.accountName, source: r.source })));
   });
 
   // ---------- 試抓素材：回抓到的圖/文案/相關資料，或明確 API 錯誤 ----------
@@ -313,8 +317,9 @@ export async function registerAdpreview(app: FastifyInstance) {
       if (!b?.account || !b?.campaignId || !b?.assetId) {
         return reply.send({ ok: false, error: '請選擇 D 帳號並填入 Campaign ID 與 Asset ID' });
       }
-      const token = await getDAccountToken(String(b.account).trim());
-      if (!token) return reply.send({ ok: false, error: `找不到帳號「${b.account}」的 token，請至 token 管理頁確認` });
+      const accountLabel = String(b.accountName || b.account).trim();
+      const token = await getDAccountTokenById(String(b.account).trim());
+      if (!token) return reply.send({ ok: false, error: `找不到帳號「${accountLabel}」的 token，請至 token 管理頁確認` });
       const detail = await fetchCreativeDetail(token, String(b.campaignId).trim(), String(b.assetId).trim());
       reply.send({ ok: true, ...detail });
     } catch (e: any) {
@@ -367,8 +372,8 @@ export async function registerAdpreview(app: FastifyInstance) {
     <form method="post" action="${BASE_PATH}/tokens" id="tokenForm" class="grid gap-3">
       <input type="hidden" name="id" id="f_id">
       <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">帳號名稱 *</label><input name="accountName" id="f_name" class="input input-bordered w-full" required></div>
-        <div><label class="label">account_id（選填）</label><input name="accountId" id="f_aid" class="input input-bordered w-full"></div>
+        <div><label class="label">帳號名稱</label><input name="accountName" id="f_name" class="input input-bordered w-full" required></div>
+        <div><label class="label">account_id</label><input name="accountId" id="f_aid" class="input input-bordered w-full" required></div>
       </div>
       <div><label class="label">Token <span class="text-xs opacity-60" id="tokenHint">*</span></label>
         <input name="token" id="f_token" class="input input-bordered w-full" placeholder="popin Basic token"></div>
@@ -429,8 +434,8 @@ function resetForm() {
 
   app.post(`${BASE_PATH}/tokens`, async (req, reply) => {
     const b = req.body as any;
-    if (!b?.accountName?.trim() || !b?.token?.trim()) {
-      return reply.code(400).type('text/html').send(layout('錯誤', `<div class="alert alert-error">帳號名稱與 token 必填</div><a class="btn mt-4" href="${BASE_PATH}/tokens">返回</a>`));
+    if (!b?.accountName?.trim() || !b?.accountId?.trim() || !b?.token?.trim()) {
+      return reply.code(400).type('text/html').send(layout('錯誤', `<div class="alert alert-error">帳號名稱、account_id 與 token 皆必填</div><a class="btn mt-4" href="${BASE_PATH}/tokens">返回</a>`));
     }
     await addToken({ accountName: b.accountName, token: b.token, accountId: b.accountId });
     reply.redirect(`${BASE_PATH}/tokens`);
@@ -438,6 +443,9 @@ function resetForm() {
 
   app.post(`${BASE_PATH}/tokens/:id/update`, async (req, reply) => {
     const b = req.body as any;
+    if (!b?.accountName?.trim() || !b?.accountId?.trim()) {
+      return reply.code(400).type('text/html').send(layout('錯誤', `<div class="alert alert-error">帳號名稱與 account_id 皆必填</div><a class="btn mt-4" href="${BASE_PATH}/tokens">返回</a>`));
+    }
     const ok = await updateToken(Number((req.params as any).id), {
       accountName: b.accountName ?? '',
       token: b.token,
@@ -484,9 +492,10 @@ function resetForm() {
       let material: Promise<Material>;
       if (fields.mode === 'popin') {
         if (!fields.account) return reply.send({ ok: false, error: '請先搜尋並選擇 D 帳號' });
+        const accountLabel = (fields.accountName || fields.account).trim();
         material = (async () => {
-          const token = await getDAccountToken(fields.account);
-          if (!token) throw new Error(`找不到帳號「${fields.account}」的 token，請至 token 管理頁確認`);
+          const token = await getDAccountTokenById(fields.account);
+          if (!token) throw new Error(`找不到帳號「${accountLabel}」的 token，請至 token 管理頁確認`);
           // 與「試抓素材」共用同一函式：錯誤訊息逐層明確、圖片網址經伺服器端驗證
           const detail = await fetchCreativeDetail(
             token,
