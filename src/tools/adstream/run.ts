@@ -2,7 +2,7 @@
 // Google Sheet 的兩個分頁（D→d_bulk_raw_data、R→r_bulk_raw_data）。
 // 增量規則：每次抓「上次同步日隔天 → 昨天(T-1)」。沒有上次同步日就從設定的回補起始日開始，
 // 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋（D/R 共用同一個進度游標）。
-import { getAccessToken, getCampaigns, getAdReportBulk } from '../../core/popin.js';
+import { getAccessToken, getCampaigns, getAdReportBulk, getDateReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { getDAccountTokenById, listDAccounts } from '../../core/store.js';
 import { appendRows } from '../../core/gsheets.js';
@@ -16,7 +16,13 @@ const BULK_COLS = [
   'date', 'imp', 'click', 'ctr', 'cpc', 'cpm', 'charge',
   'cv', 'cvr', 'mcv', 'campaign_id', 'campaign_name', 'ad_id',
 ] as const;
-export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS];
+// cv_* 細分轉換事件（8 欄，與週報 xlsx 口徑一致）。bulk 端點不含，唯有 per-ad date_reporting 才有，
+// 故 base 13 欄用 bulk、這 8 欄另打 per-ad 取得後以 date+campaign_id+ad_id 接回（見 fetchCvDetailMap）。
+const CV_COLS = [
+  'cv_view_content', 'cv_add_to_cart', 'cv_app_install', 'cv_complete_registration',
+  'cv_add_paymentInfo', 'cv_start_checkout', 'cv_search', 'cv_add_to_wishlist',
+] as const;
+export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, ...CV_COLS];
 
 // R 報表原生欄位（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）；前面補 synced_at
 const R_COLS = [
@@ -50,6 +56,50 @@ function addDays(ymd: string, n: number): string {
 }
 
 const compact = (ymd: string) => ymd.replace(/-/g, ''); // YYYY-MM-DD → YYYYMMDD
+
+// 日期正規化成 YYYYMMDD（去掉 - 與 /），供 bulk 列與 per-ad 列的 merge 鍵兩邊一致
+const dateKey = (d: any) => String(d ?? '').replace(/[-/]/g, '');
+
+/**
+ * 對 bulk 列裡「有資料的 (campaign_id, ad_id)」打 per-ad date_reporting 取 cv_* 細分。
+ * bulk 端點不含 cv_*，唯有 per-ad 端點才有；bulk 列本身就是有資料的 ad，直接拿來當索引、不必另外預掃。
+ * 回傳 key=「YYYYMMDD|campaign_id|ad_id」→ cv_* 物件，供 D 迴圈把 cv_* 接回每一列。
+ * ⚠️ per-ad 限流 1 req/s（最嚴），故此處是整個 D 抓取變慢的主因；失敗（getDateReports 內已重試兜底）
+ *   往外拋，由 runConfig 的原子性接住（整次不寫、不推進游標）。
+ */
+async function fetchCvDetailMap(
+  accessToken: string,
+  bulkRows: any[],
+  sd: string,
+  ed: string
+): Promise<Map<string, Record<string, number>>> {
+  // 去重出 per-ad 請求項（一個 ad 在區間內多日只需打一次，回應已含各日）
+  const seen = new Set<string>();
+  const items: { campaignId: string; adId: string }[] = [];
+  for (const r of bulkRows) {
+    const cid = String(r.campaign_id ?? '');
+    const aid = String(r.ad_id ?? '');
+    if (!cid || !aid) continue;
+    const k = `${cid}|${aid}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    items.push({ campaignId: cid, adId: aid });
+  }
+  const map = new Map<string, Record<string, number>>();
+  if (!items.length) return map;
+  const reports = await getDateReports(accessToken, items, sd, ed);
+  reports.forEach((rows, i) => {
+    const { campaignId, adId } = items[i];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || !row.date) continue;
+      const key = `${dateKey(row.date)}|${campaignId}|${adId}`;
+      const cv: Record<string, number> = {};
+      for (const c of CV_COLS) cv[c] = Number(row[c]) || 0;
+      map.set(key, cv);
+    }
+  });
+  return map;
+}
 
 /**
  * 自動偵測 R 帳號類型（搬自週報 detectRUserType）：台客/4A 各打極小 probe（必帶 day 維度，
@@ -132,7 +182,17 @@ export async function runConfig(
     const campaigns = await getCampaigns(accessToken);
     const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
     const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
-    for (const r of rows) dRows.push([accountName, syncedAt, ...BULK_COLS.map((c) => r[c] ?? '')]);
+    // cv_* 細分：bulk 列為索引，對有資料的 ad 另打 per-ad 取得後以 date+campaign_id+ad_id 接回
+    onPhase(`抓取 D 帳號 ${accountName} cv 細分（per-ad，限流較慢）…`);
+    const cvMap = await fetchCvDetailMap(accessToken, rows, sd, ed);
+    for (const r of rows) {
+      const cv = cvMap.get(`${dateKey(r.date)}|${r.campaign_id}|${r.ad_id}`) ?? {};
+      dRows.push([
+        accountName, syncedAt,
+        ...BULK_COLS.map((c) => r[c] ?? ''),
+        ...CV_COLS.map((c) => cv[c] ?? 0),
+      ]);
+    }
     accountStats.push({ account: accountName, rows: rows.length });
   }
 
