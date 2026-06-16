@@ -16,13 +16,15 @@ const BULK_COLS = [
   'date', 'imp', 'click', 'ctr', 'cpc', 'cpm', 'charge',
   'cv', 'cvr', 'mcv', 'campaign_id', 'campaign_name', 'ad_id',
 ] as const;
-// cv_* 細分轉換事件（8 欄，與週報 xlsx 口徑一致）。bulk 端點不含，唯有 per-ad date_reporting 才有，
-// 故 base 13 欄用 bulk、這 8 欄另打 per-ad 取得後以 date+campaign_id+ad_id 接回（見 fetchCvDetailMap）。
+// cv_* 細分轉換事件（11 欄，per-ad 實測全部）。bulk 端點不含，唯有 per-ad date_reporting 才有，
+// 故 base 13 欄用 bulk、這 11 欄另打 per-ad 取得後以 date+campaign_id+ad_id 接回（見 fetchCvDetailMap）。
 const CV_COLS = [
   'cv_view_content', 'cv_add_to_cart', 'cv_app_install', 'cv_complete_registration',
   'cv_add_paymentInfo', 'cv_start_checkout', 'cv_search', 'cv_add_to_wishlist',
+  'cv_purchase', 'cv_lead', 'cv_other',
 ] as const;
-export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, ...CV_COLS];
+// ad_name（廣告名稱）：bulk 只有 ad_id、per-ad 才有可讀名稱，故與 cv_* 一起從 per-ad 取、接在 ad_id 後
+export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, 'ad_name', ...CV_COLS];
 
 // R 報表原生欄位（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）；前面補 synced_at
 const R_COLS = [
@@ -63,7 +65,7 @@ const dateKey = (d: any) => String(d ?? '').replace(/[-/]/g, '');
 /**
  * 對 bulk 列裡「有資料的 (campaign_id, ad_id)」打 per-ad date_reporting 取 cv_* 細分。
  * bulk 端點不含 cv_*，唯有 per-ad 端點才有；bulk 列本身就是有資料的 ad，直接拿來當索引、不必另外預掃。
- * 回傳 key=「YYYYMMDD|campaign_id|ad_id」→ cv_* 物件，供 D 迴圈把 cv_* 接回每一列。
+ * 回傳 key=「YYYYMMDD|campaign_id|ad_id」→ {ad_name, cv_*} 物件，供 D 迴圈把 ad_name/cv_* 接回每一列。
  * ⚠️ per-ad 限流 1 req/s（最嚴），故此處是整個 D 抓取變慢的主因；失敗（getDateReports 內已重試兜底）
  *   往外拋，由 runConfig 的原子性接住（整次不寫、不推進游標）。
  */
@@ -72,7 +74,7 @@ async function fetchCvDetailMap(
   bulkRows: any[],
   sd: string,
   ed: string
-): Promise<Map<string, Record<string, number>>> {
+): Promise<Map<string, Record<string, any>>> {
   // 去重出 per-ad 請求項（一個 ad 在區間內多日只需打一次，回應已含各日）
   const seen = new Set<string>();
   const items: { campaignId: string; adId: string }[] = [];
@@ -85,7 +87,7 @@ async function fetchCvDetailMap(
     seen.add(k);
     items.push({ campaignId: cid, adId: aid });
   }
-  const map = new Map<string, Record<string, number>>();
+  const map = new Map<string, Record<string, any>>();
   if (!items.length) return map;
   const reports = await getDateReports(accessToken, items, sd, ed);
   reports.forEach((rows, i) => {
@@ -93,9 +95,9 @@ async function fetchCvDetailMap(
     for (const row of rows) {
       if (!row || typeof row !== 'object' || !row.date) continue;
       const key = `${dateKey(row.date)}|${campaignId}|${adId}`;
-      const cv: Record<string, number> = {};
-      for (const c of CV_COLS) cv[c] = Number(row[c]) || 0;
-      map.set(key, cv);
+      const detail: Record<string, any> = { ad_name: row.ad_name ?? '' };
+      for (const c of CV_COLS) detail[c] = Number(row[c]) || 0;
+      map.set(key, detail);
     }
   });
   return map;
@@ -186,11 +188,12 @@ export async function runConfig(
     onPhase(`抓取 D 帳號 ${accountName} cv 細分（per-ad，限流較慢）…`);
     const cvMap = await fetchCvDetailMap(accessToken, rows, sd, ed);
     for (const r of rows) {
-      const cv = cvMap.get(`${dateKey(r.date)}|${r.campaign_id}|${r.ad_id}`) ?? {};
+      const detail: Record<string, any> = cvMap.get(`${dateKey(r.date)}|${r.campaign_id}|${r.ad_id}`) ?? {};
       dRows.push([
         accountName, syncedAt,
         ...BULK_COLS.map((c) => r[c] ?? ''),
-        ...CV_COLS.map((c) => cv[c] ?? 0),
+        detail.ad_name ?? '',
+        ...CV_COLS.map((c) => detail[c] ?? 0),
       ]);
     }
     accountStats.push({ account: accountName, rows: rows.length });
