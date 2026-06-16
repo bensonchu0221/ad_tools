@@ -274,7 +274,6 @@ export async function registerWeeklyReport(app: FastifyInstance) {
   }
   loadJobs();
   setInterval(loadJobs, 4000);
-  });
 })();
 </script>`)
     );
