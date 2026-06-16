@@ -64,15 +64,6 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         <label class="label py-1 gap-2"><span class="badge badge-info badge-sm">R</span><span class="label-text font-medium">Rixbee Account ID</span><span class="label-text-alt opacity-60">可多組，逗號分隔；類型自動偵測</span></label>
         <input name="rAid" id="rAid" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219">
       </div>
-      <div>
-        <label class="label py-1"><span class="label-text font-medium">略過已結束的 campaign</span><span class="label-text-alt opacity-60">D 端，結束超過 N 個月不抓報表</span></label>
-        <select id="expireMonths" class="select select-bordered w-full max-w-xs">
-          <option value="1" selected>1 個月（最快）</option>
-          <option value="3">3 個月</option>
-          <option value="6">6 個月</option>
-        </select>
-      </div>
-
       <div class="divider my-0 text-sm opacity-70">轉換事件對應</div>
 
       <p class="text-xs opacity-60">把事件拖進下方的 CV / MCV / MCV2 框（或點一下事件循環切換位置）。沒分配的事件不計入轉換。</p>
@@ -227,7 +218,6 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       startDate: startDate,
       endDate: endDate,
       weekStart: document.getElementById('weekStart').value,
-      expireMonths: document.getElementById('expireMonths').value,
     });
 
     genBtn.classList.add('btn-disabled');
@@ -322,7 +312,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       startDate,
       endDate,
       weekStart: Math.min(7, Math.max(1, Number(b.weekStart) || 1)),
-      expireMonths: [1, 3, 6].includes(Number(b.expireMonths)) ? Number(b.expireMonths) : 1,
+      // campaign end_date 過濾門檻固定 3 個月（保守值）：UI 已移除此旋鈕，
+      // 賭「end_date 都可靠」風險不值得（end_date 過期但重啟投放的 campaign 設小會誤剪），故不再用最激進的 1
+      expireMonths: 3,
     };
 
     // label：帳號（D 名 / R ids）＋日期區間，清單顯示用
