@@ -54,11 +54,27 @@ app.get('/', async (_req, reply) => {
   const externalSection = externalTools.length
     ? `<div class="divider my-6"></div>${grid(externalTools)}`
     : '';
+  // 右下角浮動快捷（daisyUI FAB + Speed Dial，fab-main-action 變體）：常用外部站點一鍵開新分頁
+  // 主按鈕與各連結一律用灰色 btn；timeoff 放 fab-main-action（主動作），其餘 4 個為展開清單
+  const fab = `
+<div class="fab">
+  <div tabindex="0" role="button" class="btn btn-lg btn-circle" aria-label="快捷工具">
+    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z"/></svg>
+  </div>
+  <div class="fab-main-action">
+    timeoff <a href="https://timeoff.pacnexus.net/" target="_blank" class="btn btn-lg btn-circle">T</a>
+  </div>
+  <div>lunchbox <a href="https://lunchbox.pacnexus.net/" target="_blank" class="btn btn-lg btn-circle">L</a></div>
+  <div>cmp <a href="https://cmp.pacnexus.net/cmp" target="_blank" class="btn btn-lg btn-circle">C</a></div>
+  <div>budget-hunter <a href="https://cmp.pacnexus.net/bh" target="_blank" class="btn btn-lg btn-circle">B</a></div>
+  <div>test-media <a href="https://discovery.popin.tw/dc/dmp/articles/article3.html" target="_blank" class="btn btn-lg btn-circle">M</a></div>
+</div>`;
   reply.type('text/html').send(
     layout('內部廣告工具系統', `
 <h1 class="text-xl font-bold my-4">工具選單</h1>
 ${grid(internalTools)}
-${externalSection}`)
+${externalSection}
+${fab}`)
   );
 });
 
