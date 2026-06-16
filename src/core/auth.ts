@@ -50,10 +50,11 @@ function loginPage(msg = ''): string {
   );
 }
 
-/** 從簽章 cookie 取出已登入 email；無效/未登入回 null */
-function currentUser(req: FastifyRequest): string | null {
-  const raw = req.cookies[SESSION_COOKIE];
-  if (!raw) return null;
+/** 從簽章 cookie 取出已登入 email；無效/未登入/未啟用 OAuth（本機）皆回 null */
+export function currentUser(req: FastifyRequest): string | null {
+  const raw = req.cookies?.[SESSION_COOKIE];
+  // 本機開發未註冊 cookie plugin 時 unsignCookie 不存在，需防護避免丟錯
+  if (!raw || typeof req.unsignCookie !== 'function') return null;
   const { valid, value } = req.unsignCookie(raw);
   return valid && value ? value : null;
 }

@@ -8,9 +8,22 @@ import {
   type BulkConfigRow, type DAccountRow,
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
+import { currentUser } from '../../core/auth.js';
 import { runConfig, RAW_TAB, R_RAW_TAB } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
+
+// 系統管理者 email：清單看全部設定，並可操作他人設定；其餘使用者只能看/操作自己建立的
+const ADMIN_EMAILS = ['benson@popin.cc'];
+
+/** 本機未登入（viewer=null）視為管理者，方便開發；線上依 email 判定 */
+function isAdmin(viewer: string | null): boolean {
+  return !viewer || ADMIN_EMAILS.includes(viewer);
+}
+/** 設定擁有者守衛：管理者或建立者本人才可操作；舊資料(createdBy=null)只有管理者可動 */
+function canManage(viewer: string | null, config: BulkConfigRow): boolean {
+  return isAdmin(viewer) || config.createdBy === viewer;
+}
 
 // ---------- 手動執行 job 暫存（同 weeklyreport 樣式；TTL 10 分鐘、上限 20 筆） ----------
 interface RunJob {
@@ -71,16 +84,20 @@ async function executeAndRecord(
 
 export async function registerAdstream(app: FastifyInstance) {
   // ---------- 表單頁 + 已設定清單 ----------
-  app.get(BASE_PATH, async (_req, reply) => {
+  app.get(BASE_PATH, async (req, reply) => {
     const hasDb = dbAvailable();
-    // DB 連線可能臨時失敗（如 proxy 未開）；包起來讓表單仍可開啟，不整頁 500
+    // 一般使用者只看自己建立的設定；管理者(benson@popin.cc)看全部
+    const viewer = currentUser(req);
     let configs: BulkConfigRow[] = [];
     let accounts: DAccountRow[] = [];
     let dbError = '';
     if (hasDb) {
       try {
         // 設定存 account_id，顯示需 id→名字對照
-        [configs, accounts] = await Promise.all([listBulkConfigs(), listDAccounts()]);
+        [configs, accounts] = await Promise.all([
+          listBulkConfigs(isAdmin(viewer) ? null : viewer),
+          listDAccounts(),
+        ]);
       } catch (e: any) {
         dbError = String(e?.message ?? e);
       }
@@ -395,7 +412,7 @@ ${listSection}
     const { input, error } = parseConfigBody(req.body);
     if (error) return reply.send({ ok: false, error });
     try {
-      const id = await addBulkConfig(input);
+      const id = await addBulkConfig(input, currentUser(req));
       reply.send({ ok: true, id });
     } catch (e: any) {
       reply.send({ ok: false, error: String(e?.message ?? e) });
@@ -408,6 +425,9 @@ ${listSection}
     const { input, error } = parseConfigBody(req.body);
     if (error) return reply.send({ ok: false, error });
     try {
+      const existing = await getBulkConfig(id);
+      if (!existing) return reply.send({ ok: false, error: '找不到設定' });
+      if (!canManage(currentUser(req), existing)) return reply.send({ ok: false, error: '無權限操作此設定' });
       const ok = await updateBulkConfig(id, input);
       reply.send({ ok, error: ok ? undefined : '找不到設定' });
     } catch (e: any) {
@@ -419,6 +439,9 @@ ${listSection}
   app.post(`${BASE_PATH}/configs/:id/delete`, async (req, reply) => {
     const id = Number((req.params as any).id);
     try {
+      const existing = await getBulkConfig(id);
+      if (!existing) return reply.send({ ok: false, error: '找不到設定' });
+      if (!canManage(currentUser(req), existing)) return reply.send({ ok: false, error: '無權限操作此設定' });
       const ok = await deleteBulkConfig(id);
       reply.send({ ok });
     } catch (e: any) {
@@ -431,6 +454,7 @@ ${listSection}
     const id = Number((req.params as any).id);
     const config = await getBulkConfig(id);
     if (!config) return reply.send({ ok: false, error: '找不到設定' });
+    if (!canManage(currentUser(req), config)) return reply.send({ ok: false, error: '無權限操作此設定' });
 
     const jobId = randomUUID();
     createJob(jobId);

@@ -238,6 +238,7 @@ export interface BulkConfigRow {
   lastRunAt: string | null;
   lastRunStatus: string | null; // success / error / running
   lastRunMessage: string | null;
+  createdBy: string | null; // 建立者 email；舊資料為 null（只有管理者看得到）
   createdAt: string;
 }
 
@@ -287,6 +288,10 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
   if (!(await hasCol('account_ids'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN account_ids TEXT NULL`);
   }
+  // 建立者 email（清單依此過濾：管理者看全部、其餘只看自己；舊資料 null）
+  if (!(await hasCol('created_by'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN created_by VARCHAR(255) NULL`);
+  }
   // 舊 account_names 欄保留當 rollback，但放寬可空（不再寫入）；只在仍為 NOT NULL 時改一次
   const [legacyCol] = await p.query(
     `SELECT is_nullable FROM information_schema.columns
@@ -304,7 +309,7 @@ const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_i
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
-  last_run_status, last_run_message,
+  last_run_status, last_run_message, created_by,
   DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
   FROM adstream_configs`;
 
@@ -330,15 +335,19 @@ function mapBulkRow(r: any): BulkConfigRow {
     lastRunAt: r.last_run_at,
     lastRunStatus: r.last_run_status,
     lastRunMessage: r.last_run_message,
+    createdBy: r.created_by ?? null,
     createdAt: r.created_at,
   };
 }
 
-export async function listBulkConfigs(): Promise<BulkConfigRow[]> {
+/** ownerEmail 有給＝只回該建立者的設定（一般使用者）；不給＝全部（管理者 / 排程） */
+export async function listBulkConfigs(ownerEmail?: string | null): Promise<BulkConfigRow[]> {
   const p = getPool();
   if (!p) return [];
   await ensureBulkSchema(p);
-  const [rows] = await p.query(`${BULK_SELECT} ORDER BY id DESC`);
+  const where = ownerEmail ? ' WHERE created_by = ?' : '';
+  const args = ownerEmail ? [ownerEmail] : [];
+  const [rows] = await p.query(`${BULK_SELECT}${where} ORDER BY id DESC`, args);
   return (rows as any[]).map(mapBulkRow);
 }
 
@@ -351,13 +360,13 @@ export async function getBulkConfig(id: number): Promise<BulkConfigRow | null> {
   return r ? mapBulkRow(r) : null;
 }
 
-export async function addBulkConfig(input: BulkConfigInput): Promise<number> {
+export async function addBulkConfig(input: BulkConfigInput, createdBy?: string | null): Promise<number> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
@@ -365,6 +374,7 @@ export async function addBulkConfig(input: BulkConfigInput): Promise<number> {
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
+      createdBy ?? null,
     ]
   );
   return (res as any).insertId;
