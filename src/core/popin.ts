@@ -92,6 +92,31 @@ export async function getCreatives(
     .map((ad) => ({ title: ad.title, image: ad.image }));
 }
 
+export interface CampaignAsset {
+  assetId: string;
+  title: string;
+  image: string; // 已 normalize 的縮圖網址（供前端 grid 直接顯示）
+}
+
+/**
+ * 列出某 campaign 底下「有圖片的」素材，供表單 grid 選取（取代手填 asset id）。
+ * 只回有 image 的素材：廣告預覽要替換的是圖文版位，純文字素材無圖可換故濾掉。
+ */
+export async function getCampaignAssets(
+  accountToken: string,
+  campaignId: string
+): Promise<CampaignAsset[]> {
+  const accessToken = await getAccessToken(accountToken);
+  const ads = await getAdLists(accessToken, [campaignId]);
+  return ads
+    .filter((ad) => ad?.mongo_id && ad?.image)
+    .map((ad) => ({
+      assetId: String(ad.mongo_id),
+      title: ad.title ?? '',
+      image: normalizePopinImage(ad.image),
+    }));
+}
+
 export interface CreativeDetail {
   title: string;
   rawImage: string;

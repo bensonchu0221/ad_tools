@@ -12,7 +12,7 @@ import {
   MOBILE_VIEWPORT_WIDTH,
   type Material,
 } from './shoot.js';
-import { fetchCreativeDetail } from '../../core/popin.js';
+import { fetchCreativeDetail, getCampaignAssets } from '../../core/popin.js';
 import { sbPage } from '../../core/sbui.js';
 import {
   listDAccounts,
@@ -37,10 +37,33 @@ const MAIN_STYLE = `
     background:var(--slot);border:1px solid var(--line);border-radius:5px;padding:8px 10px}
   input[type=file]::file-selector-button{font-family:var(--mono);font-size:12px;margin-right:10px;
     border:1px solid var(--line);background:#F1F2F4;border-radius:4px;padding:5px 10px;cursor:pointer;color:var(--ink)}
-  .subsplit{height:1px;background:var(--line);margin:22px 0}
   .acc-grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:560px){.acc-grid2{grid-template-columns:1fr}}
   .tokright{text-align:right;margin-top:6px}
+  /* 來源二擇一：分段切換器（同時只顯示一個面板＝最直白的「擇一」） */
+  .modeseg{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:22px}
+  .modeseg button{font-family:var(--mono);font-size:13px;letter-spacing:.03em;color:var(--mut);background:var(--slot);
+    border:none;padding:13px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;align-items:center;
+    transition:background .15s,color .15s}
+  .modeseg button+button{border-left:1px solid var(--line)}
+  .modeseg button .sm{font-family:var(--body);font-size:11.5px;line-height:1.3;color:var(--mut)}
+  .modeseg button.on{background:var(--ink);color:#fff}
+  .modeseg button.on .sm{color:rgba(255,255,255,.72)}
+  .modeseg button:disabled{opacity:.5;cursor:not-allowed}
+  .mode-panel{display:none}
+  .mode-panel.on{display:block}
+  /* 載入素材列 + 縮圖選取 grid */
+  .asset-row{display:flex;gap:10px;align-items:flex-end}
+  .asset-row .grow{flex:1}
+  .asset-row .btn-line{flex:0 0 auto;padding:10px 14px}
+  .asset-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-top:14px}
+  .asset-cell{border:1px solid var(--line);border-radius:6px;overflow:hidden;cursor:pointer;background:var(--slot);
+    text-align:left;padding:0;font:inherit;transition:border-color .15s,box-shadow .15s}
+  .asset-cell:hover{border-color:var(--ink)}
+  .asset-cell.sel{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}
+  .asset-cell img{width:100%;aspect-ratio:1.91/1;object-fit:cover;display:block;background:#F1F2F4}
+  .asset-cell .cap{padding:7px 8px;font-size:12px;line-height:1.35;color:var(--ink);
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .fetch-card{display:flex;gap:14px;border:1px solid var(--line);border-radius:6px;background:#F8FAFC;padding:12px}
   .fetch-card img{width:160px;flex:0 0 auto;object-fit:cover;border-radius:4px}
   .fetch-card .meta{font-size:13px;display:flex;flex-direction:column;gap:4px}
@@ -98,43 +121,57 @@ export async function registerAdpreview(app: FastifyInstance) {
         </div>
       </div>
 
-      <div class="section-label">② 廣告素材</div>
+      <div class="section-label">② 廣告素材 · 來源二擇一</div>
       <div class="card">
-        <label class="radio-opt" style="margin-bottom:16px"><input type="radio" name="mode" value="upload" checked> 手動上傳</label>
-        <div class="field">
-          <div class="flabel"><span class="nm">廣告圖片</span></div>
-          <input type="file" name="image" accept="image/*">
-        </div>
-        <div class="field">
-          <div class="flabel"><span class="nm">標題文案</span></div>
-          <input type="text" name="title" placeholder="廣告標題">
-        </div>
-        <div class="field">
-          <div class="flabel"><span class="nm">廣告主名</span></div>
-          <input type="text" name="advertiserName" placeholder="例如：某某品牌">
+        <input type="hidden" name="mode" id="modeInput" value="upload">
+        <div class="modeseg">
+          <button type="button" data-mode="upload">手動上傳<span class="sm">自己提供圖片與文案</span></button>
+          <button type="button" data-mode="popin" ${hasDb ? '' : 'disabled'}>用 popin 自動抓素材<span class="sm">${hasDb ? '輸入 D campaign 帶出素材' : '未設定資料庫，暫不可用'}</span></button>
         </div>
 
-        <div class="subsplit"></div>
+        <div class="mode-panel" id="panel-upload">
+          <div class="field">
+            <div class="flabel"><span class="nm">廣告圖片</span></div>
+            <input type="file" name="image" accept="image/*">
+          </div>
+          <div class="field">
+            <div class="flabel"><span class="nm">標題文案</span></div>
+            <input type="text" name="title" placeholder="廣告標題">
+          </div>
+          <div class="field">
+            <div class="flabel"><span class="nm">廣告主名</span></div>
+            <input type="text" name="advertiserName" placeholder="例如：某某品牌">
+          </div>
+        </div>
 
-        <label class="radio-opt" style="margin-bottom:16px"><input type="radio" name="mode" value="popin" ${hasDb ? '' : 'disabled'}> 用 popin 自動抓素材${hasDb ? '' : '（未設定資料庫，暫不可用）'}</label>
-        <div class="field">
-          <div class="flabel"><span class="src src-d">D</span><span class="nm">D 帳號</span><span class="hint">輸入關鍵字搜尋</span></div>
-          <div class="combo">
-            <input type="text" id="accSearch" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
-            <input type="hidden" name="account" id="accValue">
-            <input type="hidden" name="accountName" id="accNameValue">
-            <div id="accList" class="combo-list"></div>
+        <div class="mode-panel" id="panel-popin" data-disabled="${hasDb ? '0' : '1'}">
+          <div class="field">
+            <div class="flabel"><span class="src src-d">D</span><span class="nm">D 帳號</span><span class="hint">輸入關鍵字搜尋</span></div>
+            <div class="combo">
+              <input type="text" id="accSearch" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
+              <input type="hidden" name="account" id="accValue">
+              <input type="hidden" name="accountName" id="accNameValue">
+              <div id="accList" class="combo-list"></div>
+            </div>
+            <div class="tokright"><a href="${BASE_PATH}/tokens" style="font-family:var(--mono);font-size:12px;color:var(--accent);text-decoration:none">管理 D 帳號 token →</a></div>
           </div>
-          <div class="tokright"><a href="${BASE_PATH}/tokens" style="font-family:var(--mono);font-size:12px;color:var(--accent);text-decoration:none">管理 D 帳號 token →</a></div>
-        </div>
-        <div class="field">
-          <div class="acc-grid2">
-            <div><div class="flabel"><span class="nm">Campaign ID</span></div><input type="text" name="campaignId" placeholder="mongo_id"></div>
-            <div><div class="flabel"><span class="nm">Asset ID</span></div><input type="text" name="assetId" placeholder="mongo_id"></div>
+          <div class="field">
+            <div class="flabel"><span class="nm">廣告主名</span><span class="hint">取代預覽版位上的 PR 標示，直接填最準</span></div>
+            <input type="text" name="advertiserName" placeholder="例如：某某品牌">
           </div>
+          <div class="field">
+            <div class="flabel"><span class="nm">Campaign ID</span></div>
+            <div class="asset-row">
+              <input class="grow" type="text" name="campaignId" id="campaignInput" placeholder="mongo_id">
+              <button type="button" id="loadAssetsBtn" class="btn-line">載入素材</button>
+            </div>
+            <input type="hidden" name="assetId" id="assetIdValue">
+            <div id="assetMsg" style="margin-top:10px"></div>
+            <div id="assetGrid" class="asset-grid"></div>
+          </div>
+          <button type="button" id="testFetchBtn" class="btn-line" disabled>試抓所選素材（先確認抓得到再產生）</button>
+          <div id="testFetchResult" style="margin-top:10px"></div>
         </div>
-        <button type="button" id="testFetchBtn" class="btn-line">試抓素材（先確認抓得到再產生）</button>
-        <div id="testFetchResult" style="margin-top:10px"></div>
       </div>
 
       <div class="card" style="margin-top:16px">
@@ -148,47 +185,34 @@ export async function registerAdpreview(app: FastifyInstance) {
 
     const script = `
 (function () {
-  var search = document.getElementById('accSearch');
-  var hidden = document.getElementById('accValue');
-  var hiddenName = document.getElementById('accNameValue');
-  var list = document.getElementById('accList');
-  var comboEnabled = !!(search && !search.disabled);
-  var accounts = [];
-
-  function render(keyword) {
-    var kw = keyword.toLowerCase();
-    var hits = accounts.filter(function (a) {
-      return a.accountName.toLowerCase().indexOf(kw) !== -1;
-    }).slice(0, 50);
-    list.innerHTML = hits.map(function (a) {
-      var badge = a.source === 'adtools' ? ' <span style="color:var(--ok);font-size:11px">自建</span>' : '';
-      return '<a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + badge + '</a>';
-    }).join('') || '<div class="empty">無符合帳號</div>';
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  if (comboEnabled) {
-    fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (data) {
-      accounts = data; render('');
-    });
-    search.addEventListener('focus', function () { setMode('popin'); list.classList.add('open'); });
-    search.addEventListener('blur', function () { setTimeout(function () { list.classList.remove('open'); }, 120); });
-    search.addEventListener('input', function () {
-      hidden.value = ''; hiddenName.value = ''; // 打字即清掉已選 id
-      list.classList.add('open');
-      render(search.value.trim());
-    });
-  }
-
-  // UX：操作哪一區就自動切到該模式
+  // ---------- 來源二擇一：分段切換器（同時只顯示一個面板） ----------
+  var modeInput = document.getElementById('modeInput');
+  var segBtns = [].slice.call(document.querySelectorAll('.modeseg button'));
+  var panels = {
+    upload: document.getElementById('panel-upload'),
+    popin: document.getElementById('panel-popin'),
+  };
   function setMode(v) {
-    var r = document.querySelector('input[name="mode"][value="' + v + '"]');
-    if (r && !r.disabled) r.checked = true;
+    var panel = panels[v];
+    if (!panel || panel.getAttribute('data-disabled') === '1') return; // popin 無 DB 不可選
+    modeInput.value = v;
+    segBtns.forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-mode') === v); });
+    Object.keys(panels).forEach(function (k) {
+      var on = k === v;
+      panels[k].classList.toggle('on', on);
+      // 停用非作用面板的欄位，避免兩個面板的 advertiserName（同 name）一起送出（按鈕另外管）
+      panels[k].querySelectorAll('input, select, textarea').forEach(function (el) { el.disabled = !on; });
+    });
   }
-  document.querySelectorAll('input[name="campaignId"], input[name="assetId"]').forEach(function (el) {
-    el.addEventListener('focus', function () { setMode('popin'); });
+  segBtns.forEach(function (b) {
+    b.addEventListener('click', function () { setMode(b.getAttribute('data-mode')); });
   });
-  var fileInput = document.querySelector('input[name="image"]');
-  if (fileInput) fileInput.addEventListener('focus', function () { setMode('upload'); });
+  setMode('upload');
 
   // 選到手機版位媒體 → 裝置自動切手機
   var mediaSel = document.querySelector('select[name="mediaId"]');
@@ -198,30 +222,127 @@ export async function registerAdpreview(app: FastifyInstance) {
     var r = document.querySelector('input[name="device"][value="' + d + '"]');
     if (r) r.checked = true;
   });
-  if (comboEnabled) list.addEventListener('mousedown', function (e) {
-    var t = e.target.closest('a[data-id]');
-    if (!t) return;
-    e.preventDefault();
-    search.value = t.getAttribute('data-name');
-    hidden.value = t.getAttribute('data-id');
-    hiddenName.value = t.getAttribute('data-name');
-    list.classList.remove('open');
-    search.blur();
-  });
 
-  // 試抓素材
+  // ---------- D 帳號可搜尋下拉 ----------
+  var search = document.getElementById('accSearch');
+  var hidden = document.getElementById('accValue');
+  var hiddenName = document.getElementById('accNameValue');
+  var list = document.getElementById('accList');
+  // 是否可用看 DB（data-disabled），不看當下 mode 是否停用 input——否則切到上傳分頁時 combo 不會被接上
+  var comboEnabled = !!search && panels.popin.getAttribute('data-disabled') !== '1';
+  var accounts = [];
+
+  function render(keyword) {
+    var kw = keyword.toLowerCase();
+    var hits = accounts.filter(function (a) {
+      return a.accountName.toLowerCase().indexOf(kw) !== -1;
+    }).slice(0, 50);
+    list.innerHTML = hits.map(function (a) {
+      var badge = a.source === 'adtools' ? ' <span style="color:var(--ok);font-size:11px">自建</span>' : '';
+      return '<a data-id="' + a.accountId + '" data-name="' + escapeHtml(a.accountName) + '">' + escapeHtml(a.accountName) + badge + '</a>';
+    }).join('') || '<div class="empty">無符合帳號</div>';
+  }
+
+  if (comboEnabled) {
+    fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (data) {
+      accounts = data; render('');
+    });
+    search.addEventListener('focus', function () { list.classList.add('open'); });
+    search.addEventListener('blur', function () { setTimeout(function () { list.classList.remove('open'); }, 120); });
+    search.addEventListener('input', function () {
+      hidden.value = ''; hiddenName.value = ''; // 打字即清掉已選 id
+      list.classList.add('open');
+      render(search.value.trim());
+    });
+    list.addEventListener('mousedown', function (e) {
+      var t = e.target.closest('a[data-id]');
+      if (!t) return;
+      e.preventDefault();
+      search.value = t.getAttribute('data-name');
+      hidden.value = t.getAttribute('data-id');
+      hiddenName.value = t.getAttribute('data-name');
+      list.classList.remove('open');
+      search.blur();
+    });
+  }
+
+  // ---------- 載入素材 → 縮圖 grid 選取（取代手填 asset id） ----------
+  var loadBtn = document.getElementById('loadAssetsBtn');
+  var campaignInput = document.getElementById('campaignInput');
+  var assetIdHidden = document.getElementById('assetIdValue');
+  var assetGrid = document.getElementById('assetGrid');
+  var assetMsg = document.getElementById('assetMsg');
   var testBtn = document.getElementById('testFetchBtn');
   var resultBox = document.getElementById('testFetchResult');
+
+  function clearSelection() {
+    assetIdHidden.value = '';
+    if (testBtn) testBtn.disabled = true;
+    if (resultBox) resultBox.innerHTML = '';
+  }
+
+  if (loadBtn) loadBtn.addEventListener('click', function () {
+    var account = (hidden && hidden.value) || '';
+    var campaignId = campaignInput.value.trim();
+    if (!account) { assetMsg.innerHTML = '<div class="msg msg-warn">請先選擇 D 帳號</div>'; return; }
+    if (!campaignId) { assetMsg.innerHTML = '<div class="msg msg-warn">請先填入 Campaign ID</div>'; return; }
+    loadBtn.disabled = true;
+    loadBtn.textContent = '載入中…';
+    assetGrid.innerHTML = '';
+    assetMsg.innerHTML = '';
+    clearSelection();
+    fetch('${BASE_PATH}/assets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ account: account, campaignId: campaignId }),
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.ok) {
+        assetMsg.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + escapeHtml(d.error) + '</div>';
+        return;
+      }
+      if (!d.assets.length) {
+        assetMsg.innerHTML = '<div class="msg msg-warn">此 campaign 沒有可選的圖文素材</div>';
+        return;
+      }
+      assetMsg.innerHTML = '<div class="note">共 ' + d.assets.length + ' 個素材，點選一個作為要替換的廣告</div>';
+      assetGrid.innerHTML = d.assets.map(function (a) {
+        return '<button type="button" class="asset-cell" data-id="' + escapeHtml(a.assetId) + '">' +
+          '<img src="' + escapeHtml(a.image) + '" loading="lazy" alt="">' +
+          '<div class="cap">' + escapeHtml(a.title || '（無標題）') + '</div></button>';
+      }).join('');
+    }).catch(function (e) {
+      assetMsg.innerHTML = '<div class="msg msg-err">請求失敗：' + escapeHtml(e.message) + '</div>';
+    }).finally(function () {
+      loadBtn.disabled = false;
+      loadBtn.textContent = '載入素材';
+    });
+  });
+
+  if (assetGrid) assetGrid.addEventListener('click', function (e) {
+    var cell = e.target.closest('.asset-cell');
+    if (!cell) return;
+    assetGrid.querySelectorAll('.asset-cell').forEach(function (c) { c.classList.remove('sel'); });
+    cell.classList.add('sel');
+    assetIdHidden.value = cell.getAttribute('data-id');
+    if (testBtn) testBtn.disabled = false;
+    if (resultBox) resultBox.innerHTML = '<div class="msg msg-ok">已選擇素材，可直接「產生預覽」，或先「試抓」確認伺服器端載得到圖</div>';
+  });
+
+  // 打字改 campaign id → 既有的素材選取已失效，清掉
+  if (campaignInput) campaignInput.addEventListener('input', function () {
+    assetGrid.innerHTML = ''; assetMsg.innerHTML = ''; clearSelection();
+  });
+
+  // 試抓所選素材：伺服器端驗證選定的 asset 圖片可載入
   if (testBtn) testBtn.addEventListener('click', function () {
     var account = (hidden && hidden.value) || '';
     var accountName = (hiddenName && hiddenName.value) || '';
-    var campaignId = document.querySelector('input[name="campaignId"]').value.trim();
-    var assetId = document.querySelector('input[name="assetId"]').value.trim();
+    var campaignId = campaignInput.value.trim();
+    var assetId = assetIdHidden.value.trim();
     if (!account || !campaignId || !assetId) {
-      resultBox.innerHTML = '<div class="msg msg-warn">請先選擇 D 帳號並填入 Campaign ID 與 Asset ID</div>';
+      resultBox.innerHTML = '<div class="msg msg-warn">請先選擇 D 帳號、填 Campaign ID 並點選一個素材</div>';
       return;
     }
-    setMode('popin');
     testBtn.disabled = true;
     testBtn.textContent = '抓取中…';
     resultBox.innerHTML = '';
@@ -233,22 +354,21 @@ export async function registerAdpreview(app: FastifyInstance) {
       if (d.ok) {
         resultBox.innerHTML =
           '<div class="fetch-card">' +
-            '<img src="' + d.imageUrl + '" alt="素材圖">' +
+            '<img src="' + escapeHtml(d.imageUrl) + '" alt="素材圖">' +
             '<div class="meta">' +
               '<div><span class="st st-done">抓取成功</span></div>' +
-              '<div><b>標題：</b>' + d.title + '</div>' +
-              '<div><b>Campaign：</b>' + d.campaignName + '</div>' +
-              (d.brand ? '<div><b>廣告主：</b>' + d.brand + '</div>' : '') +
-              '<div class="brk"><b>圖片網址（已驗證可載入）：</b>' + d.imageUrl + '</div>' +
+              '<div><b>標題：</b>' + escapeHtml(d.title) + '</div>' +
+              '<div><b>Campaign：</b>' + escapeHtml(d.campaignName) + '</div>' +
+              '<div class="brk"><b>圖片網址（已驗證可載入）：</b>' + escapeHtml(d.imageUrl) + '</div>' +
             '</div></div>';
       } else {
-        resultBox.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + d.error + '</div>';
+        resultBox.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + escapeHtml(d.error) + '</div>';
       }
     }).catch(function (e) {
-      resultBox.innerHTML = '<div class="msg msg-err">請求失敗：' + e.message + '</div>';
+      resultBox.innerHTML = '<div class="msg msg-err">請求失敗：' + escapeHtml(e.message) + '</div>';
     }).finally(function () {
       testBtn.disabled = false;
-      testBtn.textContent = '試抓素材（先確認抓得到再產生）';
+      testBtn.textContent = '試抓所選素材（先確認抓得到再產生）';
     });
   });
 
@@ -334,6 +454,22 @@ export async function registerAdpreview(app: FastifyInstance) {
   app.get(`${BASE_PATH}/accounts`, async (_req, reply) => {
     const rows = await listDAccounts();
     reply.send(rows.map((r) => ({ accountId: r.accountId, accountName: r.accountName, source: r.source })));
+  });
+
+  // ---------- 列出 campaign 底下的圖文素材（供表單 grid 選取，取代手填 asset id） ----------
+  app.post(`${BASE_PATH}/assets`, async (req, reply) => {
+    const b = req.body as any;
+    try {
+      if (!b?.account || !b?.campaignId) {
+        return reply.send({ ok: false, error: '請選擇 D 帳號並填入 Campaign ID' });
+      }
+      const token = await getDAccountTokenById(String(b.account).trim());
+      if (!token) return reply.send({ ok: false, error: '找不到此帳號的 token，請至 token 管理頁確認' });
+      const assets = await getCampaignAssets(token, String(b.campaignId).trim());
+      reply.send({ ok: true, assets });
+    } catch (e: any) {
+      reply.send({ ok: false, error: String(e?.message ?? e) });
+    }
   });
 
   // ---------- 試抓素材：回抓到的圖/文案/相關資料，或明確 API 錯誤 ----------

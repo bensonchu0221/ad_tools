@@ -170,7 +170,19 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
     onPhase('鎖定廣告卡…');
     const found = await page.evaluate((sel) => {
       const cards = [...document.querySelectorAll(sel.card)] as HTMLElement[];
-      const adCard = cards.find((c) => c.classList.contains(sel.adCardClass)) || cards[0];
+      // 我們要替換的是「圖文廣告版位」：popin 同一區塊可能同時有純文字廣告卡與圖文廣告卡，
+      // 優先挑「imgBox 內真的有圖（<img> 或 background-image）」的廣告卡，避免選到純文字卡。
+      const hasImage = (c: HTMLElement) => {
+        const box = c.querySelector(sel.imgBox) as HTMLElement | null;
+        if (!box) return false;
+        if (box.querySelector('img')) return true;
+        return [box, ...box.querySelectorAll('*')].some((el) => {
+          const bg = getComputedStyle(el as HTMLElement).backgroundImage;
+          return !!bg && bg !== 'none';
+        });
+      };
+      const adCards = cards.filter((c) => c.classList.contains(sel.adCardClass));
+      const adCard = adCards.find(hasImage) || adCards[0] || cards[0];
       if (!adCard) return false;
       adCard.id = '__preview_target__';
       adCard.scrollIntoView({ block: 'center' });
