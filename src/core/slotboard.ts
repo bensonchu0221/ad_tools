@@ -16,6 +16,15 @@ interface SlotTool {
 // 只處理 & → &amp;，避免 code（如 D&R）破壞 HTML（內容皆為內部固定字串，無其它注入風險）
 const esc = (s: string) => s.replace(/&/g, '&amp;');
 
+// 底部快捷列：常用外部站點一鍵開新分頁（沿用舊首頁右下 FAB 的同一組連結）
+const QUICK_LINKS = [
+  { label: 'timeoff', href: 'https://timeoff.pacnexus.net/' },
+  { label: 'lunchbox', href: 'https://lunchbox.pacnexus.net/' },
+  { label: 'cmp', href: 'https://cmp.pacnexus.net/cmp' },
+  { label: 'budget-hunter', href: 'https://cmp.pacnexus.net/bh' },
+  { label: 'test-media', href: 'https://discovery.popin.tw/dc/dmp/articles/article3.html' }
+];
+
 export function renderSlotBoard(tools: SlotTool[]): string {
   const internal = tools.filter((t) => !t.external);
   const external = tools.filter((t) => t.external);
@@ -123,6 +132,14 @@ export function renderSlotBoard(tools: SlotTool[]): string {
   .ext .name{font-weight:500;font-size:14px}
   .ext .meta{font-family:var(--mono);font-size:11.5px;color:var(--mut)}
   .ext .ext-arrow{font-family:var(--mono);color:var(--mut)}
+  .quick{display:flex;flex-wrap:wrap;gap:8px}
+  .quick a{display:inline-flex;align-items:center;gap:5px;
+    font-family:var(--mono);font-size:12px;color:var(--ink);text-decoration:none;
+    border:1px solid var(--line);border-radius:999px;padding:6px 13px;
+    transition:border-color .18s,color .18s}
+  .quick a:hover{border-color:var(--accent);color:var(--accent)}
+  .quick a span{color:var(--mut)}
+  .quick a:hover span{color:var(--accent)}
   footer{padding:48px 0 40px;font-family:var(--mono);font-size:11px;
     letter-spacing:.1em;color:var(--mut);text-transform:uppercase}
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -146,6 +163,8 @@ export function renderSlotBoard(tools: SlotTool[]): string {
     ${external.length ? `<div class="section-label" style="margin-top:40px">站外工具 · external</div>
     <div class="ext">${external.map(ext).join('')}
     </div>` : ''}
+    <div class="section-label" style="margin-top:40px">快捷 · quick access</div>
+    <div class="quick">${QUICK_LINKS.map((q) => `<a href="${q.href}" target="_blank">${q.label} <span>↗</span></a>`).join('')}</div>
     <footer>popin ad-ops · asia-east1</footer>
   </div>
 </body>
