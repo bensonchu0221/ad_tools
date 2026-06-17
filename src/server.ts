@@ -5,6 +5,7 @@ import multipart from '@fastify/multipart';
 import formbody from '@fastify/formbody';
 import { registerAuth } from './core/auth.js';
 import { layout } from './core/html.js';
+import { renderSlotBoard } from './core/slotboard.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyreport/route.js';
 import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.js';
@@ -20,6 +21,8 @@ interface Tool {
   external?: boolean;
   icon?: string; // 內部工具卡片左側圖示（24x24 stroke svg path 內容）
   accent?: string; // daisyUI 語意色名（info/success/warning…），驅動圖示底色與 hover 邊框
+  code?: string; // 實驗版 /board 用：版位英文代號（如 AD PREVIEW）
+  tag?: string; // 實驗版 /board 用：底部類型標籤（如 SCREENSHOT）
 }
 // 卡片圖示：24x24、stroke、currentColor（顏色由外層 text-* 決定）
 const ICON = {
@@ -28,9 +31,9 @@ const ICON = {
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
 };
 const TOOLS: Tool[] = [
-  { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, accent: 'info' },
-  { name: 'D&R 週報', desc: '整合 Discovery + Rixbee 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, accent: 'success' },
-  { name: '廣告凝視者', desc: '多 D 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, accent: 'warning' },
+  { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, accent: 'info', code: 'AD PREVIEW', tag: 'SCREENSHOT' },
+  { name: 'D&R 週報', desc: '整合 Discovery + Rixbee 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, accent: 'success', code: 'D&R WEEKLY', tag: 'EXCEL · 5 SHEETS' },
+  { name: '廣告凝視者', desc: '多 D 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, accent: 'warning', code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' },
   // 站外既有工具（各自獨立服務，僅選單連結）
   { name: 'R 大量上傳 (Broadciel)', desc: 'r_bulk_upload', href: 'https://cmp.pacnexus.net/cmp', external: true },
   { name: 'Budget Hunter', desc: '神盾追速', href: 'https://cmp.pacnexus.net/bh', external: true }
@@ -107,6 +110,11 @@ ${internalSection}
 ${externalSection}
 ${fab}`)
   );
+});
+
+// 實驗性替代首頁（Ad Slot Board 方向）：與正式首頁 / 並存，不影響現有版本
+app.get('/board', async (_req, reply) => {
+  reply.type('text/html').send(renderSlotBoard(TOOLS));
 });
 
 app.get('/health', async (_req, reply) => reply.code(200).send('ok'));
