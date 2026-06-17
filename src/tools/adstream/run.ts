@@ -2,7 +2,7 @@
 // Google Sheet 的兩個分頁（D→d_bulk_raw_data、R→r_bulk_raw_data）。
 // 增量規則：每次抓「上次同步日隔天 → 昨天(T-1)」。沒有上次同步日就從設定的回補起始日開始，
 // 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋（D/R 共用同一個進度游標）。
-import { getAccessToken, getCampaigns, getAdReportBulk, getDateReports } from '../../core/popin.js';
+import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { getDAccountTokenById, listDAccounts } from '../../core/store.js';
 import { appendRows } from '../../core/gsheets.js';
@@ -24,7 +24,9 @@ const CV_COLS = [
   'cv_purchase', 'cv_lead', 'cv_other',
 ] as const;
 // ad_name（廣告名稱）：bulk 只有 ad_id、per-ad 才有可讀名稱，故與 cv_* 一起從 per-ad 取、接在 ad_id 後
-export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, 'ad_name', ...CV_COLS];
+// headline（廣告文案標題＝素材 title）：bulk/per-ad 報表端點都沒有，唯有 getAdLists（廣告本身設定）才有，
+// 故另打 getAdLists 建 ad_id→title 對照接回（見 fetchHeadlineMap），接在 ad_name 後
+export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, 'ad_name', 'headline', ...CV_COLS];
 
 // R 報表原生欄位（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）；前面補 synced_at
 const R_COLS = [
@@ -100,6 +102,21 @@ async function fetchCvDetailMap(
       map.set(key, detail);
     }
   });
+  return map;
+}
+
+/**
+ * 取 ad_id → headline（廣告文案標題＝素材 title）對照。
+ * title 只存在於 getAdLists（廣告本身設定），bulk/per-ad 報表端點都沒有，故另打 getAdLists。
+ * getAdLists 走 batchFetch 併發、無 per-ad 的 1 req/s 限流，成本低；一個 ad_id（mongo_id）對一個 title。
+ */
+async function fetchHeadlineMap(accessToken: string, campaignIds: string[]): Promise<Map<string, string>> {
+  const ads = await getAdLists(accessToken, campaignIds, { batchSize: 8 });
+  const map = new Map<string, string>();
+  for (const ad of ads) {
+    const aid = String(ad.mongo_id ?? '');
+    if (aid) map.set(aid, ad.title ?? '');
+  }
   return map;
 }
 
@@ -184,6 +201,8 @@ export async function runConfig(
     const campaigns = await getCampaigns(accessToken);
     const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
     const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
+    // headline（廣告文案標題）：報表端點沒有，另打 getAdLists 建 ad_id→title 對照
+    const headlineMap = await fetchHeadlineMap(accessToken, campaignIds);
     // cv_* 細分：bulk 列為索引，對有資料的 ad 另打 per-ad 取得後以 date+campaign_id+ad_id 接回
     onPhase(`抓取 D 帳號 ${accountName} cv 細分（per-ad，限流較慢）…`);
     const cvMap = await fetchCvDetailMap(accessToken, rows, sd, ed);
@@ -193,6 +212,7 @@ export async function runConfig(
         accountName, syncedAt,
         ...BULK_COLS.map((c) => r[c] ?? ''),
         detail.ad_name ?? '',
+        headlineMap.get(String(r.ad_id)) ?? '',
         ...CV_COLS.map((c) => detail[c] ?? 0),
       ]);
     }
