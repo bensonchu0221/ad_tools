@@ -13,7 +13,7 @@ import {
   type Material,
 } from './shoot.js';
 import { fetchCreativeDetail } from '../../core/popin.js';
-import { layout } from '../../core/html.js';
+import { sbPage } from '../../core/sbui.js';
 import {
   listDAccounts,
   getDAccountTokenById,
@@ -28,6 +28,40 @@ export const BASE_PATH = '/tools/adpreview';
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+// 廣告預覽特有 CSS（通用元件在 sbui.ts）：radio/file 輸入、試抓結果卡、實況直播容器、雙欄
+const MAIN_STYLE = `
+  .radio-row{display:flex;gap:24px;flex-wrap:wrap}
+  .radio-opt{display:inline-flex;align-items:center;gap:7px;font-size:14px;cursor:pointer}
+  input[type=radio]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;flex:0 0 auto;margin:0}
+  input[type=file]{width:100%;font-family:var(--body);font-size:13px;color:var(--ink);
+    background:var(--slot);border:1px solid var(--line);border-radius:5px;padding:8px 10px}
+  input[type=file]::file-selector-button{font-family:var(--mono);font-size:12px;margin-right:10px;
+    border:1px solid var(--line);background:#F1F2F4;border-radius:4px;padding:5px 10px;cursor:pointer;color:var(--ink)}
+  .subsplit{height:1px;background:var(--line);margin:22px 0}
+  .acc-grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:560px){.acc-grid2{grid-template-columns:1fr}}
+  .tokright{text-align:right;margin-top:6px}
+  .fetch-card{display:flex;gap:14px;border:1px solid var(--line);border-radius:6px;background:#F8FAFC;padding:12px}
+  .fetch-card img{width:160px;flex:0 0 auto;object-fit:cover;border-radius:4px}
+  .fetch-card .meta{font-size:13px;display:flex;flex-direction:column;gap:4px}
+  .fetch-card .brk{word-break:break-all;color:var(--mut);font-size:11.5px}
+  .live-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;font-size:13.5px;color:var(--mut)}
+  .live-wrap{background:#E4E7EC;display:flex;justify-content:center;border-radius:6px;overflow:hidden}
+  .rbox{max-width:760px;margin:0 auto;padding:0 16px}
+`;
+
+// 簡短錯誤/提示頁（沿用 Slot Board 外殼）
+function noticePage(title: string, kind: 'warn' | 'err', msg: string, backHref: string, backText: string): string {
+  return sbPage({
+    title,
+    active: 'adpreview',
+    body: `
+    <div class="crumb"><a href="/">// tools</a> / adpreview</div>
+    <div class="msg msg-${kind}" style="margin-top:40px">${msg}</div>
+    <a class="btn-line" style="display:inline-block;margin-top:18px" href="${backHref}">← ${backText}</a>`,
+  });
+}
+
 export async function registerAdpreview(app: FastifyInstance) {
   // ---------- 表單頁 ----------
   app.get(BASE_PATH, async (_req, reply) => {
@@ -39,88 +73,85 @@ export async function registerAdpreview(app: FastifyInstance) {
         }${m.verified ? '' : '（未驗證）'}</option>`
     ).join('');
 
-    reply.type('text/html').send(
-      layout('廣告預覽截圖工具', `
-<div class="breadcrumbs text-sm"><ul><li><a href="/">工具選單</a></li><li>廣告預覽截圖</li></ul></div>
-<h1 class="text-xl font-bold my-2">廣告預覽截圖工具</h1>
-<p class="text-sm opacity-70 mb-4">在真實媒體頁的 popin 廣告版位換上你的素材後截圖。需該頁當下有出 popin 廣告。</p>
+    const body = `
+    <div class="crumb"><a href="/">// tools</a> / adpreview</div>
+    <h1>廣告預覽截圖工具</h1>
+    <p class="sub">在真實媒體頁的 popin 廣告版位換上你的素材後截圖。需該頁當下有出 popin 廣告。</p>
 
-<form method="post" action="${BASE_PATH}/generate" enctype="multipart/form-data" class="space-y-4">
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title text-base">① 要預覽的媒體頁</h2>
-      <label class="label">選擇常駐媒體</label>
-      <select name="mediaId" class="select select-bordered w-full">${mediaOpts}</select>
-      <label class="label">或，自己貼一個現在有 popin 廣告的網址（優先採用）</label>
-      <input name="customUrl" class="input input-bordered w-full" placeholder="https://...">
-      <label class="label">裝置（選到「（手機）」媒體會自動切換）</label>
-      <div class="flex gap-6">
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="radio" name="device" value="desktop" class="radio radio-sm" checked> 桌機
-        </label>
-        <label class="label cursor-pointer justify-start gap-2">
-          <input type="radio" name="device" value="mobile" class="radio radio-sm"> 手機
-        </label>
+    <form method="post" action="${BASE_PATH}/generate" enctype="multipart/form-data" id="genForm">
+      <div class="section-label">① 要預覽的媒體頁</div>
+      <div class="card">
+        <div class="field">
+          <div class="flabel"><span class="nm">選擇常駐媒體</span></div>
+          <select name="mediaId">${mediaOpts}</select>
+        </div>
+        <div class="field">
+          <div class="flabel"><span class="nm">或，自己貼一個現在有 popin 廣告的網址</span><span class="hint">優先採用</span></div>
+          <input type="text" name="customUrl" placeholder="https://...">
+        </div>
+        <div class="field">
+          <div class="flabel"><span class="nm">裝置</span><span class="hint">選到「（手機）」媒體會自動切換</span></div>
+          <div class="radio-row">
+            <label class="radio-opt"><input type="radio" name="device" value="desktop" checked> 桌機</label>
+            <label class="radio-opt"><input type="radio" name="device" value="mobile"> 手機</label>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
 
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <h2 class="card-title text-base">② 廣告素材</h2>
+      <div class="section-label">② 廣告素材</div>
+      <div class="card">
+        <label class="radio-opt" style="margin-bottom:16px"><input type="radio" name="mode" value="upload" checked> 手動上傳</label>
+        <div class="field">
+          <div class="flabel"><span class="nm">廣告圖片</span></div>
+          <input type="file" name="image" accept="image/*">
+        </div>
+        <div class="field">
+          <div class="flabel"><span class="nm">標題文案</span></div>
+          <input type="text" name="title" placeholder="廣告標題">
+        </div>
+        <div class="field">
+          <div class="flabel"><span class="nm">廣告主名</span></div>
+          <input type="text" name="advertiserName" placeholder="例如：某某品牌">
+        </div>
 
-      <label class="label cursor-pointer justify-start gap-2">
-        <input type="radio" name="mode" value="upload" class="radio radio-sm" checked> 手動上傳
-      </label>
-      <label class="label">廣告圖片</label>
-      <input type="file" name="image" accept="image/*" class="file-input file-input-bordered w-full">
-      <label class="label">標題文案</label>
-      <input name="title" class="input input-bordered w-full" placeholder="廣告標題">
-      <label class="label">廣告主名</label>
-      <input name="advertiserName" class="input input-bordered w-full" placeholder="例如：某某品牌">
+        <div class="subsplit"></div>
 
-      <div class="divider"></div>
-
-      <label class="label cursor-pointer justify-start gap-2">
-        <input type="radio" name="mode" value="popin" class="radio radio-sm" ${hasDb ? '' : 'disabled'}>
-        用 popin 自動抓素材${hasDb ? '' : '（未設定資料庫，暫不可用）'}
-      </label>
-      <label class="label">D 帳號（輸入關鍵字搜尋）</label>
-      <div class="dropdown w-full">
-        <input id="accSearch" class="input input-bordered w-full" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
-        <input type="hidden" name="account" id="accValue"><!-- account_id（穩定鍵） -->
-        <input type="hidden" name="accountName" id="accNameValue"><!-- 顯示用 -->
-        <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
+        <label class="radio-opt" style="margin-bottom:16px"><input type="radio" name="mode" value="popin" ${hasDb ? '' : 'disabled'}> 用 popin 自動抓素材${hasDb ? '' : '（未設定資料庫，暫不可用）'}</label>
+        <div class="field">
+          <div class="flabel"><span class="src src-d">D</span><span class="nm">D 帳號</span><span class="hint">輸入關鍵字搜尋</span></div>
+          <div class="combo">
+            <input type="text" id="accSearch" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
+            <input type="hidden" name="account" id="accValue">
+            <input type="hidden" name="accountName" id="accNameValue">
+            <div id="accList" class="combo-list"></div>
+          </div>
+          <div class="tokright"><a href="${BASE_PATH}/tokens" style="font-family:var(--mono);font-size:12px;color:var(--accent);text-decoration:none">管理 D 帳號 token →</a></div>
+        </div>
+        <div class="field">
+          <div class="acc-grid2">
+            <div><div class="flabel"><span class="nm">Campaign ID</span></div><input type="text" name="campaignId" placeholder="mongo_id"></div>
+            <div><div class="flabel"><span class="nm">Asset ID</span></div><input type="text" name="assetId" placeholder="mongo_id"></div>
+          </div>
+        </div>
+        <button type="button" id="testFetchBtn" class="btn-line">試抓素材（先確認抓得到再產生）</button>
+        <div id="testFetchResult" style="margin-top:10px"></div>
       </div>
-      <div class="text-right"><a href="${BASE_PATH}/tokens" class="link link-primary text-sm">管理 D 帳號 token →</a></div>
-      <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">Campaign ID</label><input name="campaignId" class="input input-bordered w-full" placeholder="mongo_id"></div>
-        <div><label class="label">Asset ID</label><input name="assetId" class="input input-bordered w-full" placeholder="mongo_id"></div>
+
+      <div class="card" style="margin-top:16px">
+        <button type="submit" class="btn-go" id="genBtn">產生預覽</button>
+        <div class="note" style="text-align:center" id="genHint"></div>
       </div>
-      <button type="button" id="testFetchBtn" class="btn btn-secondary btn-outline mt-2">試抓素材（先確認抓得到再產生）</button>
-      <div id="testFetchResult" class="mt-2"></div>
-    </div>
-  </div>
+    </form>
 
-  <div class="card bg-base-100 shadow-sm">
-    <div class="card-body">
-      <button type="submit" class="btn btn-primary w-full mt-2" id="genBtn">產生預覽</button>
-      <div class="text-xs opacity-60 text-center" id="genHint"></div>
-    </div>
-  </div>
-</form>
+    <div id="resultArea" style="width:100vw;position:relative;left:50%;transform:translateX(-50%);margin-top:24px"></div>
+    <footer>popin ad-ops · adpreview</footer>`;
 
-<!-- 結果區：全寬（突破 max-w 容器），產生時顯示實況直播，完成切換成 iframe -->
-<div id="resultArea" class="mt-6" style="width:100vw;position:relative;left:50%;transform:translateX(-50%)"></div>
-
-<script>
+    const script = `
 (function () {
   var search = document.getElementById('accSearch');
   var hidden = document.getElementById('accValue');
   var hiddenName = document.getElementById('accNameValue');
   var list = document.getElementById('accList');
-  // 注意：不可在這裡整段 return（曾因 DB 未設定→搜尋框 disabled→提早退出，
-  // 導致下方的 AJAX submit handler 都沒掛上、表單走原生 POST）
   var comboEnabled = !!(search && !search.disabled);
   var accounts = [];
 
@@ -130,39 +161,36 @@ export async function registerAdpreview(app: FastifyInstance) {
       return a.accountName.toLowerCase().indexOf(kw) !== -1;
     }).slice(0, 50);
     list.innerHTML = hits.map(function (a) {
-      var badge = a.source === 'adtools' ? '<span class="badge badge-success badge-xs ml-1">自建</span>' : '';
-      return '<li><a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + badge + '</a></li>';
-    }).join('') || '<li class="menu-disabled"><a>無符合帳號</a></li>';
+      var badge = a.source === 'adtools' ? ' <span style="color:var(--ok);font-size:11px">自建</span>' : '';
+      return '<a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + badge + '</a>';
+    }).join('') || '<div class="empty">無符合帳號</div>';
   }
 
   if (comboEnabled) {
     fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (data) {
-      accounts = data;
-      render('');
+      accounts = data; render('');
     });
-
+    search.addEventListener('focus', function () { setMode('popin'); list.classList.add('open'); });
+    search.addEventListener('blur', function () { setTimeout(function () { list.classList.remove('open'); }, 120); });
     search.addEventListener('input', function () {
-      hidden.value = ''; hiddenName.value = ''; // 打字即清掉已選 id，逼從清單重選
+      hidden.value = ''; hiddenName.value = ''; // 打字即清掉已選 id
+      list.classList.add('open');
       render(search.value.trim());
     });
   }
 
-  // UX：操作哪一區就自動切到該模式（radio 變成狀態顯示，不必手點）
+  // UX：操作哪一區就自動切到該模式
   function setMode(v) {
     var r = document.querySelector('input[name="mode"][value="' + v + '"]');
     if (r && !r.disabled) r.checked = true;
   }
-  ['accSearch'].forEach(function (id) {
-    var el = document.getElementById(id);
-    if (el) el.addEventListener('focus', function () { setMode('popin'); });
-  });
   document.querySelectorAll('input[name="campaignId"], input[name="assetId"]').forEach(function (el) {
     el.addEventListener('focus', function () { setMode('popin'); });
   });
   var fileInput = document.querySelector('input[name="image"]');
   if (fileInput) fileInput.addEventListener('focus', function () { setMode('upload'); });
 
-  // 選到手機版位媒體 → 裝置自動切手機（仍可手動改回）
+  // 選到手機版位媒體 → 裝置自動切手機
   var mediaSel = document.querySelector('select[name="mediaId"]');
   if (mediaSel) mediaSel.addEventListener('change', function () {
     var opt = mediaSel.selectedOptions[0];
@@ -170,8 +198,6 @@ export async function registerAdpreview(app: FastifyInstance) {
     var r = document.querySelector('input[name="device"][value="' + d + '"]');
     if (r) r.checked = true;
   });
-  // 用 mousedown（非 click）：mousedown 會先讓輸入框失焦 → dropdown(:focus-within) 關閉
-  // → mouseup 時元素已消失，click 永遠不會觸發。preventDefault 保住焦點、先完成選取。
   if (comboEnabled) list.addEventListener('mousedown', function (e) {
     var t = e.target.closest('a[data-id]');
     if (!t) return;
@@ -179,23 +205,24 @@ export async function registerAdpreview(app: FastifyInstance) {
     search.value = t.getAttribute('data-name');
     hidden.value = t.getAttribute('data-id');
     hiddenName.value = t.getAttribute('data-name');
-    search.blur(); // 選完再關閉 dropdown
+    list.classList.remove('open');
+    search.blur();
   });
 
-  // 試抓素材：先確認 token/campaign/asset 抓得到，並顯示抓到的圖與文案
+  // 試抓素材
   var testBtn = document.getElementById('testFetchBtn');
   var resultBox = document.getElementById('testFetchResult');
   if (testBtn) testBtn.addEventListener('click', function () {
-    var account = (hidden && hidden.value) || ''; // account_id（需從清單選取）
+    var account = (hidden && hidden.value) || '';
     var accountName = (hiddenName && hiddenName.value) || '';
     var campaignId = document.querySelector('input[name="campaignId"]').value.trim();
     var assetId = document.querySelector('input[name="assetId"]').value.trim();
     if (!account || !campaignId || !assetId) {
-      resultBox.innerHTML = '<div class="alert alert-warning text-sm">請先選擇 D 帳號並填入 Campaign ID 與 Asset ID</div>';
+      resultBox.innerHTML = '<div class="msg msg-warn">請先選擇 D 帳號並填入 Campaign ID 與 Asset ID</div>';
       return;
     }
     setMode('popin');
-    testBtn.classList.add('btn-disabled');
+    testBtn.disabled = true;
     testBtn.textContent = '抓取中…';
     resultBox.innerHTML = '';
     fetch('${BASE_PATH}/fetch-creative', {
@@ -205,39 +232,39 @@ export async function registerAdpreview(app: FastifyInstance) {
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.ok) {
         resultBox.innerHTML =
-          '<div class="card card-side bg-base-200">' +
-            '<figure class="w-48 shrink-0"><img src="' + d.imageUrl + '" alt="素材圖" class="object-cover"></figure>' +
-            '<div class="card-body py-3 px-4 text-sm">' +
-              '<div><span class="badge badge-success badge-sm">抓取成功</span></div>' +
+          '<div class="fetch-card">' +
+            '<img src="' + d.imageUrl + '" alt="素材圖">' +
+            '<div class="meta">' +
+              '<div><span class="st st-done">抓取成功</span></div>' +
               '<div><b>標題：</b>' + d.title + '</div>' +
               '<div><b>Campaign：</b>' + d.campaignName + '</div>' +
               (d.brand ? '<div><b>廣告主：</b>' + d.brand + '</div>' : '') +
-              '<div class="break-all opacity-60 text-xs"><b>圖片網址（已驗證可載入）：</b>' + d.imageUrl + '</div>' +
+              '<div class="brk"><b>圖片網址（已驗證可載入）：</b>' + d.imageUrl + '</div>' +
             '</div></div>';
       } else {
-        resultBox.innerHTML = '<div class="alert alert-error text-sm whitespace-pre-wrap">' + d.error + '</div>';
+        resultBox.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + d.error + '</div>';
       }
     }).catch(function (e) {
-      resultBox.innerHTML = '<div class="alert alert-error text-sm">請求失敗：' + e.message + '</div>';
+      resultBox.innerHTML = '<div class="msg msg-err">請求失敗：' + e.message + '</div>';
     }).finally(function () {
-      testBtn.classList.remove('btn-disabled');
+      testBtn.disabled = false;
       testBtn.textContent = '試抓素材（先確認抓得到再產生）';
     });
   });
 
-  // ---------- AJAX 產生：同頁實況直播 → 完成切換成全寬 iframe（表單保留，可換媒體重產） ----------
-  var form = document.querySelector('form[action$="/generate"]');
+  // ---------- AJAX 產生：同頁實況直播 → 完成切換成全寬 iframe ----------
+  var form = document.getElementById('genForm');
   var genBtn = document.getElementById('genBtn');
   var genHint = document.getElementById('genHint');
   var area = document.getElementById('resultArea');
   var pollTimer = null;
 
   function setBusy(busy) {
-    genBtn.classList.toggle('btn-disabled', busy);
+    genBtn.disabled = busy;
     genHint.textContent = busy ? '產生中…請看下方實況畫面' : '';
   }
   function showError(msg) {
-    area.innerHTML = '<div class="max-w-3xl mx-auto px-4"><div class="alert alert-error text-sm whitespace-pre-wrap">' + msg + '</div></div>';
+    area.innerHTML = '<div class="rbox"><div class="msg msg-err" style="white-space:pre-wrap">' + msg + '</div></div>';
     setBusy(false);
   }
   form.addEventListener('submit', function (ev) {
@@ -246,16 +273,13 @@ export async function registerAdpreview(app: FastifyInstance) {
     setBusy(true);
 
     var fd = new FormData(form);
-    fd.append('clientWidth', String(window.innerWidth)); // 後端用此寬度渲染 → 所見即所得
+    fd.append('clientWidth', String(window.innerWidth));
     var isMobile = fd.get('device') === 'mobile';
 
-    // 網頁預覽：job 模式 + 實況直播
     area.innerHTML =
-      '<div class="max-w-3xl mx-auto px-4 mb-2 flex items-center gap-3">' +
-        '<span class="loading loading-spinner loading-sm"></span>' +
-        '<span id="livePhase" class="text-sm">送出中…</span></div>' +
-      '<div class="bg-base-300 flex justify-center">' +
-        '<img id="liveFrame" alt="" style="max-width:100%;display:none"></div>';
+      '<div class="rbox live-head">' +
+        '<span style="display:flex;align-items:center;gap:8px"><span class="spin"></span><span id="livePhase">送出中…</span></span></div>' +
+      '<div class="live-wrap"><img id="liveFrame" alt="" style="max-width:100%;display:none"></div>';
     area.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
     fetch('${BASE_PATH}/generate', { method: 'POST', body: fd })
@@ -277,10 +301,10 @@ export async function registerAdpreview(app: FastifyInstance) {
               clearInterval(pollTimer); pollTimer = null;
               setBusy(false);
               area.innerHTML =
-                '<div class="max-w-3xl mx-auto px-4 mb-2 flex items-center justify-between">' +
-                  '<span class="text-sm opacity-70">已替換素材的真實頁（已凍結）。已自動捲到廣告位，請用 ⌘⇧4 截圖；換媒體選項可直接重產。</span>' +
-                  '<a class="btn btn-sm btn-outline shrink-0" href="' + s.viewUrl + '" target="_blank">另開新分頁</a></div>' +
-                '<iframe id="previewFrame" src="' + s.viewUrl + '" sandbox="allow-same-origin" class="bg-white border-y border-base-300" style="' +
+                '<div class="rbox live-head">' +
+                  '<span>已替換素材的真實頁（已凍結）。已自動捲到廣告位，請用 ⌘⇧4 截圖；換媒體選項可直接重產。</span>' +
+                  '<a class="btn-line" style="flex:0 0 auto" href="' + s.viewUrl + '" target="_blank">另開新分頁</a></div>' +
+                '<iframe id="previewFrame" src="' + s.viewUrl + '" sandbox="allow-same-origin" style="background:#fff;border-top:1px solid var(--line);border-bottom:1px solid var(--line);' +
                   (isMobile
                     ? 'width:${MOBILE_VIEWPORT_WIDTH}px;max-width:100%;height:88vh;display:block;margin:0 auto'
                     : 'width:100%;height:88vh') +
@@ -289,18 +313,20 @@ export async function registerAdpreview(app: FastifyInstance) {
               ifr.addEventListener('load', function () {
                 try {
                   var t = ifr.contentDocument.getElementById('__preview_target__');
-                  if (t) t.scrollIntoView({ block: 'center' }); // 自動捲到廣告位
+                  if (t) t.scrollIntoView({ block: 'center' });
                 } catch (e) {}
               });
               area.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
-          }).catch(function () { /* 單次輪詢失敗忽略，下次再試 */ });
+          }).catch(function () { /* 單次輪詢失敗忽略 */ });
         }, 500);
       })
       .catch(function (e) { showError(e.message); });
   });
-})();
-</script>`)
+})();`;
+
+    reply.type('text/html').send(
+      sbPage({ title: '廣告預覽截圖工具 · Slot Board', active: 'adpreview', body, style: MAIN_STYLE, script })
     );
   });
 
@@ -332,7 +358,7 @@ export async function registerAdpreview(app: FastifyInstance) {
     const html = getHtmlPreview((req.params as any).id);
     if (!html) {
       return reply.code(404).type('text/html').send(
-        layout('預覽已過期', `<div class="alert alert-warning">此預覽已過期或不存在（保留 15 分鐘），請回表單重新產生。</div><a class="btn mt-4" href="${BASE_PATH}">返回</a>`)
+        noticePage('預覽已過期', 'warn', '此預覽已過期或不存在（保留 15 分鐘），請回表單重新產生。', BASE_PATH, '返回廣告預覽')
       );
     }
     reply.type('text/html').send(html);
@@ -345,60 +371,68 @@ export async function registerAdpreview(app: FastifyInstance) {
       .map((r) => {
         const badge =
           r.source === 'adtools'
-            ? '<span class="badge badge-success badge-sm">自建</span>'
-            : '<span class="badge badge-ghost badge-sm">舊系統鏡像</span>';
+            ? '<span class="st st-done">自建</span>'
+            : '<span class="st st-queued">舊系統鏡像</span>';
         const actions =
           r.source === 'adtools'
-            ? `<button type="button" class="btn btn-xs" onclick="editRow(${r.id}, '${esc(r.accountName).replace(/'/g, "\\'")}', '${r.accountId ?? ''}')">編輯</button>
-               <form method="post" action="${BASE_PATH}/tokens/${r.id}/delete" class="inline" onsubmit="return confirm('確定刪除「${esc(r.accountName)}」？')">
-                 <button class="btn btn-xs btn-error btn-outline">刪除</button>
+            ? `<button type="button" class="btn-line" onclick="editRow(${r.id}, '${esc(r.accountName).replace(/'/g, "\\'")}', '${r.accountId ?? ''}')">編輯</button>
+               <form method="post" action="${BASE_PATH}/tokens/${r.id}/delete" style="display:inline" onsubmit="return confirm('確定刪除「${esc(r.accountName)}」？')">
+                 <button class="btn-line btn-danger">刪除</button>
                </form>`
-            : '<span class="text-xs opacity-50">唯讀</span>';
+            : '<span class="muted">唯讀</span>';
         return `<tr data-name="${esc(r.accountName.toLowerCase())}">
-          <td>${esc(r.accountName)}</td><td>${r.accountId ? esc(r.accountId) : '-'}</td>
-          <td>${badge}</td><td class="whitespace-nowrap">${actions}</td></tr>`;
+          <td>${esc(r.accountName)}</td><td class="muted">${r.accountId ? esc(r.accountId) : '-'}</td>
+          <td>${badge}</td><td><div class="acts">${actions}</div></td></tr>`;
       })
       .join('');
 
-    reply.type('text/html').send(
-      layout('D 帳號 token 管理', `
-<div class="breadcrumbs text-sm"><ul><li><a href="/">工具選單</a></li><li><a href="${BASE_PATH}">廣告預覽截圖</a></li><li>token 管理</li></ul></div>
-<h1 class="text-xl font-bold my-2">D 帳號 token 管理</h1>
-<p class="text-sm opacity-70 mb-4">「舊系統鏡像」每次讀取自動同步自舊 dctool DB（唯讀）；「自建」為本工具新增，可編輯/刪除。</p>
+    const body = `
+    <div class="crumb"><a href="/">// tools</a> / <a href="${BASE_PATH}">adpreview</a> / tokens</div>
+    <h1>D 帳號 token 管理</h1>
+    <p class="sub">「舊系統鏡像」每次讀取自動同步自舊 dctool DB（唯讀）；「自建」為本工具新增，可編輯／刪除。</p>
 
-<div class="card bg-base-100 shadow-sm mb-4">
-  <div class="card-body">
-    <h2 class="card-title text-base" id="formTitle">新增 token</h2>
-    <form method="post" action="${BASE_PATH}/tokens" id="tokenForm" class="grid gap-3">
-      <input type="hidden" name="id" id="f_id">
-      <div class="grid grid-cols-2 gap-3">
-        <div><label class="label">帳號名稱</label><input name="accountName" id="f_name" class="input input-bordered w-full" required></div>
-        <div><label class="label">account_id</label><input name="accountId" id="f_aid" class="input input-bordered w-full" required></div>
-      </div>
-      <div><label class="label">Token <span class="text-xs opacity-60" id="tokenHint">*</span></label>
-        <input name="token" id="f_token" class="input input-bordered w-full" placeholder="popin Basic token"></div>
-      <div class="flex gap-2">
-        <button class="btn btn-primary" id="submitBtn">新增</button>
-        <button type="button" class="btn btn-ghost hidden" id="cancelBtn" onclick="resetForm()">取消編輯</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<div class="card bg-base-100 shadow-sm">
-  <div class="card-body">
-    <input id="filter" class="input input-bordered w-full mb-2" placeholder="搜尋帳號…">
-    <div class="overflow-x-auto max-h-[28rem] overflow-y-auto">
-      <table class="table table-sm table-pin-rows">
-        <thead><tr><th>帳號名稱</th><th>account_id</th><th>來源</th><th>操作</th></tr></thead>
-        <tbody id="tbody">${tr}</tbody>
-      </table>
+    <div class="section-label">新增 / 編輯 · token</div>
+    <div class="card">
+      <div class="field"><div class="flabel"><span class="nm" id="formTitle">新增 token</span></div></div>
+      <form method="post" action="${BASE_PATH}/tokens" id="tokenForm">
+        <input type="hidden" name="id" id="f_id">
+        <div class="field">
+          <div class="acc-grid2">
+            <div><div class="flabel"><span class="nm">帳號名稱</span></div><input type="text" name="accountName" id="f_name" required></div>
+            <div><div class="flabel"><span class="nm">account_id</span></div><input type="text" name="accountId" id="f_aid" required></div>
+          </div>
+        </div>
+        <div class="field">
+          <div class="flabel"><span class="nm">Token</span><span class="hint" id="tokenHint">必填</span></div>
+          <input type="text" name="token" id="f_token" placeholder="popin Basic token">
+        </div>
+        <div class="acts">
+          <button class="btn-pri" id="submitBtn">新增</button>
+          <button type="button" class="btn-line hidden" id="cancelBtn" onclick="resetForm()">取消編輯</button>
+        </div>
+      </form>
     </div>
-    <div class="text-sm opacity-60 mt-1">共 ${rows.length} 筆</div>
-  </div>
-</div>
 
-<script>
+    <div class="section-label">已建立 · accounts</div>
+    <div class="card">
+      <div class="field"><input type="text" id="filter" placeholder="搜尋帳號…"></div>
+      <div style="max-height:28rem;overflow:auto">
+        <table class="qtable">
+          <thead><tr><th>帳號名稱</th><th>account_id</th><th>來源</th><th></th></tr></thead>
+          <tbody id="tbody">${tr}</tbody>
+        </table>
+      </div>
+      <div class="note">共 ${rows.length} 筆</div>
+    </div>
+    <footer>popin ad-ops · adpreview / tokens</footer>`;
+
+    const TOKENS_STYLE = `
+      .acc-grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+      @media(max-width:560px){.acc-grid2{grid-template-columns:1fr}}
+      .acts{display:flex;gap:6px;flex-wrap:wrap}
+    `;
+
+    const script = `
 document.getElementById('filter').addEventListener('input', function () {
   var kw = this.value.trim().toLowerCase();
   document.querySelectorAll('#tbody tr').forEach(function (tr) {
@@ -426,16 +460,20 @@ function resetForm() {
   document.getElementById('formTitle').textContent = '新增 token';
   document.getElementById('submitBtn').textContent = '新增';
   document.getElementById('cancelBtn').classList.add('hidden');
-  document.getElementById('tokenHint').textContent = '*';
-}
-</script>`)
+  document.getElementById('tokenHint').textContent = '必填';
+}`;
+
+    reply.type('text/html').send(
+      sbPage({ title: 'D 帳號 token 管理 · Slot Board', active: 'adpreview', body, style: TOKENS_STYLE, script })
     );
   });
 
   app.post(`${BASE_PATH}/tokens`, async (req, reply) => {
     const b = req.body as any;
     if (!b?.accountName?.trim() || !b?.accountId?.trim() || !b?.token?.trim()) {
-      return reply.code(400).type('text/html').send(layout('錯誤', `<div class="alert alert-error">帳號名稱、account_id 與 token 皆必填</div><a class="btn mt-4" href="${BASE_PATH}/tokens">返回</a>`));
+      return reply.code(400).type('text/html').send(
+        noticePage('錯誤', 'err', '帳號名稱、account_id 與 token 皆必填', `${BASE_PATH}/tokens`, '返回 token 管理')
+      );
     }
     await addToken({ accountName: b.accountName, token: b.token, accountId: b.accountId });
     reply.redirect(`${BASE_PATH}/tokens`);
@@ -444,14 +482,18 @@ function resetForm() {
   app.post(`${BASE_PATH}/tokens/:id/update`, async (req, reply) => {
     const b = req.body as any;
     if (!b?.accountName?.trim() || !b?.accountId?.trim()) {
-      return reply.code(400).type('text/html').send(layout('錯誤', `<div class="alert alert-error">帳號名稱與 account_id 皆必填</div><a class="btn mt-4" href="${BASE_PATH}/tokens">返回</a>`));
+      return reply.code(400).type('text/html').send(
+        noticePage('錯誤', 'err', '帳號名稱與 account_id 皆必填', `${BASE_PATH}/tokens`, '返回 token 管理')
+      );
     }
     const ok = await updateToken(Number((req.params as any).id), {
       accountName: b.accountName ?? '',
       token: b.token,
       accountId: b.accountId,
     });
-    if (!ok) return reply.code(403).type('text/html').send(layout('錯誤', `<div class="alert alert-error">僅「自建」token 可編輯</div><a class="btn mt-4" href="${BASE_PATH}/tokens">返回</a>`));
+    if (!ok) return reply.code(403).type('text/html').send(
+      noticePage('錯誤', 'err', '僅「自建」token 可編輯', `${BASE_PATH}/tokens`, '返回 token 管理')
+    );
     reply.redirect(`${BASE_PATH}/tokens`);
   });
 

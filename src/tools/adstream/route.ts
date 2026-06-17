@@ -1,7 +1,7 @@
 // AdStream（tool#3）路由：設定表單 + 已設定清單 + 手動執行 + 排程(cron)入口
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { layout } from '../../core/html.js';
+import { sbPage } from '../../core/sbui.js';
 import {
   dbAvailable, listDAccounts,
   listBulkConfigs, getBulkConfig, addBulkConfig, updateBulkConfig, deleteBulkConfig, markBulkRun,
@@ -51,6 +51,22 @@ function updateJob(id: string, patch: Partial<RunJob>): void {
 // HTML 屬性值轉義
 const esc = (s: string) =>
   String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// 廣告凝視者特有 CSS（通用元件在 sbui.ts）：已選帳號 chip、Sheet 連結 + 測試按鈕並排、設定名稱兩欄、訊息截斷
+const STYLE = `
+  .achip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;
+    background:var(--slot);border:1px solid var(--line);border-radius:999px;padding:4px 10px}
+  .achip button{border:none;background:none;color:var(--mut);cursor:pointer;font-size:11px;padding:0;line-height:1}
+  .achip button:hover{color:var(--err)}
+  .inline-join{display:flex;gap:8px}
+  .inline-join input{flex:1}
+  .acts{display:flex;gap:6px;flex-wrap:wrap}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:600px){.row2{grid-template-columns:1fr}}
+  .sa-code{font-family:var(--mono);font-size:11.5px;background:#F1F2F4;padding:2px 6px;border-radius:3px}
+  .tbl-wrap{overflow-x:auto}
+  .msgline{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-width:16rem;cursor:help}
+`;
 
 /** 執行一次並把結果寫回 DB（手動執行與 cron 共用）。回傳人類可讀摘要。 */
 async function executeAndRecord(
@@ -103,15 +119,14 @@ export async function registerAdstream(app: FastifyInstance) {
       }
     }
     const nameById = new Map(accounts.map((a) => [String(a.accountId), a.accountName]));
-    // 設定清單裡的 D 帳號：id → 名字（找不到顯示 id），供 chip 與表格用
     const accLabel = (id: string) => nameById.get(String(id)) ?? id;
 
     const rows = configs.map((c) => {
       const statusBadge =
-        c.lastRunStatus === 'success' ? '<span class="badge badge-success badge-sm">成功</span>'
-        : c.lastRunStatus === 'error' ? '<span class="badge badge-error badge-sm">失敗</span>'
-        : c.lastRunStatus === 'running' ? '<span class="badge badge-warning badge-sm">執行中</span>'
-        : '<span class="badge badge-ghost badge-sm">未執行</span>';
+        c.lastRunStatus === 'success' ? '<span class="st st-done">成功</span>'
+        : c.lastRunStatus === 'error' ? '<span class="st st-fail">失敗</span>'
+        : c.lastRunStatus === 'running' ? '<span class="st st-run">執行中</span>'
+        : '<span class="st st-queued">未執行</span>';
       // chip 還原用 [{id,name}]：編輯時不必等帳號清單載入即可顯示名字
       const accPairs = c.accountIds.map((id) => ({ id: String(id), name: accLabel(id) }));
       const editAttrs =
@@ -119,89 +134,95 @@ export async function registerAdstream(app: FastifyInstance) {
         `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}"`;
       return `<tr>
         <td>${esc(c.name)}</td>
-        <td class="text-xs">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
-        <td class="text-xs">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
-        <td class="text-xs"><a class="link" href="${esc(c.sheetUrl)}" target="_blank">開啟 ↗</a></td>
-        <td class="text-xs">${c.backfillStartDate}</td>
-        <td class="text-xs">${c.lastSyncedDate ?? '—'}</td>
-        <td class="text-xs">${statusBadge}<br>${c.lastRunAt ?? '—'}</td>
-        <td class="text-xs max-w-[16rem]"><div class="line-clamp-2 cursor-help" title="${esc(c.lastRunMessage ?? '')}">${esc(c.lastRunMessage ?? '')}</div></td>
-        <td class="whitespace-nowrap">
-          <button class="btn btn-xs btn-primary runBtn" data-id="${c.id}">立即執行</button>
-          <button class="btn btn-xs btn-ghost editBtn" ${editAttrs}>編輯</button>
-          <button class="btn btn-xs btn-error btn-outline delBtn" data-id="${c.id}">刪除</button>
-        </td>
+        <td class="muted">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
+        <td class="muted">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
+        <td class="muted"><a href="${esc(c.sheetUrl)}" target="_blank" style="color:var(--accent)">開啟 ↗</a></td>
+        <td class="muted">${c.backfillStartDate}</td>
+        <td class="muted">${c.lastSyncedDate ?? '—'}</td>
+        <td class="muted">${statusBadge}<br>${c.lastRunAt ?? '—'}</td>
+        <td class="muted"><div class="msgline" title="${esc(c.lastRunMessage ?? '')}">${esc(c.lastRunMessage ?? '')}</div></td>
+        <td><div class="acts">
+          <button class="btn-line runBtn" data-id="${c.id}">立即執行</button>
+          <button class="btn-line editBtn" ${editAttrs}>編輯</button>
+          <button class="btn-line btn-danger delBtn" data-id="${c.id}">刪除</button>
+        </div></td>
       </tr>`;
     }).join('');
 
     const listSection = configs.length
-      ? `<div class="overflow-x-auto"><table class="table table-sm">
+      ? `<div class="tbl-wrap"><table class="qtable">
           <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>Sheet</th><th>回補起始</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div>`
-      : '<div class="text-sm opacity-60">尚無設定</div>';
+      : '<div class="note">尚無設定</div>';
 
-    reply.type('text/html').send(
-      layout('廣告凝視者', `
-<div class="breadcrumbs text-sm"><ul><li><a href="/">工具選單</a></li><li>廣告凝視者</li></ul></div>
-<h1 class="text-xl font-bold my-2">廣告凝視者 <span class="text-sm font-normal opacity-50">AdStream</span></h1>
-<p class="text-sm opacity-70 mb-4">把多個 D 帳號 / R(Rixbee) 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」兩個分頁（append）。D、R 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
+    const body = `
+    <div class="crumb"><a href="/">// tools</a> / adstream</div>
+    <h1>廣告凝視者</h1>
+    <p class="sub">把多個 D 帳號 / R(Rixbee) 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」兩個分頁（append）。D、R 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
 
-${hasDb ? '' : '<div class="alert alert-warning text-sm mb-4">未設定資料庫，無法新增設定</div>'}
-${dbError ? `<div class="alert alert-error text-sm mb-4">資料庫連線失敗：${esc(dbError)}</div>` : ''}
+    ${hasDb ? '' : '<div class="msg msg-warn" style="margin-top:18px">未設定資料庫，無法新增設定</div>'}
+    ${dbError ? `<div class="msg msg-err" style="margin-top:18px">資料庫連線失敗：${esc(dbError)}</div>` : ''}
 
-<div class="card bg-base-100 shadow-sm mb-6">
-  <div class="card-body gap-4">
-    <h2 class="card-title text-base" id="formTitle">新增設定</h2>
-    <input type="hidden" id="editingId" value="">
+    <div class="section-label">設定 · config</div>
+    <div class="card">
+      <input type="hidden" id="editingId" value="">
+      <div class="field"><div class="flabel"><span class="nm" id="formTitle">新增設定</span></div></div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      <div>
-        <label class="label py-1"><span class="label-text font-medium">設定名稱</span></label>
-        <input id="name" class="input input-bordered w-full" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
+      <div class="field">
+        <div class="row2">
+          <div>
+            <div class="flabel"><span class="nm">設定名稱</span></div>
+            <input type="text" id="name" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
+          </div>
+          <div>
+            <div class="flabel"><span class="nm">回補起始日</span><span class="hint">首次補到昨天，之後每天 T-1</span></div>
+            <input type="date" id="backfill" ${hasDb ? '' : 'disabled'}>
+          </div>
+        </div>
       </div>
-      <div>
-        <label class="label py-1"><span class="label-text font-medium">回補起始日</span></label>
-        <input type="date" id="backfill" class="input input-bordered w-full" ${hasDb ? '' : 'disabled'}>
-        <label class="label py-0"><span class="label-text-alt opacity-60">首次從這天補到昨天，之後每天抓 T-1</span></label>
+
+      <div class="field">
+        <div class="flabel"><span class="nm">Google Sheet 連結</span></div>
+        <div class="inline-join">
+          <input type="text" id="sheetUrl" placeholder="https://docs.google.com/spreadsheets/d/…" ${hasDb ? '' : 'disabled'}>
+          <button class="btn-line" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>測試連線</button>
+        </div>
+        <div class="note">需先把服務帳號加為此 Sheet 的<b>編輯者</b>：<span class="sa-code">${SA_EMAIL}</span></div>
+        <div id="testResult" class="note" style="margin-top:6px"></div>
+      </div>
+
+      <div class="section-label" style="margin:18px 0 16px">帳戶來源 · D / R 至少擇一</div>
+
+      <div class="field">
+        <div class="flabel"><span class="src src-d">D</span><span class="nm">Discovery 帳號</span><span class="hint">可多選，搜尋後點選加入</span></div>
+        <div class="combo">
+          <input type="text" id="accSearch" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
+          <div id="accList" class="combo-list"></div>
+        </div>
+        <div id="chips" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>
+        <div class="note">找不到帳號或 token？<a href="/tools/adpreview/tokens" target="_blank">管理 D 帳號 token →</a></div>
+      </div>
+
+      <div class="field">
+        <div class="flabel"><span class="src src-r">R</span><span class="nm">Rixbee Account ID</span><span class="hint">可多組，逗號分隔；類型自動偵測</span></div>
+        <input type="text" id="rUserIds" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
+      </div>
+
+      <div class="field">
+        <div class="acts">
+          <button class="btn-pri" id="saveBtn" type="button" ${hasDb ? '' : 'disabled'}>儲存設定</button>
+          <button class="btn-line hidden" id="cancelBtn" type="button">取消編輯</button>
+        </div>
+        <div id="saveResult" class="note" style="margin-top:8px"></div>
       </div>
     </div>
 
-    <div>
-      <label class="label py-1"><span class="label-text font-medium">Google Sheet 連結</span></label>
-      <div class="join w-full">
-        <input id="sheetUrl" class="input input-bordered join-item w-full" placeholder="https://docs.google.com/spreadsheets/d/…" ${hasDb ? '' : 'disabled'}>
-        <button class="btn btn-outline join-item" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>測試連線</button>
-      </div>
-      <div class="label py-1"><span class="label-text-alt opacity-60">需先把服務帳號加為此 Sheet 的<b class="font-semibold">編輯者</b>：<code class="font-mono">${SA_EMAIL}</code></span></div>
-      <div id="testResult" class="text-sm mt-1"></div>
-    </div>
+    <div class="section-label">已設定清單 · configs</div>
+    <div id="runStatus" class="status" style="margin-bottom:12px"></div>
+    ${listSection}
+    <footer>popin ad-ops · adstream</footer>`;
 
-    <div class="divider my-0 text-sm opacity-70">帳戶來源（D / R 至少擇一）</div>
-
-    <label class="label py-1 gap-2"><span class="badge badge-warning badge-sm">D</span><span class="label-text font-medium">Discovery 帳號</span><span class="label-text-alt opacity-60">可多選，搜尋後點選加入</span></label>
-    <div class="dropdown w-full">
-      <input id="accSearch" class="input input-bordered w-full" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
-      <ul id="accList" class="dropdown-content menu menu-sm bg-base-100 rounded-box z-10 w-full max-h-72 overflow-y-auto flex-nowrap shadow border border-base-300"></ul>
-    </div>
-    <div id="chips" class="flex flex-wrap gap-2 mt-2"></div>
-    <div class="label py-0"><span class="label-text-alt opacity-60">找不到帳號或 token？<a href="/tools/adpreview/tokens" class="link link-primary" target="_blank">管理 D 帳號 token →</a></span></div>
-
-    <label class="label py-1 gap-2"><span class="badge badge-info badge-sm">R</span><span class="label-text font-medium">Rixbee Account ID</span><span class="label-text-alt opacity-60">可多組，逗號分隔；類型自動偵測</span></label>
-    <input id="rUserIds" class="input input-bordered w-full" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
-
-    <div class="mt-2 flex gap-2">
-      <button class="btn btn-primary" id="saveBtn" type="button" ${hasDb ? '' : 'disabled'}>儲存設定</button>
-      <button class="btn btn-ghost hidden" id="cancelBtn" type="button">取消編輯</button>
-    </div>
-    <div id="saveResult" class="text-sm mt-1"></div>
-  </div>
-</div>
-
-<h2 class="text-lg font-bold mb-2">已設定清單</h2>
-<div id="runStatus" class="mb-2"></div>
-${listSection}
-
-<script>
+    const script = `
 (function () {
   var selected = [];
 
@@ -212,12 +233,10 @@ ${listSection}
   var accounts = [];
   var enabled = !!(search && !search.disabled);
 
-  // selected 元素＝{id, name}：顯示用 name、儲存用 id（穩定鍵）
   function hasId(id) { return selected.some(function (s) { return s.id === id; }); }
   function renderChips() {
     chips.innerHTML = selected.map(function (a, i) {
-      return '<span class="badge badge-neutral gap-1">' + a.name +
-        ' <button type="button" data-i="' + i + '" class="rmChip">✕</button></span>';
+      return '<span class="achip">' + a.name + '<button type="button" data-i="' + i + '" class="rmChip">✕</button></span>';
     }).join('');
   }
   chips.addEventListener('click', function (e) {
@@ -232,12 +251,14 @@ ${listSection}
       return a.accountName.toLowerCase().indexOf(k) !== -1 && !hasId(String(a.accountId));
     }).slice(0, 50);
     list.innerHTML = hits.map(function (a) {
-      return '<li><a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + '</a></li>';
-    }).join('') || '<li class="menu-disabled"><a>無符合帳號</a></li>';
+      return '<a data-id="' + a.accountId + '" data-name="' + a.accountName.replace(/"/g, '&quot;') + '">' + a.accountName + '</a>';
+    }).join('') || '<div class="empty">無符合帳號</div>';
   }
   if (enabled) {
     fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = d; renderList(''); });
-    search.addEventListener('input', function () { renderList(search.value.trim()); });
+    search.addEventListener('focus', function () { list.classList.add('open'); });
+    search.addEventListener('blur', function () { setTimeout(function () { list.classList.remove('open'); }, 120); });
+    search.addEventListener('input', function () { list.classList.add('open'); renderList(search.value.trim()); });
     list.addEventListener('mousedown', function (e) {
       var t = e.target.closest('a[data-id]');
       if (!t) return;
@@ -254,15 +275,15 @@ ${listSection}
   var testResult = document.getElementById('testResult');
   if (testBtn) testBtn.addEventListener('click', function () {
     var url = document.getElementById('sheetUrl').value.trim();
-    if (!url) { testResult.innerHTML = '<span class="text-warning">請先填 Sheet 連結</span>'; return; }
-    testResult.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 測試中…';
+    if (!url) { testResult.innerHTML = '<span style="color:var(--accent)">請先填 Sheet 連結</span>'; return; }
+    testResult.innerHTML = '<span class="spin"></span> 測試中…';
     fetch('${BASE_PATH}/test-access', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ sheetUrl: url }),
     }).then(function (r) { return r.json(); }).then(function (d) {
       testResult.innerHTML = d.ok
-        ? '<span class="text-success">✓ 可寫入：' + (d.title || '') + '</span>'
-        : '<span class="text-error">✗ ' + d.error + '</span>';
+        ? '<span style="color:var(--ok)">✓ 可寫入：' + (d.title || '') + '</span>'
+        : '<span style="color:var(--err)">✗ ' + d.error + '</span>';
     });
   });
 
@@ -306,10 +327,10 @@ ${listSection}
     var rUserIds = document.getElementById('rUserIds').value.trim();
     var backfill = document.getElementById('backfill').value;
     if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds)) {
-      saveResult.innerHTML = '<span class="text-warning">名稱、Sheet 連結、回補起始日必填；D 帳號與 R Account ID 至少擇一</span>';
+      saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D 帳號與 R Account ID 至少擇一</span>';
       return;
     }
-    saveResult.innerHTML = '<span class="loading loading-spinner loading-xs"></span> 儲存中…';
+    saveResult.innerHTML = '<span class="spin"></span> 儲存中…';
     var id = editingId.value;
     var url = id ? '${BASE_PATH}/configs/' + id + '/update' : '${BASE_PATH}/configs';
     fetch(url, {
@@ -321,7 +342,7 @@ ${listSection}
       }),
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.ok) { location.reload(); }
-      else { saveResult.innerHTML = '<span class="text-error">' + d.error + '</span>'; }
+      else { saveResult.innerHTML = '<span style="color:var(--err)">' + d.error + '</span>'; }
     });
   });
 
@@ -340,8 +361,8 @@ ${listSection}
   var runStatus = document.getElementById('runStatus');
   document.querySelectorAll('.runBtn').forEach(function (b) {
     b.addEventListener('click', function () {
-      b.classList.add('btn-disabled');
-      runStatus.innerHTML = '<div class="alert text-sm"><span class="loading loading-spinner loading-sm"></span> 建立工作中…</div>';
+      b.disabled = true;
+      runStatus.innerHTML = '<div class="msg"><span class="spin"></span> 建立工作中…</div>';
       fetch('${BASE_PATH}/configs/' + b.getAttribute('data-id') + '/run', { method: 'POST' })
         .then(function (r) { return r.json(); }).then(function (d) {
           if (!d.ok) throw new Error(d.error || '建立失敗');
@@ -349,24 +370,26 @@ ${listSection}
             fetch('${BASE_PATH}/job/' + d.jobId).then(function (r) { return r.json(); }).then(function (j) {
               if (j.error) {
                 clearInterval(poll);
-                runStatus.innerHTML = '<div class="alert alert-error text-sm whitespace-pre-wrap">' + j.error + '</div>';
+                runStatus.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + j.error + '</div>';
                 setTimeout(function () { location.reload(); }, 2000);
               } else if (j.done) {
                 clearInterval(poll);
-                runStatus.innerHTML = '<div class="alert alert-success text-sm">完成：' + (j.summary || '') + '</div>';
+                runStatus.innerHTML = '<div class="msg msg-ok">完成：' + (j.summary || '') + '</div>';
                 setTimeout(function () { location.reload(); }, 1500);
               } else {
-                runStatus.innerHTML = '<div class="alert text-sm"><span class="loading loading-spinner loading-sm"></span> ' + j.phase + '</div>';
+                runStatus.innerHTML = '<div class="msg"><span class="spin"></span> ' + j.phase + '</div>';
               }
             });
           }, 1500);
         }).catch(function (err) {
-          runStatus.innerHTML = '<div class="alert alert-error text-sm">' + err.message + '</div>';
+          runStatus.innerHTML = '<div class="msg msg-err">' + err.message + '</div>';
         });
     });
   });
-})();
-</script>`, { width: 'max-w-6xl' })
+})();`;
+
+    reply.type('text/html').send(
+      sbPage({ title: '廣告凝視者 · Slot Board', active: 'adstream', body, style: STYLE, script, width: '1120px' })
     );
   });
 
