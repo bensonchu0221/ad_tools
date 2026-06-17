@@ -150,10 +150,10 @@ export async function registerAdstream(app: FastifyInstance) {
     }).join('');
 
     const listSection = configs.length
-      ? `<div class="tbl-wrap"><table class="qtable">
+      ? `<div class="card"><div class="tbl-wrap"><table class="qtable">
           <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>Sheet</th><th>回補起始</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
-          <tbody>${rows}</tbody></table></div>`
-      : '<div class="note">尚無設定</div>';
+          <tbody>${rows}</tbody></table></div></div>`
+      : '<div class="card"><div class="note" style="margin-top:0">尚無設定</div></div>';
 
     const body = `
     <div class="crumb"><a href="/">// tools</a> / adstream</div>
