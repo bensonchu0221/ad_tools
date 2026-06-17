@@ -2,6 +2,7 @@
 // 與正式首頁 / 完全獨立，掛在 /board；沿用 server.ts 的 TOOLS 註冊表動態渲染。
 // 注意：本頁刻意脫離全站 daisyUI 預設，僅供方向試驗，不影響其它頁。
 import { FAVICON_DATA_URI } from './favicon.js';
+import { FONT_FACES } from './fonts-face.js';
 
 interface SlotTool {
   name: string;
@@ -55,10 +56,7 @@ export function renderSlotBoard(tools: SlotTool[]): string {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>廣告投放工具台 · Slot Board</title>
 <link rel="icon" type="image/x-icon" href="${FAVICON_DATA_URI}" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
-<style>
+<style>${FONT_FACES}
   :root{
     --paper:#EEF0F4; --ink:#14161A; --slot:#FFFFFF;
     --line:#D5D9E0; --line2:#E4E7EC; --accent:#FF5436; --mut:#6B7280;

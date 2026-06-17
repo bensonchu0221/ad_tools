@@ -1,8 +1,11 @@
 // ad_tools 主程式：多工具平台。選單 + 各工具路由。
 import 'dotenv/config';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import formbody from '@fastify/formbody';
+import fastifyStatic from '@fastify/static';
 import { registerAuth } from './core/auth.js';
 import { renderSlotBoard } from './core/slotboard.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
@@ -41,6 +44,14 @@ const TOOLS: Tool[] = [
 const app = Fastify({ logger: true, trustProxy: true });
 await app.register(multipart, { limits: { fileSize: 15 * 1024 * 1024 } });
 await app.register(formbody); // token 管理頁的 urlencoded 表單
+// 自架字體靜態服務：public/fonts/*.woff2 → /fonts/*（首頁 Slot Board 用，不靠 CDN）
+// 路徑相對本檔：src/ 或 dist/ 的上一層皆為專案根，public 固定在根
+await app.register(fastifyStatic, {
+  root: join(dirname(fileURLToPath(import.meta.url)), '../public/fonts'),
+  prefix: '/fonts/',
+  immutable: true,
+  maxAge: '30d'
+});
 await registerAuth(app); // Google 登入保護（未設定 OAuth env 時自動停用）
 
 // 選單首頁：Ad Slot Board 版位牆（自訂字體/CSS，渲染於 core/slotboard.ts）

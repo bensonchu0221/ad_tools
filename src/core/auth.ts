@@ -162,11 +162,12 @@ export async function registerAuth(app: FastifyInstance) {
     reply.redirect('/login');
   });
 
-  // 守衛：未登入一律導向 /login（除外：登入相關、健康檢查、排程 webhook）
+  // 守衛：未登入一律導向 /login（除外：登入相關、健康檢查、排程 webhook、自架字體靜態檔）
   // `/tools/*/cron`＝Cloud Scheduler 打的排程入口，沒有登入 cookie，靠各自 DIAG_KEY 守衛（同 /health 模式）
+  // `/fonts/*`＝首頁自架字體 woff2，非敏感且須在 cookie 失效時仍能載入，故放行
   app.addHook('preHandler', async (req, reply) => {
     const path = req.url.split('?')[0];
-    if (path === '/login' || path.startsWith('/auth/') || path.startsWith('/health') || path.endsWith('/cron')) return;
+    if (path === '/login' || path.startsWith('/auth/') || path.startsWith('/health') || path.startsWith('/fonts/') || path.endsWith('/cron')) return;
     if (!currentUser(req)) return reply.redirect('/login');
   });
 }
