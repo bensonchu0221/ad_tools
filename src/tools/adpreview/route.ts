@@ -503,33 +503,47 @@ export async function registerAdpreview(app: FastifyInstance) {
   // ---------- token 管理頁 ----------
   app.get(`${BASE_PATH}/tokens`, async (_req, reply) => {
     const rows = await listDAccounts();
+    const nProtected = rows.filter((r) => r.source === 'adtools').length;
+    const nMirror = rows.length - nProtected;
+
     const tr = rows
       .map((r) => {
-        const badge =
-          r.source === 'adtools'
-            ? '<span class="st st-done">自建</span>'
-            : '<span class="st st-queued">舊系統鏡像</span>';
-        const actions =
-          r.source === 'adtools'
-            ? `<button type="button" class="btn-line" onclick="editRow(${r.id}, '${esc(r.accountName).replace(/'/g, "\\'")}', '${r.accountId ?? ''}')">編輯</button>
+        const isProtected = r.source === 'adtools';
+        // 來源＝守衛旗標的語意狀態：adtools 手動接管(受保護) vs dctool 舊系統鏡像(唯讀、會被覆蓋)
+        const pill = isProtected
+          ? '<span class="src-pill prot">受保護</span>'
+          : '<span class="src-pill mir">鏡像</span>';
+        const actions = isProtected
+          ? `<button type="button" class="btn-line" onclick="editRow(${r.id}, '${esc(r.accountName).replace(/'/g, "\\'")}', '${r.accountId ?? ''}')">編輯</button>
                <form method="post" action="${BASE_PATH}/tokens/${r.id}/delete" style="display:inline" onsubmit="return confirm('確定刪除「${esc(r.accountName)}」？')">
                  <button class="btn-line btn-danger">刪除</button>
                </form>`
-            : '<span class="muted">唯讀</span>';
-        return `<tr data-name="${esc(r.accountName.toLowerCase())}">
-          <td>${esc(r.accountName)}</td><td class="muted">${r.accountId ? esc(r.accountId) : '-'}</td>
-          <td>${badge}</td><td><div class="acts">${actions}</div></td></tr>`;
+          : '<span class="muted">唯讀</span>';
+        const search = esc(`${r.accountName} ${r.accountId ?? ''}`.toLowerCase());
+        return `<tr data-search="${search}" data-source="${isProtected ? 'adtools' : 'dctool'}">
+          <td>${esc(r.accountName)}</td><td class="id-mono">${r.accountId ? esc(r.accountId) : '—'}</td>
+          <td>${pill}</td><td><div class="acts">${actions}</div></td></tr>`;
       })
       .join('');
 
     const body = `
     <div class="crumb"><a href="/">// tools</a> / <a href="${BASE_PATH}">adpreview</a> / tokens</div>
-    <h1>D 帳號 token 管理</h1>
-    <p class="sub">「舊系統鏡像」每次讀取自動同步自舊 dctool DB（唯讀）；「自建」為本工具新增，可編輯／刪除。</p>
+    <div class="dash-head">
+      <div>
+        <h1>D 帳號 Token 管理</h1>
+        <p class="sub">管控 D(Discovery) 帳號的 popin token：鏡像列每次讀取自動同步舊 dctool DB（唯讀），自建列受保護、可編輯／刪除。</p>
+      </div>
+      <button type="button" class="btn-pri" id="newBtn">+ 新增 token</button>
+    </div>
 
-    <div class="section-label">新增 / 編輯 · token</div>
-    <div class="card">
-      <div class="field"><div class="flabel"><span class="nm" id="formTitle">新增 token</span></div></div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="num">${rows.length}</div><div class="lab">總帳號</div></div>
+      <div class="kpi ok"><div class="num">${nProtected}</div><div class="lab">自建 · 受保護</div></div>
+      <div class="kpi mir"><div class="num">${nMirror}</div><div class="lab">鏡像 · 唯讀</div></div>
+    </div>
+
+    <div class="panel card" id="formPanel">
+      <div class="panel-head"><span class="nm" id="formTitle">新增 token</span><button type="button" class="xbtn" id="closeBtn" aria-label="關閉">✕</button></div>
       <form method="post" action="${BASE_PATH}/tokens" id="tokenForm">
         <input type="hidden" name="id" id="f_id">
         <div class="field">
@@ -544,37 +558,89 @@ export async function registerAdpreview(app: FastifyInstance) {
         </div>
         <div class="acts">
           <button class="btn-pri" id="submitBtn">新增</button>
-          <button type="button" class="btn-line hidden" id="cancelBtn" onclick="resetForm()">取消編輯</button>
+          <button type="button" class="btn-line" id="cancelBtn">取消</button>
         </div>
       </form>
     </div>
 
-    <div class="section-label">已建立 · accounts</div>
+    <div class="filterbar">
+      <input class="grow" type="text" id="filter" placeholder="搜尋帳號名稱 / account_id…">
+      <div class="srcfilter">
+        <button type="button" class="chip-f on" data-src="all">全部</button>
+        <button type="button" class="chip-f" data-src="adtools">自建</button>
+        <button type="button" class="chip-f" data-src="dctool">鏡像</button>
+      </div>
+    </div>
+
     <div class="card">
-      <div class="field"><input type="text" id="filter" placeholder="搜尋帳號…"></div>
-      <div style="max-height:28rem;overflow:auto">
+      <div class="tbl-wrap">
         <table class="qtable">
           <thead><tr><th>帳號名稱</th><th>account_id</th><th>來源</th><th></th></tr></thead>
           <tbody id="tbody">${tr}</tbody>
         </table>
       </div>
-      <div class="note">共 ${rows.length} 筆</div>
+      <div class="note" id="countNote">共 ${rows.length} 筆</div>
     </div>
     <footer>popin ad-ops · adpreview / tokens</footer>`;
 
     const TOKENS_STYLE = `
       .acc-grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
       @media(max-width:560px){.acc-grid2{grid-template-columns:1fr}}
-      .acts{display:flex;gap:6px;flex-wrap:wrap}
+      .acts{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+      /* 標題列：左標題、右主要動作 */
+      .dash-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
+      .dash-head .btn-pri{flex:0 0 auto}
+      /* KPI 磚：大數字（display 字）＋左側語意色條 */
+      .kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:26px 0 20px}
+      @media(max-width:560px){.kpi-row{grid-template-columns:1fr}}
+      .kpi{position:relative;background:var(--slot);border:1px solid var(--line);border-radius:6px;padding:18px 18px 15px;overflow:hidden}
+      .kpi::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ink)}
+      .kpi.ok::before{background:var(--ok)} .kpi.mir::before{background:var(--slate)}
+      .kpi .num{font-family:var(--disp);font-weight:700;font-size:38px;line-height:1;letter-spacing:-.02em}
+      .kpi .lab{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--mut);margin-top:8px;text-transform:uppercase}
+      /* 滑下表單面板 */
+      .panel{display:none;margin-bottom:20px}
+      .panel.open{display:block;animation:slidedown .18s ease}
+      @keyframes slidedown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+      @media(prefers-reduced-motion:reduce){.panel.open{animation:none}}
+      .panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+      .panel-head .nm{font-family:var(--mono);font-size:12.5px;font-weight:600;letter-spacing:.04em}
+      .xbtn{border:none;background:none;color:var(--mut);font-size:17px;line-height:1;cursor:pointer;padding:2px 6px}
+      .xbtn:hover{color:var(--ink)}
+      /* 篩選列 */
+      .filterbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px}
+      .filterbar .grow{flex:1;min-width:200px;margin:0}
+      .srcfilter{display:flex;gap:6px}
+      .chip-f{font-family:var(--mono);font-size:12px;color:var(--mut);background:var(--slot);
+        border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer;transition:background .15s,color .15s,border-color .15s}
+      .chip-f:hover{border-color:var(--ink);color:var(--ink)}
+      .chip-f.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+      /* 來源語意 pill（前綴小圓點用 currentColor） */
+      .src-pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;
+        font-weight:500;padding:3px 10px;border-radius:999px;border:1px solid var(--line)}
+      .src-pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+      .src-pill.prot{color:var(--ok);border-color:var(--ok)}
+      .src-pill.mir{color:var(--slate)}
+      .id-mono{font-family:var(--mono);font-size:12px;color:var(--mut)}
+      .tbl-wrap{max-height:30rem;overflow:auto}
     `;
 
     const script = `
-document.getElementById('filter').addEventListener('input', function () {
-  var kw = this.value.trim().toLowerCase();
-  document.querySelectorAll('#tbody tr').forEach(function (tr) {
-    tr.style.display = tr.getAttribute('data-name').indexOf(kw) !== -1 ? '' : 'none';
-  });
+var panel = document.getElementById('formPanel');
+function openPanel() {
+  panel.classList.add('open');
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function closePanel() { panel.classList.remove('open'); }
+
+document.getElementById('newBtn').addEventListener('click', function () {
+  resetForm();
+  openPanel();
+  document.getElementById('f_name').focus();
 });
+document.getElementById('closeBtn').addEventListener('click', closePanel);
+document.getElementById('cancelBtn').addEventListener('click', function () { resetForm(); closePanel(); });
+
 function editRow(id, name, aid) {
   var f = document.getElementById('tokenForm');
   f.action = '${BASE_PATH}/tokens/' + id + '/update';
@@ -585,9 +651,8 @@ function editRow(id, name, aid) {
   document.getElementById('f_token').placeholder = '留空 = 不變更 token';
   document.getElementById('formTitle').textContent = '編輯 token：' + name;
   document.getElementById('submitBtn').textContent = '儲存';
-  document.getElementById('cancelBtn').classList.remove('hidden');
   document.getElementById('tokenHint').textContent = '（留空不變更）';
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  openPanel();
 }
 function resetForm() {
   var f = document.getElementById('tokenForm');
@@ -595,12 +660,39 @@ function resetForm() {
   f.reset();
   document.getElementById('formTitle').textContent = '新增 token';
   document.getElementById('submitBtn').textContent = '新增';
-  document.getElementById('cancelBtn').classList.add('hidden');
+  document.getElementById('f_token').placeholder = 'popin Basic token';
   document.getElementById('tokenHint').textContent = '必填';
-}`;
+}
+
+// ---------- 搜尋（名稱 + account_id）＋ 來源篩選 chip ----------
+var filterInput = document.getElementById('filter');
+var srcChips = [].slice.call(document.querySelectorAll('.chip-f'));
+var countNote = document.getElementById('countNote');
+var curSrc = 'all';
+function applyFilter() {
+  var kw = filterInput.value.trim().toLowerCase();
+  var shown = 0;
+  document.querySelectorAll('#tbody tr').forEach(function (tr) {
+    var okText = tr.getAttribute('data-search').indexOf(kw) !== -1;
+    var okSrc = curSrc === 'all' || tr.getAttribute('data-source') === curSrc;
+    var show = okText && okSrc;
+    tr.style.display = show ? '' : 'none';
+    if (show) shown++;
+  });
+  countNote.textContent = '共 ' + shown + ' 筆';
+}
+filterInput.addEventListener('input', applyFilter);
+srcChips.forEach(function (c) {
+  c.addEventListener('click', function () {
+    srcChips.forEach(function (x) { x.classList.remove('on'); });
+    c.classList.add('on');
+    curSrc = c.getAttribute('data-src');
+    applyFilter();
+  });
+});`;
 
     reply.type('text/html').send(
-      sbPage({ title: 'D 帳號 token 管理 · Slot Board', active: 'adpreview', body, style: TOKENS_STYLE, script })
+      sbPage({ title: 'D 帳號 Token 管理 · Slot Board', active: 'adpreview', body, style: TOKENS_STYLE, script })
     );
   });
 
