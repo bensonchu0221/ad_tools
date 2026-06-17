@@ -1,26 +1,17 @@
-// D&R 週報 v2 表單頁：與原 weeklyreport 並存、不影響原本。
-// 只重做「表單頁視覺」成首頁 Slot Board 的設計語言（自架字體 + 冷灰紙底 + 橘紅 accent + mono 標籤）；
-// 後端完全重用原 weeklyreport 端點（accounts/generate/jobs/download），互動邏輯原樣搬。
-import type { FastifyInstance } from 'fastify';
+// D&R 週報表單頁渲染（Slot Board 設計語言 + 自架字體，無 daisyUI/CDN）。
+// 由 route.ts 的 GET BASE_PATH 使用；basePath 帶入讓表單 fetch 指向同工具的後端端點。
 import { FAVICON_DATA_URI } from '../../core/favicon.js';
 import { FONT_FACES } from '../../core/fonts-face.js';
-import { dbAvailable } from '../../core/store.js';
 import { R_EVENTS, D_EVENTS } from './types.js';
 
-export const BASE_PATH = '/tools/weeklyreport2';
-const TARGET = '/tools/weeklyreport'; // 後端端點沿用原工具
-const RETENTION_DAYS = 14; // 與原工具 / bucket lifecycle 一致，僅顯示用
-
-export async function registerWeeklyReport2(app: FastifyInstance) {
-  app.get(BASE_PATH, async (_req, reply) => {
-    const hasDb = dbAvailable();
+export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: number): string {
     // 事件 chip：mono pill，可拖；右側小方塊標來源 D(橘)/R(藍)
     const chip = (v: string, label: string, src: 'R' | 'D') =>
       `<div class="chip" draggable="true" data-event="${v}">${label}<span class="src src-${src.toLowerCase()}">${src}</span></div>`;
     const dChips = D_EVENTS.map((e) => chip(e.value, e.label, 'D')).join('');
     const rChips = R_EVENTS.map((e) => chip(e.value, e.label, 'R')).join('');
 
-    reply.type('text/html').send(`<!doctype html>
+  return `<!doctype html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
@@ -31,7 +22,7 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
   :root{
     --paper:#EEF0F4; --ink:#14161A; --slot:#FFFFFF;
     --line:#D5D9E0; --line2:#E4E7EC; --accent:#FF5436; --mut:#6B7280;
-    --rblue:#2563EB; --ok:#15A34A; --err:#DC2626;
+    --slate:#64748B; --ok:#15803D; --err:#B91C1C;
     --disp:'Space Grotesk','Noto Sans TC',sans-serif;
     --body:'Inter','Noto Sans TC',sans-serif;
     --mono:'IBM Plex Mono',monospace;
@@ -68,11 +59,11 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
   .flabel .hint{font-size:12px;color:var(--mut)}
   .src{display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);
     font-size:9.5px;font-weight:600;line-height:1;padding:3px 5px;border-radius:3px;color:#fff}
-  .src-d{background:var(--accent)} .src-r{background:var(--rblue)}
+  .src-d{background:var(--ink)} .src-r{background:var(--slate)}
   input[type=text],input[type=date],input:not([type]),select{width:100%;font-family:var(--body);
     font-size:14px;color:var(--ink);background:var(--slot);border:1px solid var(--line);
     border-radius:5px;padding:10px 12px;outline:none;transition:border-color .15s,box-shadow .15s}
-  input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(255,84,54,.14)}
+  input:focus,select:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(20,22,26,.07)}
   input:disabled{background:#F1F2F4;color:var(--mut);cursor:not-allowed}
   .note{font-size:12px;color:var(--mut);margin-top:6px}
   .note a{color:var(--accent);text-decoration:none} .note a:hover{text-decoration:underline}
@@ -92,31 +83,28 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
   .chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;
     background:var(--slot);border:1px solid var(--line);border-radius:999px;padding:5px 11px;
     cursor:grab;user-select:none;transition:border-color .15s}
-  .chip:hover{border-color:var(--accent)}
+  .chip:hover{border-color:var(--ink)}
   .chip.dragging{opacity:.4}
   .dnd-zone{display:flex;flex-wrap:wrap;gap:8px;border-radius:6px;padding:12px;min-height:52px;transition:background .15s}
   .pool{border:1px solid var(--line);background:#F1F2F4}
-  .dnd-zone.over{background:rgba(255,84,54,.08)}
+  .dnd-zone.over{border-color:var(--ink);background:#F8FAFC}
   .buckets{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
   @media(max-width:560px){.buckets{grid-template-columns:1fr}}
   .bk-label{font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.08em;margin-bottom:6px}
-  .bucket{border:1.5px dashed var(--line);min-height:72px;align-content:flex-start}
-  .bk-cv .bucket,.bucket.bk-cv{border-color:var(--accent)}
-  .bk-mcv .bucket,.bucket.bk-mcv{border-color:var(--rblue)}
-  .bk-mcv2 .bucket,.bucket.bk-mcv2{border-color:var(--mut)}
+  .bucket{border:1px solid var(--line);background:#F8FAFC;min-height:72px;align-content:flex-start}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:560px){.row2{grid-template-columns:1fr}}
   .daterange{display:flex;align-items:center;gap:8px}
   .daterange span{color:var(--mut)}
   /* 主按鈕 */
   .btn-go{width:100%;margin-top:4px;font-family:var(--body);font-weight:600;font-size:14px;color:#fff;
-    background:var(--accent);border:none;border-radius:6px;padding:13px;cursor:pointer;transition:filter .15s}
-  .btn-go:hover{filter:brightness(.94)}
+    background:var(--ink);border:none;border-radius:6px;padding:13px;cursor:pointer;transition:background .15s}
+  .btn-go:hover{background:var(--accent)}
   .btn-go:disabled{opacity:.55;cursor:wait}
   .status{margin-top:12px}
   .msg{display:flex;align-items:center;gap:8px;font-size:13.5px;border:1px solid var(--line);
     border-radius:5px;padding:10px 12px;background:var(--slot)}
-  .msg-warn{border-color:var(--accent);color:var(--accent)}
+  .msg-warn{border-color:var(--line);border-left:3px solid var(--accent);color:var(--ink)}
   .msg-ok{border-color:var(--ok);color:var(--ok)}
   .msg-err{border-color:var(--err);color:var(--err)}
   /* 佇列表 */
@@ -184,9 +172,9 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
           <div class="pool-label">事件池</div>
           <div id="eventPool" class="dnd-zone pool" data-bucket="pool">${dChips}${rChips}</div>
           <div class="buckets">
-            <div><div class="bk-label">CV</div><div class="dnd-zone bucket bk-cv" data-bucket="cv"></div></div>
-            <div><div class="bk-label">MCV</div><div class="dnd-zone bucket bk-mcv" data-bucket="mcv"></div></div>
-            <div><div class="bk-label">MCV2</div><div class="dnd-zone bucket bk-mcv2" data-bucket="mcv2"></div></div>
+            <div><div class="bk-label">CV</div><div class="dnd-zone bucket" data-bucket="cv"></div></div>
+            <div><div class="bk-label">MCV</div><div class="dnd-zone bucket" data-bucket="mcv"></div></div>
+            <div><div class="bk-label">MCV2</div><div class="dnd-zone bucket" data-bucket="mcv2"></div></div>
           </div>
         </div>
 
@@ -216,7 +204,7 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
 
     <div class="section-label">產生佇列 · queue</div>
     <div class="card">
-      <div class="qmeta"><span class="t">產生佇列</span><span class="r">產出檔案保留 ${RETENTION_DAYS} 天，逾期自動刪除，請及時下載</span></div>
+      <div class="qmeta"><span class="t">產生佇列</span><span class="r">產出檔案保留 ${retentionDays} 天，逾期自動刪除，請及時下載</span></div>
       <table class="qtable">
         <thead><tr><th>項目</th><th>狀態</th><th>建立時間</th><th class="ar">下載</th></tr></thead>
         <tbody id="jobRows"><tr><td colspan="4" class="center">載入中…</td></tr></tbody>
@@ -244,7 +232,7 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
     }).join('') || '<div class="empty">無符合帳號</div>';
   }
   if (comboEnabled) {
-    fetch('${TARGET}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = d; render(''); });
+    fetch('${basePath}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = d; render(''); });
     search.addEventListener('focus', function () { list.classList.add('open'); });
     search.addEventListener('input', function () { hidden.value = ''; list.classList.add('open'); render(search.value.trim()); });
     search.addEventListener('blur', function () { setTimeout(function () { list.classList.remove('open'); }, 120); });
@@ -316,7 +304,7 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
 
     genBtn.disabled = true;
     statusBox.innerHTML = '<div class="msg"><span class="spin"></span> 加入佇列中…</div>';
-    fetch('${TARGET}/generate', {
+    fetch('${basePath}/generate', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
     }).then(function (r) { return r.json(); }).then(function (d) {
       genBtn.disabled = false;
@@ -343,11 +331,11 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
     return '<span class="st st-fail" title="' + esc(j.error || '') + '">失敗</span>';
   }
   function loadJobs() {
-    fetch('${TARGET}/jobs').then(function (r) { return r.json(); }).then(function (jobs) {
+    fetch('${basePath}/jobs').then(function (r) { return r.json(); }).then(function (jobs) {
       if (!jobs.length) { jobRows.innerHTML = '<tr><td colspan="4" class="center">尚無紀錄</td></tr>'; return; }
       jobRows.innerHTML = jobs.map(function (j) {
         var dl = j.status === 'done'
-          ? '<a class="btn-dl" href="${TARGET}/download/' + j.id + '">下載</a>'
+          ? '<a class="btn-dl" href="${basePath}/download/' + j.id + '">下載</a>'
           : (j.status === 'failed' ? '<span class="muted">—</span>' : '<span class="muted">等待中</span>');
         return '<tr><td>' + esc(j.label) + '</td><td>' + statusCell(j) + '</td><td class="muted">' + esc(j.createdAt) + '</td><td class="ar">' + dl + '</td></tr>';
       }).join('');
@@ -358,6 +346,5 @@ export async function registerWeeklyReport2(app: FastifyInstance) {
 })();
 </script>
 </body>
-</html>`);
-  });
+</html>`;
 }

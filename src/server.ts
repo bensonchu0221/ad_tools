@@ -10,7 +10,6 @@ import { registerAuth } from './core/auth.js';
 import { renderSlotBoard } from './core/slotboard.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyreport/route.js';
-import { registerWeeklyReport2 } from './tools/weeklyreport/route2.js';
 import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
@@ -87,7 +86,6 @@ app.get('/health/db', async (req, reply) => {
 
 await registerAdpreview(app);
 await registerWeeklyReport(app);
-await registerWeeklyReport2(app); // 同工具的 Slot Board 樣式版（/tools/weeklyreport2，後端共用原端點）
 await registerAdstream(app);
 
 const port = Number(process.env.PORT ?? 8080);
