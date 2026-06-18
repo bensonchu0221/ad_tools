@@ -217,7 +217,7 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
     const result = await page.evaluate(
       ({ sel, image, title, advertiserName }) => {
         const adCard = document.getElementById('__preview_target__') as HTMLElement | null;
-        if (!adCard) return { ok: false, swappedImg: 0, forcedImg: false, swappedTitle: false };
+        if (!adCard) return { ok: false, swappedImg: 0, forcedImg: false, swappedTitle: false, swappedAdvertiser: false };
 
         let swappedImg = 0;
         let forcedImg = false;
@@ -256,16 +256,28 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
           swappedTitle = true;
         }
 
-        // 換廣告主名（best-effort：找卡片內以 "PR" 開頭的標籤）
+        // 換廣告主名：定位 popin 標準的廣告主名容器 _popIn_recommend_art_media。
+        // 容器內容可能是「PR・廣告主」「#讚助 廣告主」或純廣告主名——前綴(PR/#讚助/贊助…)是廣告版位的
+        // 固定標示要保留，只替換後面的廣告主名。前綴若是 CSS 偽元素則本就不在 textContent，整段替換亦安全。
+        let swappedAdvertiser = false;
         if (advertiserName) {
-          const all = [...adCard.querySelectorAll('*')] as HTMLElement[];
-          const label = all.find(
-            (e) => e.children.length === 0 && /^PR\s*[・·.\-]/.test((e.textContent || '').trim())
-          );
-          if (label) label.textContent = `PR・${advertiserName}`;
+          const mediaBox = adCard.querySelector(sel.media) as HTMLElement | null;
+          if (mediaBox) {
+            // 前綴標籤：PR / #讚助 / 贊助 / Sponsored / AD（含其後的分隔符與空白）
+            const PREFIX_RE = /^(?:#\s*)?(?:PR|讚助|贊助|Sponsored|AD)\s*[・·:：.\-]?\s*/i;
+            // 只動「含廣告主名的那個文字節點」，避免抹掉前綴可能存在的子元素（如 PR 標籤 span）
+            const textNode = [...mediaBox.childNodes]
+              .reverse()
+              .find((n) => n.nodeType === 3 && (n.textContent || '').trim());
+            const target = (textNode ?? mediaBox) as { textContent: string | null };
+            const cur = (target.textContent || '').trim();
+            const prefix = cur.match(PREFIX_RE)?.[0] ?? '';
+            target.textContent = prefix + advertiserName;
+            swappedAdvertiser = true;
+          }
         }
 
-        return { ok: true, swappedImg, forcedImg, swappedTitle };
+        return { ok: true, swappedImg, forcedImg, swappedTitle, swappedAdvertiser };
       },
       { sel: POPIN, image: material.image, title: material.title, advertiserName: material.advertiserName }
     );
@@ -275,7 +287,7 @@ async function openAndSwap(input: ShootInput, opts: OpenOpts = {}) {
       throw new Error('找到 popin 廣告卡但無法替換素材（卡片結構不符，請換一頁或回報）');
     }
     console.log(
-      `[adpreview] swap 完成: img=${result.swappedImg} forced=${result.forcedImg} title=${result.swappedTitle} (${Date.now() - t0}ms)`
+      `[adpreview] swap 完成: img=${result.swappedImg} forced=${result.forcedImg} title=${result.swappedTitle} advertiser=${result.swappedAdvertiser} (${Date.now() - t0}ms)`
     );
 
     await page.waitForTimeout(500); // 等新圖載入

@@ -7,6 +7,7 @@ export const POPIN = {
   adCardClass: '_popIn_recommend_article_ad', // 真廣告卡（用 classList.contains 精準比對）
   imgBox: '._popIn_recommend_art_img',
   title: '._popIn_recommend_art_title',
+  media: '._popIn_recommend_art_media', // 廣告主名容器（內容多為「PR・廣告主」「#讚助 廣告主」或純廣告主名）
 };
 
 export type Device = 'desktop' | 'mobile';
