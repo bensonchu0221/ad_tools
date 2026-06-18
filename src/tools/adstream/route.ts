@@ -76,7 +76,11 @@ async function executeAndRecord(
   try {
     const res = await runConfig(config, onPhase);
     if (res.skipped) {
-      const msg = `已是最新（無新資料，已同步到 ${config.lastSyncedDate ?? '—'}）`;
+      // 區分「正常無新資料」與「已達終止日停止」，讓清單訊息一眼看懂為何沒抓
+      const reachedEnd = config.endDate && config.lastSyncedDate && config.lastSyncedDate >= config.endDate;
+      const msg = reachedEnd
+        ? `已達終止日 ${config.endDate}，停止同步（已同步到 ${config.lastSyncedDate}）`
+        : `已是最新（無新資料，已同步到 ${config.lastSyncedDate ?? '—'}）`;
       await markBulkRun(config.id, { status: 'success', message: msg });
       return msg;
     }
@@ -131,13 +135,14 @@ export async function registerAdstream(app: FastifyInstance) {
       const accPairs = c.accountIds.map((id) => ({ id: String(id), name: accLabel(id) }));
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
-        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}"`;
+        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"`;
       return `<tr>
         <td>${esc(c.name)}</td>
         <td class="muted">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
         <td class="muted">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
         <td class="muted"><a href="${esc(c.sheetUrl)}" target="_blank" style="color:var(--accent)">開啟 ↗</a></td>
         <td class="muted">${c.backfillStartDate}</td>
+        <td class="muted">${c.endDate ?? '<span style="color:var(--mut)">不限</span>'}</td>
         <td class="muted">${c.lastSyncedDate ?? '—'}</td>
         <td class="muted">${statusBadge}<br>${c.lastRunAt ?? '—'}</td>
         <td class="muted"><div class="msgline" title="${esc(c.lastRunMessage ?? '')}">${esc(c.lastRunMessage ?? '')}</div></td>
@@ -151,7 +156,7 @@ export async function registerAdstream(app: FastifyInstance) {
 
     const listSection = configs.length
       ? `<div class="card"><div class="tbl-wrap"><table class="qtable">
-          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>Sheet</th><th>回補起始</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
+          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>Sheet</th><th>回補起始</th><th>終止日</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div></div>`
       : '<div class="card"><div class="note" style="margin-top:0">尚無設定</div></div>';
 
@@ -169,14 +174,19 @@ export async function registerAdstream(app: FastifyInstance) {
       <div class="field"><div class="flabel"><span class="nm" id="formTitle">新增設定</span></div></div>
 
       <div class="field">
+        <div class="flabel"><span class="nm">設定名稱</span></div>
+        <input type="text" id="name" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
+      </div>
+
+      <div class="field">
         <div class="row2">
-          <div>
-            <div class="flabel"><span class="nm">設定名稱</span></div>
-            <input type="text" id="name" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
-          </div>
           <div>
             <div class="flabel"><span class="nm">回補起始日</span><span class="hint">首次補到昨天，之後每天 T-1</span></div>
             <input type="date" id="backfill" ${hasDb ? '' : 'disabled'}>
+          </div>
+          <div>
+            <div class="flabel"><span class="nm">終止日</span><span class="hint">抓到此日後停止；留空＝持續同步</span></div>
+            <input type="date" id="endDate" ${hasDb ? '' : 'disabled'}>
           </div>
         </div>
       </div>
@@ -299,6 +309,7 @@ export async function registerAdstream(app: FastifyInstance) {
     document.getElementById('sheetUrl').value = '';
     document.getElementById('rUserIds').value = '';
     document.getElementById('backfill').value = '';
+    document.getElementById('endDate').value = '';
     selected = []; renderChips();
     testResult.innerHTML = ''; saveResult.innerHTML = '';
     document.getElementById('formTitle').textContent = '新增設定';
@@ -313,6 +324,7 @@ export async function registerAdstream(app: FastifyInstance) {
       document.getElementById('sheetUrl').value = b.getAttribute('data-sheet');
       document.getElementById('rUserIds').value = b.getAttribute('data-rusers') || '';
       document.getElementById('backfill').value = b.getAttribute('data-backfill');
+      document.getElementById('endDate').value = b.getAttribute('data-enddate') || '';
       try { selected = JSON.parse(b.getAttribute('data-accounts')) || []; } catch (e) { selected = []; }
       renderChips();
       document.getElementById('formTitle').textContent = '編輯設定 #' + editingId.value;
@@ -326,6 +338,7 @@ export async function registerAdstream(app: FastifyInstance) {
     var sheetUrl = document.getElementById('sheetUrl').value.trim();
     var rUserIds = document.getElementById('rUserIds').value.trim();
     var backfill = document.getElementById('backfill').value;
+    var endDate = document.getElementById('endDate').value;
     if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds)) {
       saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D 帳號與 R Account ID 至少擇一</span>';
       return;
@@ -336,7 +349,7 @@ export async function registerAdstream(app: FastifyInstance) {
     fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        name: name, sheetUrl: sheetUrl, backfillStartDate: backfill,
+        name: name, sheetUrl: sheetUrl, backfillStartDate: backfill, endDate: endDate,
         accountIdsJson: JSON.stringify(selected.map(function (s) { return s.id; })),
         rUserIds: rUserIds,
       }),
@@ -411,6 +424,7 @@ export async function registerAdstream(app: FastifyInstance) {
     const name = (body?.name ?? '').trim();
     const sheetUrl = (body?.sheetUrl ?? '').trim();
     const backfillStartDate = (body?.backfillStartDate ?? '').trim();
+    const endDate = (body?.endDate ?? '').trim(); // 可空＝不限
     let accountIds: string[] = [];
     try {
       const parsed = JSON.parse(body?.accountIdsJson ?? '[]');
@@ -427,7 +441,9 @@ export async function registerAdstream(app: FastifyInstance) {
     if (!sheetId) return { error: '無法解析 Sheet 連結' };
     if (!accountIds.length && !rUserIds.length) return { error: '請至少選一個 D 帳號或填一個 R Account ID' };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(backfillStartDate)) return { error: '回補起始日格式錯誤' };
-    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, backfillStartDate } };
+    if (endDate && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return { error: '終止日格式錯誤' };
+    if (endDate && endDate < backfillStartDate) return { error: '終止日不可早於回補起始日' };
+    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, backfillStartDate, endDate: endDate || null } };
   }
 
   // ---------- 新增 ----------

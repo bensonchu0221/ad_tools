@@ -164,10 +164,13 @@ export async function runConfig(
   config: BulkConfigRow,
   onPhase: (p: string) => void = () => {}
 ): Promise<RunResult> {
-  const endDate = addDays(twToday(), -1); // 昨天 T-1
+  // 終止日封頂：抓到設定的終止日（含）後就不再往後抓，避免排程無止盡空跑浪費資源。
+  // null＝不限，維持原本每日抓到 T-1 的行為。
+  let endDate = addDays(twToday(), -1); // 昨天 T-1
+  if (config.endDate && endDate > config.endDate) endDate = config.endDate;
   const startDate = config.lastSyncedDate ? addDays(config.lastSyncedDate, 1) : config.backfillStartDate;
 
-  // 區間為空：已同步到昨天，無事可做
+  // 區間為空：已同步到上限（昨天或終止日），無事可做——在打任何 API 前早停
   if (startDate > endDate) {
     return { skipped: true, startDate: null, endDate, dRowCount: 0, rRowCount: 0, accountStats: [] };
   }

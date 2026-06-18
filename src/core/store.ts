@@ -234,6 +234,7 @@ export interface BulkConfigRow {
   accountIds: string[]; // 多個 D 帳號 account_id（穩定鍵，對應 d_tokens.account_id）；可空＝不抓 D
   rUserIds: string[]; // 多個 Rixbee Account ID；可空＝不抓 R
   backfillStartDate: string; // YYYY-MM-DD
+  endDate: string | null; // YYYY-MM-DD；抓到此日（含）後停止同步。null=不限、持續每日 T-1
   lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過
   lastRunAt: string | null;
   lastRunStatus: string | null; // success / error / running
@@ -249,6 +250,7 @@ export interface BulkConfigInput {
   accountIds: string[];
   rUserIds: string[];
   backfillStartDate: string; // YYYY-MM-DD
+  endDate: string | null; // YYYY-MM-DD；可空＝不限
 }
 
 let bulkSchemaReady = false;
@@ -264,6 +266,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       account_ids TEXT NULL,
       r_user_ids TEXT NULL,
       backfill_start_date DATE NOT NULL,
+      end_date DATE NULL,
       last_synced_date DATE NULL,
       last_run_at DATETIME NULL,
       last_run_status VARCHAR(32) NULL,
@@ -292,6 +295,10 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
   if (!(await hasCol('created_by'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN created_by VARCHAR(255) NULL`);
   }
+  // 終止日（抓到此日後停止同步；舊資料 null＝不限、維持原本持續每日 T-1 行為）
+  if (!(await hasCol('end_date'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN end_date DATE NULL`);
+  }
   // 舊 account_names 欄保留當 rollback，但放寬可空（不再寫入）；只在仍為 NOT NULL 時改一次
   const [legacyCol] = await p.query(
     `SELECT is_nullable FROM information_schema.columns
@@ -307,6 +314,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
 // 日期欄位用 DATE_FORMAT 取字串，避免 mysql2 回 Date 物件帶時區誤差
 const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids,
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
+  DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
   last_run_status, last_run_message, created_by,
@@ -331,6 +339,7 @@ function mapBulkRow(r: any): BulkConfigRow {
     accountIds: parseJsonArray(r.account_ids),
     rUserIds: parseJsonArray(r.r_user_ids),
     backfillStartDate: r.backfill_start_date,
+    endDate: r.end_date ?? null,
     lastSyncedDate: r.last_synced_date,
     lastRunAt: r.last_run_at,
     lastRunStatus: r.last_run_status,
@@ -365,8 +374,8 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date, end_date, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
@@ -374,6 +383,7 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
+      input.endDate || null,
       createdBy ?? null,
     ]
   );
@@ -386,7 +396,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
   await ensureBulkSchema(p);
   const [res] = await p.query(
     `UPDATE adstream_configs
-     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, backfill_start_date = ?
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, backfill_start_date = ?, end_date = ?
      WHERE id = ?`,
     [
       input.name.trim(),
@@ -395,6 +405,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
+      input.endDate || null,
       id,
     ]
   );
