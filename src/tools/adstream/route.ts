@@ -9,7 +9,7 @@ import {
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { currentUser } from '../../core/auth.js';
-import { runConfig, RAW_TAB, R_RAW_TAB } from './run.js';
+import { runConfig, rerunDay, RAW_TAB, R_RAW_TAB, type RerunScope } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
@@ -98,6 +98,30 @@ async function executeAndRecord(
   } catch (e: any) {
     const msg = String(e?.message ?? e);
     await markBulkRun(config.id, { status: 'error', message: msg });
+    throw e;
+  }
+}
+
+/** 重抓昨天並寫回 DB。涵蓋全部來源才把游標對齊到 max(現游標, 昨天)；否則只記 last_run 不動游標。 */
+async function rerunAndRecord(
+  config: BulkConfigRow, scope: RerunScope, onPhase: (p: string) => void = () => {}
+): Promise<string> {
+  try {
+    const res = await rerunDay(config, scope, onPhase);
+    const parts: string[] = [];
+    if (res.dRows || res.dDeleted) parts.push(`D 刪 ${res.dDeleted}／寫 ${res.dRows}`);
+    if (res.rRows || res.rDeleted) parts.push(`R 刪 ${res.rDeleted}／寫 ${res.rRows}`);
+    const msg = `重抓 ${res.targetDate}：${parts.join('；') || '無資料'}`;
+    let syncedDate: string | undefined;
+    if (res.coversAllSources) {
+      const cur = config.lastSyncedDate;
+      syncedDate = !cur || res.targetDate > cur ? res.targetDate : cur;
+    }
+    await markBulkRun(config.id, { status: 'success', message: msg, syncedDate });
+    return msg;
+  } catch (e: any) {
+    const m = String(e?.message ?? e);
+    await markBulkRun(config.id, { status: 'error', message: m });
     throw e;
   }
 }
@@ -523,6 +547,35 @@ export async function registerAdstream(app: FastifyInstance) {
       }
     })();
 
+    reply.send({ ok: true, jobId });
+  });
+
+  // ---------- 重抓昨天（背景 job） ----------
+  app.post(`${BASE_PATH}/configs/:id/rerun`, async (req, reply) => {
+    const id = Number((req.params as any).id);
+    const config = await getBulkConfig(id);
+    if (!config) return reply.send({ ok: false, error: '找不到設定' });
+    if (!canManage(currentUser(req), config)) return reply.send({ ok: false, error: '無權限操作此設定' });
+    const raw = String((req.body as any)?.scope ?? 'both');
+    const scope: RerunScope = raw === 'd' || raw === 'r' ? raw : 'both';
+
+    const jobId = randomUUID();
+    createJob(jobId);
+    void (async () => {
+      const watchdog = setTimeout(() => {
+        const j = jobStore.get(jobId);
+        if (j && !j.done && !j.error) updateJob(jobId, { error: `執行逾時（超過 10 分鐘，卡在「${j.phase}」）` });
+      }, 10 * 60 * 1000);
+      try {
+        const summary = await rerunAndRecord(config, scope, (phase) => updateJob(jobId, { phase }));
+        if (!jobStore.get(jobId)?.error) updateJob(jobId, { done: true, summary });
+      } catch (e: any) {
+        app.log.error(e, 'adstream rerun failed');
+        updateJob(jobId, { error: String(e?.message ?? e) });
+      } finally {
+        clearTimeout(watchdog);
+      }
+    })();
     reply.send({ ok: true, jobId });
   });
 
