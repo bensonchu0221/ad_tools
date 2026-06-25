@@ -298,6 +298,24 @@ export async function buildXlsx(
     ]);
   }
 
+  // ---------- Sheet 7：raw_data_device（裝置層原始寬列；每列＝平台×日期×campaign，4 裝置桶各 6 指標） ----------
+  // device 是 campaign 層級資料（Raw_Data 是 ad 層級），故另開一頁。D 列只填 PC/Mobile（沿用裝置分析口徑）、
+  // R 列補滿四桶；cv/mcv/mcv2 已在 report.ts 依拖拉分桶換算好（與裝置分析一致）。無框線樣式照 Raw_Data。
+  const s6 = wb.addWorksheet('raw_data_device');
+  const DEV_COLS: [string, string][] = [['PC', 'pc'], ['Mobile', 'mobile'], ['Tablet', 'tablet'], ['Others', 'others']];
+  const DEV_METRICS = ['imp', 'click', 'spend', 'cv', 'mcv', 'mcv2'] as const;
+  const devHeaders = ['platform', 'date', 'account_name', 'campaign_id', 'campaign_name'];
+  for (const [, p] of DEV_COLS) for (const m of DEV_METRICS) devHeaders.push(`${p}_${m}`);
+  s6.addRow(devHeaders);
+  for (const r of result.deviceRaw) {
+    const rowVals: any[] = [r.platform, fmtRawDate(String(r.date ?? '')), r.account_name, r.campaign_id, r.campaign_name];
+    for (const [label] of DEV_COLS) {
+      const m = r.devices[label] ?? { imp: 0, click: 0, spend: 0, cv: 0, mcv: 0, mcv2: 0 };
+      rowVals.push(m.imp, m.click, m.spend, m.cv, m.mcv, m.mcv2);
+    }
+    s6.addRow(rowVals);
+  }
+
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf as ArrayBuffer);
 }

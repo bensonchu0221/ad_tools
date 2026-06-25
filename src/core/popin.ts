@@ -217,14 +217,17 @@ export async function getCampaignDeviceReports(
   }));
   const texts = await batchFetch(reqs, { batchSize: 8 });
   const out: any[] = [];
-  for (const t of texts) {
+  // texts 與 reqs（campaignIds 順序）一一對應：每列補標所屬 campaign_id（campaign 在 URL，回應列本身沒有；
+  // raw_data_device 寬表需要逐 campaign 分列）。聚合呼叫端忽略此多餘欄位，不受影響。
+  for (let i = 0; i < texts.length; i++) {
+    const cid = campaignIds[i];
     try {
-      const json = JSON.parse(t);
+      const json = JSON.parse(texts[i]);
       if (String(json?.code) !== '0') continue; // Video/Wave campaign 回非 0，跳過
       const d = json?.data;
       // data 與 per-ad 同：以日期為鍵的物件，取 values 攤平
-      if (Array.isArray(d)) out.push(...d.filter((x) => x && typeof x === 'object'));
-      else if (d && typeof d === 'object') out.push(...Object.values(d).filter((x) => x && typeof x === 'object'));
+      const rows = Array.isArray(d) ? d : d && typeof d === 'object' ? Object.values(d) : [];
+      for (const x of rows) if (x && typeof x === 'object') out.push({ ...(x as object), campaign_id: cid });
     } catch {
       /* 單筆解析失敗略過（裝置分析非核心，不退回全打） */
     }

@@ -107,6 +107,20 @@ export interface AssetAgg extends MetricAgg {
   asset_image: string;
 }
 
+/**
+ * 裝置原始寬列（raw_data_device 工作表）：每列＝一個 (平台, 日期, campaign)，
+ * 4 裝置桶（PC/Mobile/Tablet/Others）各放標準 6 指標。
+ * D 端只填 PC/Mobile（tablet/xbox 無 base 指標，沿用裝置分析口徑），R 端 device_type 樞紐補滿四桶。
+ */
+export interface DeviceRawRow {
+  platform: 'D' | 'R';
+  date: string; // D: YYYY-MM-DD；R: YYYY-MM-DD（xlsx 統一格式化）
+  account_name: string;
+  campaign_id: string;
+  campaign_name: string;
+  devices: Record<string, MetricAgg>; // key=PC/Mobile/Tablet/Others
+}
+
 export interface ReportResult {
   warnings: string[]; // 給使用者看的提示（R 自動選用的類型、某端查無資料等）
   dateRangeString: string; // 報表走期：YYYY/MM/DD ~ YYYY/MM/DD
@@ -117,6 +131,7 @@ export interface ReportResult {
   images: Map<string, { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' } | null>; // 已下載素材圖（key=原URL），xlsx 縮圖重用
   audiences: Map<string, MetricAgg>; // key=campaign_name(D)/groupname(R)
   deviceAgg: Map<string, MetricAgg>; // key=裝置(PC/Mobile/Tablet/Others)；D 端只填 PC/Mobile，R 端 device_type 補滿四桶
+  deviceRaw: DeviceRawRow[]; // 裝置層原始寬列（raw_data_device 工作表）；D+R 各列、每列一個 平台×日期×campaign
   dRaw: DRow[];
   rRaw: RRow[];
 }
