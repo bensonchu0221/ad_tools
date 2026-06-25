@@ -155,6 +155,60 @@ export interface RunResult {
   rStat?: { userType: UserType; rows: number }; // R（有設定才有）
 }
 
+/** 抓該設定所有 D 帳號在 [sd,ed] 的 bulk + headline + cv 細分，組成 sheet 列。供 runConfig/rerunDay 共用。 */
+async function fetchDRows(
+  config: BulkConfigRow, sd: string, ed: string, startDate: string, endDate: string,
+  syncedAt: string, onPhase: (p: string) => void
+): Promise<{ dRows: (string | number)[][]; accountStats: { account: string; rows: number }[] }> {
+  const nameById = config.accountIds.length
+    ? new Map((await listDAccounts()).map((a) => [String(a.accountId), a.accountName]))
+    : new Map<string, string>();
+  const dRows: (string | number)[][] = [];
+  const accountStats: { account: string; rows: number }[] = [];
+  for (const accountId of config.accountIds) {
+    const accountName = nameById.get(String(accountId)) ?? accountId;
+    onPhase(`抓取 D 帳號 ${accountName}（${startDate}~${endDate}）…`);
+    const token = await getDAccountTokenById(accountId);
+    if (!token) throw new Error(`D 帳號 id=${accountId}（${accountName}）找不到 token，請先到 D 帳號 token 管理確認`);
+    const accessToken = await getAccessToken(token);
+    const campaigns = await getCampaigns(accessToken);
+    const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
+    const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
+    const headlineMap = await fetchHeadlineMap(accessToken, campaignIds);
+    onPhase(`抓取 D 帳號 ${accountName} cv 細分（per-ad，限流較慢）…`);
+    const cvMap = await fetchCvDetailMap(accessToken, rows, sd, ed);
+    for (const r of rows) {
+      const detail: Record<string, any> = cvMap.get(`${dateKey(r.date)}|${r.campaign_id}|${r.ad_id}`) ?? {};
+      dRows.push([
+        accountName, syncedAt,
+        ...BULK_COLS.map((c) => r[c] ?? ''),
+        detail.ad_name ?? '',
+        headlineMap.get(String(r.ad_id)) ?? '',
+        ...CV_COLS.map((c) => detail[c] ?? 0),
+      ]);
+    }
+    accountStats.push({ account: accountName, rows: rows.length });
+  }
+  return { dRows, accountStats };
+}
+
+/** 抓該設定所有 R 帳號在 [startDate,endDate] 的全欄位報表，組成 sheet 列。供 runConfig/rerunDay 共用。 */
+async function fetchRRows(
+  config: BulkConfigRow, startDate: string, endDate: string,
+  syncedAt: string, onPhase: (p: string) => void
+): Promise<{ rRows: (string | number)[][]; rStat?: { userType: UserType; rows: number } }> {
+  const rRows: (string | number)[][] = [];
+  if (!config.rUserIds.length) return { rRows };
+  onPhase('偵測 R 帳號類型…');
+  const userType = await detectRUserType(config.rUserIds, startDate, endDate);
+  onPhase(`抓取 R（${R_TYPE_LABEL[userType]}，${config.rUserIds.join(',')}，${startDate}~${endDate}）…`);
+  const raw = await fetchReport({
+    userType, userIds: config.rUserIds, startDate, endDate, dimensions: R_DIMENSIONS, metrics: [],
+  });
+  for (const r of raw) rRows.push([syncedAt, ...R_COLS.map((c) => r[c] ?? '')]);
+  return { rRows, rStat: { userType, rows: raw.length } };
+}
+
 /**
  * 執行一次同步。onPhase 用來回報進度（手動執行頁輪詢用）。
  * 原子性：D/R 任一段抓取失敗就整批拋錯——不寫 sheet、呼叫端也不推進 last_synced_date，下次原樣重抓。
@@ -182,58 +236,9 @@ export async function runConfig(
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   }).format(new Date()); // YYYY-MM-DD HH:mm:ss
 
-  const accountStats: RunResult['accountStats'] = [];
-  const dRows: (string | number)[][] = [];
-  let rStat: RunResult['rStat'];
-  const rRows: (string | number)[][] = [];
-
   // ---- 先全部抓取（D + R），全成功才寫，維持原子性 ----
-
-  // 設定存的是 account_id（穩定鍵）；取一份 id→名字對照，供 Sheet 的 account_name 欄與進度顯示用
-  const nameById = config.accountIds.length
-    ? new Map((await listDAccounts()).map((a) => [String(a.accountId), a.accountName]))
-    : new Map<string, string>();
-
-  // D：每個帳號 → access token → 全 campaign → bulk 全欄位
-  for (const accountId of config.accountIds) {
-    const accountName = nameById.get(String(accountId)) ?? accountId; // 顯示/寫表用；找不到退回 id
-    onPhase(`抓取 D 帳號 ${accountName}（${startDate}~${endDate}）…`);
-    const token = await getDAccountTokenById(accountId);
-    if (!token) throw new Error(`D 帳號 id=${accountId}（${accountName}）找不到 token，請先到 D 帳號 token 管理確認`);
-    const accessToken = await getAccessToken(token);
-    const campaigns = await getCampaigns(accessToken);
-    const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
-    const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
-    // headline（廣告文案標題）：報表端點沒有，另打 getAdLists 建 ad_id→title 對照
-    const headlineMap = await fetchHeadlineMap(accessToken, campaignIds);
-    // cv_* 細分：bulk 列為索引，對有資料的 ad 另打 per-ad 取得後以 date+campaign_id+ad_id 接回
-    onPhase(`抓取 D 帳號 ${accountName} cv 細分（per-ad，限流較慢）…`);
-    const cvMap = await fetchCvDetailMap(accessToken, rows, sd, ed);
-    for (const r of rows) {
-      const detail: Record<string, any> = cvMap.get(`${dateKey(r.date)}|${r.campaign_id}|${r.ad_id}`) ?? {};
-      dRows.push([
-        accountName, syncedAt,
-        ...BULK_COLS.map((c) => r[c] ?? ''),
-        detail.ad_name ?? '',
-        headlineMap.get(String(r.ad_id)) ?? '',
-        ...CV_COLS.map((c) => detail[c] ?? 0),
-      ]);
-    }
-    accountStats.push({ account: accountName, rows: rows.length });
-  }
-
-  // R：自動偵測類型 → 抓全欄位（fetchReport 內部已切 7 天一段）
-  if (config.rUserIds.length) {
-    onPhase('偵測 R 帳號類型…');
-    const userType = await detectRUserType(config.rUserIds, startDate, endDate);
-    onPhase(`抓取 R（${R_TYPE_LABEL[userType]}，${config.rUserIds.join(',')}，${startDate}~${endDate}）…`);
-    const raw = await fetchReport({
-      userType, userIds: config.rUserIds, startDate, endDate,
-      dimensions: R_DIMENSIONS, metrics: [], // metrics 空＝回全部指標
-    });
-    for (const r of raw) rRows.push([syncedAt, ...R_COLS.map((c) => r[c] ?? '')]);
-    rStat = { userType, rows: raw.length };
-  }
+  const { dRows, accountStats } = await fetchDRows(config, sd, ed, startDate, endDate, syncedAt, onPhase);
+  const { rRows, rStat } = await fetchRRows(config, startDate, endDate, syncedAt, onPhase);
 
   // ---- 全抓成功後才寫入（各自分頁） ----
   if (dRows.length) {
