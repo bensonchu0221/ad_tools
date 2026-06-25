@@ -369,6 +369,18 @@ export async function getBulkConfig(id: number): Promise<BulkConfigRow | null> {
   return r ? mapBulkRow(r) : null;
 }
 
+/** 找出使用相同 sheet_id 的設定（excludeId 排除自己，供編輯時用）。回 null＝無衝突。 */
+export async function findConfigBySheetId(sheetId: string, excludeId?: number): Promise<BulkConfigRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureBulkSchema(p);
+  const where = excludeId ? ' WHERE sheet_id = ? AND id <> ?' : ' WHERE sheet_id = ?';
+  const args = excludeId ? [sheetId, excludeId] : [sheetId];
+  const [rows] = await p.query(`${BULK_SELECT}${where} LIMIT 1`, args);
+  const r = (rows as any[])[0];
+  return r ? mapBulkRow(r) : null;
+}
+
 export async function addBulkConfig(input: BulkConfigInput, createdBy?: string | null): Promise<number> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');

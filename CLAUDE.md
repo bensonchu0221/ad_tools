@@ -54,6 +54,7 @@ popin 內部工具集（取代舊 dctool）。
 - 日期區間靠 `getAdReportBulk`（已自動切 7 天一段，見上 §週報 bulk 7 天限制）
 - **Google Sheet 寫入 `core/gsheets.ts`**：用 **ADC（無金鑰）**，線上自動用 Cloud Run SA `439393162392-compute@developer.gserviceaccount.com`、本機用開發者 gcloud 使用者憑證（測試 sheet 需分享給本人）。使用者需把該 SA 加為目標 Sheet **編輯者**；scope `spreadsheets`；`sheets/drive API` 已啟用；大量列分批 5000 append
 - **排程**：Cloud Scheduler job `adstream-daily`（asia-east1）每日 09:00 Asia/Taipei POST `…/tools/adstream/cron?key=<DIAG_KEY>`（cron 端點沿用 DIAG_KEY 守衛）；手動執行走 in-memory job 輪詢，但權威狀態寫 DB（`last_run_*`/`last_synced_date`）
+- **重抓昨天**：清單每設定可「重抓昨天(T-1)」——先抓成功→刪 sheet 昨天列→立刻寫回（冪等，A 路線靠「一設定一 sheet」唯一性約束精準刪除）。依來源動態 UI：只 R/只 D 一鍵、D+R 點擊下拉選都抓/只D/只R。涵蓋全部來源才把游標對齊到昨天(max、不倒退)，只抓單邊不動游標。新增/編輯設定查重 sheet_id 禁止共用。實作：`gsheets.ts deleteRowsByDate`、`run.ts rerunDay`、路由 `/configs/:id/rerun`
 - 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
 
@@ -78,4 +79,5 @@ popin 內部工具集（取代舊 dctool）。
 - AdStream：D 端線上已驗成功（2026-06-15，687 列）；R 端已接（資料層本機驗對映，線上端到端待跑一次）
 - AdStream D 端 2026-06-17 加 `headline`（廣告文案標題＝素材 title，走 getAdLists；sheet 27→28 欄）：**線上待驗**——同樣需清空重抓（刪設定重建，游標回回補起始日）讓舊資料也有此欄、欄位對齊
 - AdStream D 端 2026-06-16 加 cv_* 11 欄＋ad_name（sheet 15→27 欄，走 per-ad）：**線上待驗**——需清空重抓（刪設定重建，游標回到回補起始日）後，確認 cv_*/ad_name 欄真有值（重點驗 bulk date 與 per-ad date 格式一致、merge 鍵對得上，否則 cv_*/ad_name 會全空/0）
+- AdStream 重抓昨天功能（2026-06-25）：**線上端到端待驗**——①安達 #12 按「重抓昨天（R）」確認 6/24 R 列補上、無重複、游標維持；②`deleteRowsByDate` 線上實刪；③新增重複 sheet_id 被擋
 - 週報批次佇列（一次產多份）2026-06-16 實作：`weekly_jobs` 表＋GCS（`core/gcs.ts`，bucket popinpoc1-internal-tool/`weekly/`，lifecycle 14 天）＋cron worker（全域並發=1 防 popin 限流）＋清單 UI；規劃見 `docs/weekly_queue_plan.md`。Cloud Scheduler `weekly-queue-worker`（每 2 分、deadline 600s）、Cloud Run timeout 已調 600s。**線上端到端待驗**：入列→cron 認領產出→GCS proxy 下載；多份排隊時確認並發=1（claimNextWeeklyJob 的 NOT EXISTS(running) 原子鎖）真的不疊加撞 IP 限流
