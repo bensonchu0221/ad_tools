@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { sbPage } from '../../core/sbui.js';
 import {
   dbAvailable, listDAccounts,
-  listBulkConfigs, getBulkConfig, addBulkConfig, updateBulkConfig, deleteBulkConfig, markBulkRun,
+  listBulkConfigs, getBulkConfig, findConfigBySheetId, addBulkConfig, updateBulkConfig, deleteBulkConfig, markBulkRun,
   type BulkConfigRow, type DAccountRow,
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
@@ -451,6 +451,9 @@ export async function registerAdstream(app: FastifyInstance) {
     const { input, error } = parseConfigBody(req.body);
     if (error) return reply.send({ ok: false, error });
     try {
+      // 一設定一 sheet：新增不可用別人已綁的 sheet_id
+      const dupe = await findConfigBySheetId(input.sheetId);
+      if (dupe) return reply.send({ ok: false, error: `此 Google Sheet 已被設定「${dupe.name}」使用，請改用其他 Sheet` });
       const id = await addBulkConfig(input, currentUser(req));
       reply.send({ ok: true, id });
     } catch (e: any) {
@@ -467,6 +470,9 @@ export async function registerAdstream(app: FastifyInstance) {
       const existing = await getBulkConfig(id);
       if (!existing) return reply.send({ ok: false, error: '找不到設定' });
       if (!canManage(currentUser(req), existing)) return reply.send({ ok: false, error: '無權限操作此設定' });
+      // 一設定一 sheet：改成別人已用的 sheet_id 要擋（排除自己）
+      const dupe = await findConfigBySheetId(input.sheetId, id);
+      if (dupe) return reply.send({ ok: false, error: `此 Google Sheet 已被設定「${dupe.name}」使用，請改用其他 Sheet` });
       const ok = await updateBulkConfig(id, input);
       reply.send({ ok, error: ok ? undefined : '找不到設定' });
     } catch (e: any) {
