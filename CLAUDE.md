@@ -2,7 +2,7 @@
 
 popin 內部工具集（取代舊 dctool）。
 - tool#1＝廣告預覽：在「真實媒體文章頁」的 popin 廣告位換上廣告主素材後供 AM 截圖，取代舊 PPT 產出。
-- tool#2＝D&R 週報：整合 Discovery + Rixbee 報表產出 Excel（日/週/素材/受眾/Raw 五工作表），取代舊 weeklyreport。
+- tool#2＝D&R 週報：整合 Discovery + Rixbee 報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device 七工作表），取代舊 weeklyreport。
 - tool#3＝AdStream（廣告凝視者）：多 D 帳戶 bulk 原始報表（13 欄）定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw。
 
 ## 溝通與程式規範
@@ -36,7 +36,8 @@ popin 內部工具集（取代舊 dctool）。
 - **D ad 層 bulk 預掃剪枝**（`popin.ts getAdReportIndex`）：老帳號每週實際有資料的廣告極少（實證 345 支→81 支有資料）；先用 §3.6 bulk 端點 `GET /discovery/api/v2/ad/{sd}/{ed}/date_reporting`（header `CampaignIds` 上限 10、`PageSize` 上限 100，分頁）列出有資料 ad_id，貴的 per-ad date_reporting（**1 req/s per IP，文件標 Strictest，且唯一含 cv_\* 細分**）只打這批 → per-ad 請求省 ~76%、實測端到端 42.7s→11.2s。bulk 缺 cv_* 只能當索引；任一組失敗 try/catch 退回全打（cv_* 仍由 per-ad 取，數字不變，已 poc 對數逐欄相等）。驗收：`poc/verify_d_prune.mts`
 - **⚠️ bulk 端點單次日期區間上限 7 天**：>7 天回 `code=80008`（"The date range cannot exceed 7 days"）。`getAdReportBulk`／`getAdReportIndex` 已內部自動切 7 天一段（依序避免 IP 限流）再合併；`getAdReportIndex` 現直接複用 `getAdReportBulk` 取 ad_id。（修前週報 >7 天會靜默退回全打＝剪枝失效變慢，數字仍對）
 - **popin 限流有兩種**：報表流量 `ReportFlowLimit.operateTooMuch`＋IP 速率 `IpLimit.operateTooMuch`（HTTP 429），兩者皆 `code:1 data:{}`。`http.ts batchFetch` 原本只重試前者，後者會被 `getDateReports` 當「查無資料」回 [] **靜默吞掉→報表數字短少**（併發撞 IP 限流時觸發，現行 per-ad 路徑就中招）；已改為 `status===429 || 訊息含 operateTooMuch` 一律退避重試
-- Excel `xlsx.ts`（ExcelJS）版型照舊 PHP：5 工作表、素材縮圖 300x157、Raw 30 欄；**歷史 quirk：AdAssets 欄放的是 cr_name**（照舊保留）
+- Excel `xlsx.ts`（ExcelJS）版型照舊 PHP：7 工作表、素材縮圖 300x157、Raw 30 欄；**歷史 quirk：AdAssets 欄放的是 cr_name**（照舊保留）
+- **裝置資料兩張表**：〈裝置分析〉是聚合（裝置×標準指標，D 端 campaign 層 platform_cv 只填 PC/Mobile、R 端 device_type 補 Tablet/Others）；〈raw_data_device〉是 campaign 層原始寬列（29 欄：5 meta＋4 裝置桶 PC/Mobile/Tablet/Others 各 imp/click/spend/cv/mcv/mcv2），每列＝平台×日期×campaign，D/R 分列。**Raw_Data 是 ad 層、device 是 campaign 層故另開一頁**。`getCampaignDeviceReports` 每列已補 `campaign_id`（聚合用不到、寬列要）；R device 抓取維度由 `['device_type']` 改 `['day','cpg_id','device_type']`（cpg_name 非合法維度但請求 cpg_id 時回應自帶），聚合與寬列共用同一份抓取（少打一支 API）。實證 imp/click 與舊聚合全等、spend 僅浮點進位差（`poc/verify_r_device_agg_equiv.mts`）；R API 維度支援見 `poc/verify_r_device_campaign.mts`、寬表結構見 `poc/verify_device_sheet.mts`
 - **素材分析以（圖片×文案）配對分組**（`imagehash.ts`）：同圖跨 D/R 平台 URL 不同，用 dHash+pHash 感知雜湊判同圖（兩者 Hamming ≤5/64 才併群，union-find）；縮圖矩陣必須面積平均、不能用 jimp resize（bilinear 大縮＝稀疏取樣，同圖不同尺寸 dHash 實測飆到 12）；下載失敗退回 URL 識別；圖在 report.ts 下載一次、xlsx 重用 buffer
 - R token 三組已在 Secret Manager（rixbee-agency/direct/super-token，userid 用程式預設 7161/7168/7153）；R API status.code != 0 會丟中文錯誤（金鑰錯/每日上限等）
 - 產出走 job 輪詢（TTL 10 分＋10 分 watchdog），不同步回傳；Cloud Run 開 session-affinity（job 在 instance 記憶體）
