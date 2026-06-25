@@ -66,6 +66,13 @@ const STYLE = `
   .sa-code{font-family:var(--mono);font-size:11.5px;background:#F1F2F4;padding:2px 6px;border-radius:3px}
   .tbl-wrap{overflow-x:auto}
   .msgline{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-width:16rem;cursor:help}
+  .dropdown{position:relative;display:inline-block}
+  .dropdown-menu{display:none;position:absolute;z-index:20;top:100%;left:0;margin-top:4px;
+    background:#fff;border:1px solid var(--line);border-radius:6px;min-width:148px;
+    box-shadow:0 4px 14px rgba(0,0,0,.12);overflow:hidden}
+  .dropdown.open .dropdown-menu{display:block}
+  .dropdown-menu a{display:block;padding:8px 12px;font-size:13px;cursor:pointer;white-space:nowrap}
+  .dropdown-menu a:hover{background:var(--slot)}
 `;
 
 /** 執行一次並把結果寫回 DB（手動執行與 cron 共用）。回傳人類可讀摘要。 */
@@ -160,6 +167,21 @@ export async function registerAdstream(app: FastifyInstance) {
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
         `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"`;
+      // 重抓控制項：D+R 兩來源做下拉（都抓/只D/只R），單一來源做一鍵
+      const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0;
+      const rerunCtrl =
+        hasD && hasR
+          ? `<div class="dropdown">
+               <button class="btn-line rerunMenu" data-id="${c.id}">重抓昨天 ▾</button>
+               <div class="dropdown-menu">
+                 <a class="rerunOpt" data-id="${c.id}" data-scope="both">重抓昨天（D+R）</a>
+                 <a class="rerunOpt" data-id="${c.id}" data-scope="d">只重抓 D</a>
+                 <a class="rerunOpt" data-id="${c.id}" data-scope="r">只重抓 R</a>
+               </div>
+             </div>`
+          : hasR
+          ? `<button class="btn-line rerunOpt" data-id="${c.id}" data-scope="r">重抓昨天（R）</button>`
+          : `<button class="btn-line rerunOpt" data-id="${c.id}" data-scope="d">重抓昨天（D）</button>`;
       return `<tr>
         <td>${esc(c.name)}</td>
         <td class="muted">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
@@ -172,6 +194,7 @@ export async function registerAdstream(app: FastifyInstance) {
         <td class="muted"><div class="msgline" title="${esc(c.lastRunMessage ?? '')}">${esc(c.lastRunMessage ?? '')}</div></td>
         <td><div class="acts">
           <button class="btn-line runBtn" data-id="${c.id}">立即執行</button>
+          ${rerunCtrl}
           <button class="btn-line editBtn" ${editAttrs}>編輯</button>
           <button class="btn-line btn-danger delBtn" data-id="${c.id}">刪除</button>
         </div></td>
@@ -421,6 +444,41 @@ export async function registerAdstream(app: FastifyInstance) {
         }).catch(function (err) {
           runStatus.innerHTML = '<div class="msg msg-err">' + err.message + '</div>';
         });
+    });
+  });
+
+  // ---------- 重抓昨天（下拉點擊展開 + 觸發 /rerun，沿用 runStatus 輪詢）----------
+  function pollRerun(jobId) {
+    var poll = setInterval(function () {
+      fetch('${BASE_PATH}/job/' + jobId).then(function (r){return r.json();}).then(function (j) {
+        if (j.error) { clearInterval(poll); runStatus.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + j.error + '</div>'; setTimeout(function(){location.reload();},2000); }
+        else if (j.done) { clearInterval(poll); runStatus.innerHTML = '<div class="msg msg-ok">完成：' + (j.summary||'') + '</div>'; setTimeout(function(){location.reload();},1500); }
+        else { runStatus.innerHTML = '<div class="msg"><span class="spin"></span> ' + j.phase + '</div>'; }
+      });
+    }, 1500);
+  }
+  document.querySelectorAll('.rerunMenu').forEach(function (b) {
+    b.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var dd = b.closest('.dropdown');
+      document.querySelectorAll('.dropdown.open').forEach(function (o){ if(o!==dd) o.classList.remove('open'); });
+      dd.classList.toggle('open');
+    });
+  });
+  document.addEventListener('click', function () {
+    document.querySelectorAll('.dropdown.open').forEach(function (o){ o.classList.remove('open'); });
+  });
+  document.querySelectorAll('.rerunOpt').forEach(function (a) {
+    a.addEventListener('click', function () {
+      var dd = a.closest('.dropdown'); if (dd) dd.classList.remove('open');
+      runStatus.innerHTML = '<div class="msg"><span class="spin"></span> 建立重抓工作中…</div>';
+      fetch('${BASE_PATH}/configs/' + a.getAttribute('data-id') + '/rerun', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ scope: a.getAttribute('data-scope') }),
+      }).then(function (r){return r.json();}).then(function (d) {
+        if (!d.ok) throw new Error(d.error || '建立失敗');
+        pollRerun(d.jobId);
+      }).catch(function (err) { runStatus.innerHTML = '<div class="msg msg-err">' + err.message + '</div>'; });
     });
   });
 })();`;
