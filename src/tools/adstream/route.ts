@@ -330,6 +330,8 @@ export async function registerAdstream(app: FastifyInstance) {
   // ---------- 測試連線 ----------
   var testBtn = document.getElementById('testBtn');
   var testResult = document.getElementById('testResult');
+  var testedUrl = '';      // 最近一次「測試連線」成功的 Sheet 連結（儲存時比對用）
+  var originalSheetUrl = ''; // 載入編輯時的原連結；連結沒變則免重測（新增為空）
   if (testBtn) testBtn.addEventListener('click', function () {
     var url = document.getElementById('sheetUrl').value.trim();
     if (!url) { testResult.innerHTML = '<span style="color:var(--accent)">請先填 Sheet 連結</span>'; return; }
@@ -338,6 +340,7 @@ export async function registerAdstream(app: FastifyInstance) {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ sheetUrl: url }),
     }).then(function (r) { return r.json(); }).then(function (d) {
+      testedUrl = d.ok ? url : ''; // 只有成功才記住，作為儲存放行依據
       testResult.innerHTML = d.ok
         ? '<span style="color:var(--ok)">✓ 可寫入：' + (d.title || '') + '</span>'
         : '<span style="color:var(--err)">✗ ' + d.error + '</span>';
@@ -359,6 +362,7 @@ export async function registerAdstream(app: FastifyInstance) {
     document.getElementById('endDate').value = '';
     selected = []; renderChips();
     testResult.innerHTML = ''; saveResult.innerHTML = '';
+    testedUrl = ''; originalSheetUrl = ''; // 新增：尚未測試、無原連結
     document.getElementById('formTitle').textContent = '新增設定';
     cancelBtn.classList.add('hidden');
   }
@@ -369,6 +373,8 @@ export async function registerAdstream(app: FastifyInstance) {
       editingId.value = b.getAttribute('data-id');
       document.getElementById('name').value = b.getAttribute('data-name');
       document.getElementById('sheetUrl').value = b.getAttribute('data-sheet');
+      originalSheetUrl = (b.getAttribute('data-sheet') || '').trim(); // 連結沒改就免重測
+      testedUrl = ''; testResult.innerHTML = '';
       document.getElementById('rUserIds').value = b.getAttribute('data-rusers') || '';
       document.getElementById('backfill').value = b.getAttribute('data-backfill');
       document.getElementById('endDate').value = b.getAttribute('data-enddate') || '';
@@ -388,6 +394,11 @@ export async function registerAdstream(app: FastifyInstance) {
     var endDate = document.getElementById('endDate').value;
     if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds)) {
       saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D 帳號與 R Account ID 至少擇一</span>';
+      return;
+    }
+    // Sheet 連結若與載入時不同（新增＝原連結為空，故必測），必須先「測試連線」成功該連結才放行
+    if (sheetUrl !== originalSheetUrl && testedUrl !== sheetUrl) {
+      saveResult.innerHTML = '<span style="color:var(--accent)">請先點「測試連線」確認此 Sheet 可寫入後再儲存</span>';
       return;
     }
     saveResult.innerHTML = '<span class="spin"></span> 儲存中…';

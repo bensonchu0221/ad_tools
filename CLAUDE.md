@@ -54,7 +54,7 @@ popin 內部工具集（取代舊 dctool）。
 - **增量規則**：每次抓「上次同步日隔天 → 昨天(T-1)」；無上次同步日就從設定的回補起始日起 → 首次回補/每日 T-1/漏跑補抓同一條規則涵蓋（D/R 共用此游標）。`runConfig` 為**原子性**：先全抓 D+R，任一段失敗即拋錯、兩分頁都不寫、呼叫端不推進 `last_synced_date`（避免部分成功推進造成資料缺漏或重跑重複 append）
 - 日期區間靠 `getAdReportBulk`（已自動切 7 天一段，見上 §週報 bulk 7 天限制）
 - **Google Sheet 寫入 `core/gsheets.ts`**：用 **ADC（無金鑰）**，線上自動用 Cloud Run SA `439393162392-compute@developer.gserviceaccount.com`、本機用開發者 gcloud 使用者憑證（測試 sheet 需分享給本人）。使用者需把該 SA 加為目標 Sheet **編輯者**；scope `spreadsheets`；`sheets/drive API` 已啟用；大量列分批 5000 append
-- **排程**：Cloud Scheduler job `adstream-daily`（asia-east1）每日 09:00 Asia/Taipei POST `…/tools/adstream/cron?key=<DIAG_KEY>`（cron 端點沿用 DIAG_KEY 守衛）；手動執行走 in-memory job 輪詢，但權威狀態寫 DB（`last_run_*`/`last_synced_date`）
+- **排程**：Cloud Scheduler job `adstream-daily`（asia-east1）每日 09:30 Asia/Taipei POST `…/tools/adstream/cron?key=<DIAG_KEY>`（cron 端點沿用 DIAG_KEY 守衛）；手動執行走 in-memory job 輪詢，但權威狀態寫 DB（`last_run_*`/`last_synced_date`）
 - **重抓昨天**：清單每設定可「重抓昨天(T-1)」——先抓成功→刪 sheet 昨天列→立刻寫回（冪等，A 路線靠「一設定一 sheet」唯一性約束精準刪除）。依來源動態 UI：只 R/只 D 一鍵、D+R 點擊下拉選都抓/只D/只R。涵蓋全部來源才把游標對齊到昨天(max、不倒退)，只抓單邊不動游標。新增/編輯設定查重 sheet_id 禁止共用。實作：`gsheets.ts deleteRowsByDate`、`run.ts rerunDay`、路由 `/configs/:id/rerun`
 - 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
