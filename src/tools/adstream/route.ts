@@ -82,7 +82,7 @@ const STYLE = `
   .tline{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;line-height:1.5}
   .tline .tag{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.1em;
     text-transform:uppercase;padding:2px 6px;border-radius:3px;white-space:nowrap}
-  .tline .sub{color:var(--mut)}
+  .tline .tx{color:var(--mut)}
   .tline.is-ok{color:var(--ink)} .tline.is-ok .tag{color:var(--ok);background:rgba(21,128,61,.1)}
   .tline.is-err{color:var(--ink)} .tline.is-err .tag{color:var(--err);background:rgba(185,28,28,.1)}
   .tline.is-wait{color:var(--mut)} .tline.is-warn{color:var(--accent)}
@@ -384,8 +384,8 @@ export async function registerAdstream(app: FastifyInstance) {
     }).then(function (r) { return r.json(); }).then(function (d) {
       testedUrl = d.ok ? url : ''; // 只有成功才記住，作為儲存放行依據
       testResult.innerHTML = d.ok
-        ? '<span class="tline is-ok"><span class="tag">可寫入</span>' + (d.title ? '<span class="sub">' + esc(d.title) + '</span>' : '') + '</span>'
-        : '<span class="tline is-err"><span class="tag">不可寫</span><span class="sub">' + esc(d.error) + '</span></span>';
+        ? '<span class="tline is-ok"><span class="tag">可寫入</span>' + (d.title ? '<span class="tx">' + esc(d.title) + '</span>' : '') + '</span>'
+        : '<span class="tline is-err"><span class="tag">不可寫</span><span class="tx">' + esc(d.error) + '</span></span>';
     });
   });
 
