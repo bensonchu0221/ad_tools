@@ -68,7 +68,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         </div>
 
         <div class="field">
-          <div class="flabel"><span class="nm">日期範圍</span><span class="hint">最多 30 天</span></div>
+          <div class="flabel"><span class="nm">日期範圍</span><span class="hint">最多 31 天</span></div>
           <div class="row2">
             <div class="daterange">
               <input type="date" id="startDate" required>
@@ -184,7 +184,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     if (!startDate || !endDate) { statusBox.innerHTML = '<div class="msg msg-warn">請選擇日期範圍</div>'; return; }
     var days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
     if (days <= 0) { statusBox.innerHTML = '<div class="msg msg-warn">結束日不可早於開始日</div>'; return; }
-    if (days > 30) { statusBox.innerHTML = '<div class="msg msg-warn">日期範圍最多 30 天</div>'; return; }
+    if (days > 31) { statusBox.innerHTML = '<div class="msg msg-warn">日期範圍最多 31 天</div>'; return; }
 
     var body = new URLSearchParams({
       account: account, accountName: accountName, rAid: rAid,

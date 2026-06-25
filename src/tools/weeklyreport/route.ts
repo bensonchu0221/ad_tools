@@ -70,7 +70,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       return reply.send({ ok: false, error: '日期格式錯誤' });
     }
     const days = (Date.parse(endDate) - Date.parse(startDate)) / 86400000 + 1;
-    if (days <= 0 || days > 30) return reply.send({ ok: false, error: '日期範圍需在 1～30 天內' });
+    // 上限 31 天：per-ad date_reporting 端點單次區間上限 31 天 inclusive（32 天起靜默回 0 列），
+    // 31 天時各抓取路徑皆為單一視窗、無需切段（bulk/R 已內部切 7 天）。放寬過 31 天需先補 per-ad/device 切段。
+    if (days <= 0 || days > 31) return reply.send({ ok: false, error: '日期範圍需在 1～31 天內' });
 
     const input: WeeklyReportInput = {
       dAccountId: account,

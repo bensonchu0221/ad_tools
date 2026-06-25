@@ -41,7 +41,7 @@ popin 內部工具集（取代舊 dctool）。
 - **素材分析以（圖片×文案）配對分組**（`imagehash.ts`）：同圖跨 D/R 平台 URL 不同，用 dHash+pHash 感知雜湊判同圖（兩者 Hamming ≤5/64 才併群，union-find）；縮圖矩陣必須面積平均、不能用 jimp resize（bilinear 大縮＝稀疏取樣，同圖不同尺寸 dHash 實測飆到 12）；下載失敗退回 URL 識別；圖在 report.ts 下載一次、xlsx 重用 buffer
 - R token 三組已在 Secret Manager（rixbee-agency/direct/super-token，userid 用程式預設 7161/7168/7153）；R API status.code != 0 會丟中文錯誤（金鑰錯/每日上限等）
 - 產出走 job 輪詢（TTL 10 分＋10 分 watchdog），不同步回傳；Cloud Run 開 session-affinity（job 在 instance 記憶體）
-- 日期上限 30 天；D 列日期 `Y-m-d`、R 列 `Ymd`、daily 鍵 `Ymd`（移植時別搞混）
+- **日期上限 31 天**（per-ad date_reporting 端點單次上限 31 天 inclusive、32 天起靜默回 0；31 天時各抓取路徑皆單一視窗免切段。放寬過 31 天須先補 per-ad/device 切段，且大帳號 92 天光 D 端 per-ad 就 >12 分撞 600s timeout，要併批次佇列）；D 列日期 `Y-m-d`、R 列 `Ymd`、daily 鍵 `Ymd`（移植時別搞混）
 - 驗證腳本：`poc/verify_weekly_d.mts`（D 管線+逐日對數）、`poc/verify_campaign_filter.mts`（過濾規則安全性實證）、`poc/verify_image_hash.mts`（感知雜湊分群；`REAL=1` 加跑真實素材，會連舊 DB 讀 token）
 
 ## AdStream / 廣告凝視者核心（tool#3）
