@@ -63,7 +63,29 @@ const STYLE = `
   .acts{display:flex;gap:6px;flex-wrap:wrap}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:600px){.row2{grid-template-columns:1fr}}
-  .sa-code{font-family:var(--mono);font-size:11.5px;background:#F1F2F4;padding:2px 6px;border-radius:3px}
+  /* 授權卡：把 SA 加為編輯者是整個同步成敗的關鍵動作，故做成 accent 左條的明顯區塊＋一鍵複製 */
+  .sa-grant{margin-top:10px;padding:12px 14px;background:var(--slot);
+    border:1px solid var(--line);border-left:2px solid var(--accent);border-radius:5px}
+  .sa-grant .lead{display:flex;align-items:baseline;gap:10px;font-size:12.5px;color:var(--mut);line-height:1.5}
+  .sa-grant .lead b{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--accent);white-space:nowrap}
+  .sa-grant .lead em{font-style:normal;color:var(--ink);font-weight:600}
+  .sa-grant .row{display:flex;gap:8px;margin-top:10px}
+  .sa-email{flex:1;display:flex;align-items:center;font-family:var(--mono);font-size:11.5px;color:var(--ink);
+    background:#F1F2F4;padding:6px 9px;border-radius:4px;overflow-x:auto;white-space:nowrap}
+  .sa-copy{font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--slot);
+    border:1px solid var(--line);border-radius:4px;padding:0 12px;cursor:pointer;white-space:nowrap;
+    transition:color .15s,border-color .15s}
+  .sa-copy:hover{color:var(--ink);border-color:var(--ink)}
+  .sa-copy.done{color:var(--ok);border-color:var(--ok)}
+  /* 測試連線結果：安靜一致的狀態行（mono 小標籤＋說明），三態同構 */
+  .tline{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;line-height:1.5}
+  .tline .tag{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.1em;
+    text-transform:uppercase;padding:2px 6px;border-radius:3px;white-space:nowrap}
+  .tline .sub{color:var(--mut)}
+  .tline.is-ok{color:var(--ink)} .tline.is-ok .tag{color:var(--ok);background:rgba(21,128,61,.1)}
+  .tline.is-err{color:var(--ink)} .tline.is-err .tag{color:var(--err);background:rgba(185,28,28,.1)}
+  .tline.is-wait{color:var(--mut)} .tline.is-warn{color:var(--accent)}
   .tbl-wrap{overflow-x:auto}
   .msgline{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-width:16rem;cursor:help}
   .dropdown{position:relative;display:inline-block}
@@ -244,8 +266,14 @@ export async function registerAdstream(app: FastifyInstance) {
           <input type="text" id="sheetUrl" placeholder="https://docs.google.com/spreadsheets/d/…" ${hasDb ? '' : 'disabled'}>
           <button class="btn-line" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>測試連線</button>
         </div>
-        <div class="note">需先把服務帳號加為此 Sheet 的<b>編輯者</b>：<span class="sa-code">${SA_EMAIL}</span></div>
-        <div id="testResult" class="note" style="margin-top:6px"></div>
+        <div class="sa-grant">
+          <div class="lead"><b>編輯者權限</b><span>把這個服務帳號加為此 Sheet 的<em>編輯者</em>，AdStream 才能寫入資料。</span></div>
+          <div class="row">
+            <code class="sa-email" id="saEmail">${SA_EMAIL}</code>
+            <button class="sa-copy" id="saCopy" type="button">複製</button>
+          </div>
+        </div>
+        <div id="testResult" style="margin-top:8px"></div>
       </div>
 
       <div class="section-label" style="margin:18px 0 16px">帳戶來源 · D / R 至少擇一</div>
@@ -327,23 +355,37 @@ export async function registerAdstream(app: FastifyInstance) {
     });
   }
 
+  // ---------- 複製服務帳號 email ----------
+  var saCopy = document.getElementById('saCopy');
+  if (saCopy) saCopy.addEventListener('click', function () {
+    var email = (document.getElementById('saEmail') || {}).textContent || '';
+    navigator.clipboard.writeText(email).then(function () {
+      saCopy.textContent = '已複製';
+      saCopy.classList.add('done');
+      setTimeout(function () { saCopy.textContent = '複製'; saCopy.classList.remove('done'); }, 1600);
+    });
+  });
+
   // ---------- 測試連線 ----------
   var testBtn = document.getElementById('testBtn');
   var testResult = document.getElementById('testResult');
   var testedUrl = '';      // 最近一次「測試連線」成功的 Sheet 連結（儲存時比對用）
   var originalSheetUrl = ''; // 載入編輯時的原連結；連結沒變則免重測（新增為空）
+  // HTML 轉義，避免 Sheet 標題／錯誤訊息含特殊字元破版
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   if (testBtn) testBtn.addEventListener('click', function () {
     var url = document.getElementById('sheetUrl').value.trim();
-    if (!url) { testResult.innerHTML = '<span style="color:var(--accent)">請先填 Sheet 連結</span>'; return; }
-    testResult.innerHTML = '<span class="spin"></span> 測試中…';
+    if (!url) { testResult.innerHTML = '<span class="tline is-warn">請先填 Sheet 連結</span>'; return; }
+    testResult.innerHTML = '<span class="tline is-wait"><span class="spin"></span>正在確認寫入權限…</span>';
     fetch('${BASE_PATH}/test-access', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ sheetUrl: url }),
     }).then(function (r) { return r.json(); }).then(function (d) {
       testedUrl = d.ok ? url : ''; // 只有成功才記住，作為儲存放行依據
       testResult.innerHTML = d.ok
-        ? '<span style="color:var(--ok)">✓ 可寫入：' + (d.title || '') + '</span>'
-        : '<span style="color:var(--err)">✗ ' + d.error + '</span>';
+        ? '<span class="tline is-ok"><span class="tag">可寫入</span>' + (d.title ? '<span class="sub">' + esc(d.title) + '</span>' : '') + '</span>'
+        : '<span class="tline is-err"><span class="tag">不可寫</span><span class="sub">' + esc(d.error) + '</span></span>';
     });
   });
 

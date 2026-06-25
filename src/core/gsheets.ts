@@ -30,21 +30,46 @@ export function parseSheetId(urlOrId: string): string | null {
   return null;
 }
 
-/** 測試是否能存取（讀 metadata）；供設定頁「測試連線」用。 */
+/**
+ * 測試是否能「寫入」此 Sheet；供設定頁「測試連線」用。
+ * 同步實際走的是 append/batchUpdate（寫），所以這裡要驗寫權限、不能只驗讀。
+ * 作法：先讀標題，再用 updateSpreadsheetProperties 把標題設回「原本的值」——
+ * 這是一次需要寫權限、但對 Sheet 內容零變化的 no-op 探測：
+ *   - 編輯者 → 回 200，畫面無任何變化
+ *   - 檢視者 → batchUpdate 回 403，正確判定不可寫
+ */
 export async function checkAccess(
   spreadsheetId: string
 ): Promise<{ ok: boolean; title?: string; error?: string }> {
+  const noPermMsg = `沒有寫入權限。請把 ${SA_EMAIL} 加為這份 Sheet 的「編輯者」後再試。`;
   try {
-    const res = await getSheets().spreadsheets.get({
+    const sheets = getSheets();
+    // 讀標題：兼顧顯示用，也先擋掉 404／無讀權限
+    const res = await sheets.spreadsheets.get({
       spreadsheetId,
       fields: 'properties.title',
     });
-    return { ok: true, title: res.data.properties?.title ?? '' };
+    const title = res.data.properties?.title ?? '';
+    // no-op 寫入探測：標題設回原值（idempotent，不動內容）
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            updateSpreadsheetProperties: {
+              properties: { title },
+              fields: 'title',
+            },
+          },
+        ],
+      },
+    });
+    return { ok: true, title };
   } catch (e: any) {
     const status = e?.code ?? e?.response?.status;
     const msg =
       status === 403
-        ? `無權限存取此 Sheet。請把 ${SA_EMAIL} 加為這份 Sheet 的「編輯者」後再試。`
+        ? noPermMsg
         : status === 404
         ? '找不到此 Sheet（連結錯誤或已刪除）。'
         : String(e?.message ?? e);
