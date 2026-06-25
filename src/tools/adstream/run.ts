@@ -60,9 +60,28 @@ function addDays(ymd: string, n: number): string {
 }
 
 const compact = (ymd: string) => ymd.replace(/-/g, ''); // YYYY-MM-DD → YYYYMMDD
+const expand = (c: string) => `${c.slice(0, 4)}-${c.slice(4, 6)}-${c.slice(6, 8)}`; // YYYYMMDD → YYYY-MM-DD
 
 // 日期正規化成 YYYYMMDD（去掉 - 與 /），供 bulk 列與 per-ad 列的 merge 鍵兩邊一致
 const dateKey = (d: any) => String(d ?? '').replace(/[-/]/g, '');
+
+// per-ad date_reporting 端點單次區間上限「31 天(inclusive)」：實測 31 天可、32 天起靜默回 0 列（不報錯，
+// 跟 bulk 的 80008 不同）。故長區間（回補可達數月）必須切段否則 cv_*/ad_name 會整片空。留 1 天安全邊際用 30。
+const PERAD_MAX_DAYS = 30;
+
+/** 把 [sd,ed]（YYYYMMDD）切成每段 ≤ PERAD_MAX_DAYS 天(inclusive)的視窗，供 per-ad 端點分段抓取後合併。 */
+function perAdWindows(sd: string, ed: string): { sd: string; ed: string }[] {
+  const out: { sd: string; ed: string }[] = [];
+  let start = expand(sd);
+  const end = expand(ed);
+  while (start <= end) {
+    let winEnd = addDays(start, PERAD_MAX_DAYS - 1); // inclusive 共 PERAD_MAX_DAYS 天
+    if (winEnd > end) winEnd = end;
+    out.push({ sd: compact(start), ed: compact(winEnd) });
+    start = addDays(winEnd, 1);
+  }
+  return out;
+}
 
 /**
  * 對 bulk 列裡「有資料的 (campaign_id, ad_id)」打 per-ad date_reporting 取 cv_* 細分。
@@ -91,17 +110,20 @@ async function fetchCvDetailMap(
   }
   const map = new Map<string, Record<string, any>>();
   if (!items.length) return map;
-  const reports = await getDateReports(accessToken, items, sd, ed);
-  reports.forEach((rows, i) => {
-    const { campaignId, adId } = items[i];
-    for (const row of rows) {
-      if (!row || typeof row !== 'object' || !row.date) continue;
-      const key = `${dateKey(row.date)}|${campaignId}|${adId}`;
-      const detail: Record<string, any> = { ad_name: row.ad_name ?? '' };
-      for (const c of CV_COLS) detail[c] = Number(row[c]) || 0;
-      map.set(key, detail);
-    }
-  });
+  // per-ad 端點 >31 天會靜默回 0 列，故切 ≤30 天一段依序抓取後合併（鍵含 date 不會互蓋）
+  for (const w of perAdWindows(sd, ed)) {
+    const reports = await getDateReports(accessToken, items, w.sd, w.ed);
+    reports.forEach((rows, i) => {
+      const { campaignId, adId } = items[i];
+      for (const row of rows) {
+        if (!row || typeof row !== 'object' || !row.date) continue;
+        const key = `${dateKey(row.date)}|${campaignId}|${adId}`;
+        const detail: Record<string, any> = { ad_name: row.ad_name ?? '' };
+        for (const c of CV_COLS) detail[c] = Number(row[c]) || 0;
+        map.set(key, detail);
+      }
+    });
+  }
   return map;
 }
 
