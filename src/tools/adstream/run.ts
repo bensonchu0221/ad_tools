@@ -5,7 +5,7 @@
 import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { getDAccountTokenById, listDAccounts } from '../../core/store.js';
-import { appendRows } from '../../core/gsheets.js';
+import { appendRows, deleteRowsByDate } from '../../core/gsheets.js';
 import type { BulkConfigRow } from '../../core/store.js';
 
 export const RAW_TAB = 'd_bulk_raw_data';
@@ -155,6 +155,20 @@ export interface RunResult {
   rStat?: { userType: UserType; rows: number }; // R（有設定才有）
 }
 
+/** 昨天（Asia/Taipei T-1）YYYY-MM-DD */
+export function twYesterday(): string {
+  return addDays(twToday(), -1);
+}
+
+export type RerunScope = 'both' | 'd' | 'r';
+export interface RerunResult {
+  targetDate: string;
+  scopeUsed: RerunScope;
+  dDeleted: number; dRows: number;
+  rDeleted: number; rRows: number;
+  coversAllSources: boolean;
+}
+
 /** 抓該設定所有 D 帳號在 [sd,ed] 的 bulk + headline + cv 細分，組成 sheet 列。供 runConfig/rerunDay 共用。 */
 async function fetchDRows(
   config: BulkConfigRow, sd: string, ed: string, startDate: string, endDate: string,
@@ -251,4 +265,51 @@ export async function runConfig(
   }
 
   return { skipped: false, startDate, endDate, dRowCount: dRows.length, rRowCount: rRows.length, accountStats, rStat };
+}
+
+/**
+ * 重抓「昨天(T-1)」：先抓成功 → 才刪 sheet 昨天列 → 立刻 append（鐵律，抓失敗不碰 sheet）。
+ * scope 受 config 實際有無該來源夾限。coversAllSources 供呼叫端決定是否對齊游標。
+ */
+export async function rerunDay(
+  config: BulkConfigRow, scope: RerunScope, onPhase: (p: string) => void = () => {}
+): Promise<RerunResult> {
+  const hasD = config.accountIds.length > 0;
+  const hasR = config.rUserIds.length > 0;
+  const doD = hasD && (scope === 'both' || scope === 'd');
+  const doR = hasR && (scope === 'both' || scope === 'r');
+  if (!doD && !doR) throw new Error('此設定沒有可重抓的來源，或選擇的來源未設定');
+
+  const targetDate = twYesterday();
+  const sd = compact(targetDate);
+  const ed = sd;
+  const syncedAt = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).format(new Date());
+
+  // 1) 先全抓成功（記憶體），任一失敗往外拋、不碰 sheet
+  let dRows: (string | number)[][] = [];
+  let rRows: (string | number)[][] = [];
+  if (doD) ({ dRows } = await fetchDRows(config, sd, ed, targetDate, targetDate, syncedAt, onPhase));
+  if (doR) ({ rRows } = await fetchRRows(config, targetDate, targetDate, syncedAt, onPhase));
+
+  // 2) 抓成功才動 sheet：刪昨天 → 立刻寫回（D date 在 col 2、R day 在 col 1）
+  let dDeleted = 0, rDeleted = 0;
+  if (doD) {
+    onPhase(`清除 D 分頁 ${targetDate} 舊資料…`);
+    dDeleted = await deleteRowsByDate(config.sheetId, RAW_TAB, 2, targetDate);
+    onPhase(`寫回 D ${dRows.length} 列…`);
+    if (dRows.length) await appendRows(config.sheetId, RAW_TAB, SHEET_HEADER, dRows);
+  }
+  if (doR) {
+    onPhase(`清除 R 分頁 ${targetDate} 舊資料…`);
+    rDeleted = await deleteRowsByDate(config.sheetId, R_RAW_TAB, 1, targetDate);
+    onPhase(`寫回 R ${rRows.length} 列…`);
+    if (rRows.length) await appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows);
+  }
+
+  const coversAllSources = (!hasD || doD) && (!hasR || doR);
+  const scopeUsed: RerunScope = doD && doR ? 'both' : doD ? 'd' : 'r';
+  return { targetDate, scopeUsed, dDeleted, dRows: dRows.length, rDeleted, rRows: rRows.length, coversAllSources };
 }
