@@ -95,6 +95,38 @@ const STYLE = `
   .dropdown.open .dropdown-menu{display:block}
   .dropdown-menu a{display:block;padding:8px 12px;font-size:13px;cursor:pointer;white-space:nowrap}
   .dropdown-menu a:hover{background:var(--slot)}
+  /* 浮動 Toast：執行/重抓的系統提示，fixed 右下，捲到哪都看得到（GSAP 進出場） */
+  .toast-dock{position:fixed;right:22px;bottom:22px;z-index:60;display:flex;flex-direction:column-reverse;
+    gap:10px;width:340px;max-width:calc(100vw - 28px);pointer-events:none}
+  .toast{pointer-events:auto;position:relative;display:flex;align-items:flex-start;gap:11px;
+    background:var(--slot);border:1px solid var(--line);border-left:2px solid var(--accent);border-radius:7px;
+    padding:12px 32px 12px 14px;box-shadow:0 16px 38px -14px rgba(20,22,26,.36);overflow:hidden;
+    will-change:transform,opacity}
+  .toast.is-ok{border-left-color:var(--ok)} .toast.is-err{border-left-color:var(--err)}
+  .toast .t-scan{position:absolute;top:0;left:0;width:46px;height:2px;pointer-events:none;opacity:0;
+    background:linear-gradient(90deg,transparent,var(--accent),transparent)}
+  .toast.is-ok .t-scan{background:linear-gradient(90deg,transparent,var(--ok),transparent)}
+  .toast.is-err .t-scan{background:linear-gradient(90deg,transparent,var(--err),transparent)}
+  .toast .t-ico{flex:none;display:flex;align-items:center;justify-content:center;width:16px;height:16px;color:var(--accent)}
+  .toast.is-ok .t-ico{color:var(--ok)} .toast.is-err .t-ico{color:var(--err)}
+  .toast .t-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .toast .t-tag{font-family:var(--mono);font-size:9.5px;line-height:16px;font-weight:600;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--mut)}
+  /* 執行中 loader：九宮格對角脈動（呼應頁面格線背景；currentColor 吃狀態色） */
+  .toast .ld-grid rect{transform-box:fill-box;transform-origin:center;animation:ldGrid 1.3s ease-in-out infinite}
+  .toast .ld-grid rect:nth-child(2),.toast .ld-grid rect:nth-child(4){animation-delay:.12s}
+  .toast .ld-grid rect:nth-child(3),.toast .ld-grid rect:nth-child(5),.toast .ld-grid rect:nth-child(7){animation-delay:.24s}
+  .toast .ld-grid rect:nth-child(6),.toast .ld-grid rect:nth-child(8){animation-delay:.36s}
+  .toast .ld-grid rect:nth-child(9){animation-delay:.48s}
+  @keyframes ldGrid{0%,65%,100%{opacity:.22;transform:scale(.72)}32%{opacity:1;transform:scale(1)}}
+  @media(prefers-reduced-motion:reduce){.toast .ld-grid rect{animation:none}}
+  .toast.is-run .t-tag{color:var(--accent)} .toast.is-ok .t-tag{color:var(--ok)} .toast.is-err .t-tag{color:var(--err)}
+  .toast .t-msg{font-size:13px;line-height:1.45;color:var(--ink);white-space:pre-wrap;word-break:break-word;
+    max-height:8.4em;overflow-y:auto}
+  .toast .t-close{position:absolute;top:6px;right:8px;border:none;background:none;color:var(--mut);cursor:pointer;
+    font-family:var(--mono);font-size:13px;line-height:1;padding:3px}
+  .toast .t-close:hover{color:var(--ink)}
+  @media(max-width:600px){.toast-dock{right:14px;left:14px;bottom:14px;width:auto}}
 `;
 
 /** 執行一次並把結果寫回 DB（手動執行與 cron 共用）。回傳人類可讀摘要。 */
@@ -303,13 +335,80 @@ export async function registerAdstream(app: FastifyInstance) {
     </div>
 
     <div class="section-label">已設定清單 · configs</div>
-    <div id="runStatus" class="status" style="margin-bottom:12px"></div>
     ${listSection}
+    <div class="toast-dock" id="toastDock" aria-live="polite" aria-atomic="true"></div>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
     <footer>popin ad-ops · adstream</footer>`;
 
     const script = `
 (function () {
   var selected = [];
+
+  // ---------- 浮動 Toast（GSAP 進出場；fixed 右下，捲動不消失） ----------
+  var GS = window.gsap;
+  var prefersReduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function dur(v) { return prefersReduce ? 0 : v; } // reduced-motion：時長歸零＝瞬間到位
+  var dock = document.getElementById('toastDock');
+  var toastEl = null, hideTimer = null;
+  var ICON = {
+    spin: '<svg class="ld-grid" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="1.3" y="1.3" width="3.6" height="3.6" rx=".7"/><rect x="6.2" y="1.3" width="3.6" height="3.6" rx=".7"/><rect x="11.1" y="1.3" width="3.6" height="3.6" rx=".7"/><rect x="1.3" y="6.2" width="3.6" height="3.6" rx=".7"/><rect x="6.2" y="6.2" width="3.6" height="3.6" rx=".7"/><rect x="11.1" y="6.2" width="3.6" height="3.6" rx=".7"/><rect x="1.3" y="11.1" width="3.6" height="3.6" rx=".7"/><rect x="6.2" y="11.1" width="3.6" height="3.6" rx=".7"/><rect x="11.1" y="11.1" width="3.6" height="3.6" rx=".7"/></svg>',
+    ok: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3 3L13 4.5"/></svg>',
+    err: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>'
+  };
+  function ensureToast() {
+    if (toastEl) return toastEl;
+    var t = document.createElement('div');
+    t.className = 'toast';
+    t.innerHTML = '<span class="t-scan"></span><button class="t-close" type="button" aria-label="關閉">✕</button>'
+      + '<span class="t-ico"></span><div class="t-body"><span class="t-tag"></span><span class="t-msg"></span></div>';
+    t.querySelector('.t-close').addEventListener('click', function () { hideToast(); });
+    dock.appendChild(t);
+    toastEl = t;
+    return t;
+  }
+  function scan(t) {            // accent 掃描線橫掃一次＝科技感
+    if (!GS) return;
+    var s = t.querySelector('.t-scan');
+    GS.fromTo(s, { x: -46, autoAlpha: 1 },
+      { x: t.offsetWidth, duration: dur(.75), ease: 'power2.inOut',
+        onComplete: function () { GS.set(s, { autoAlpha: 0 }); } });
+  }
+  function popIco(t) {          // 完成/錯誤時 icon 彈一下
+    if (!GS) return;
+    GS.fromTo(t.querySelector('.t-ico'), { scale: .3, autoAlpha: 0 },
+      { scale: 1, autoAlpha: 1, duration: dur(.5), ease: 'back.out(2.2)' });
+  }
+  function setToast(o) {        // o: {state:'run'|'ok'|'err', tag, msg, ico}
+    var first = !toastEl;
+    var t = ensureToast();
+    clearTimeout(hideTimer);
+    var prev = t.getAttribute('data-state');
+    t.setAttribute('data-state', o.state);
+    t.className = 'toast is-' + o.state;
+    t.querySelector('.t-tag').textContent = o.tag;
+    t.querySelector('.t-msg').textContent = o.msg;
+    t.querySelector('.t-ico').innerHTML = ICON[o.ico] || '';
+    if (first && GS) GS.fromTo(t, { xPercent: 120, autoAlpha: 0 },
+      { xPercent: 0, autoAlpha: 1, duration: dur(.55), ease: 'power3.out' });
+    if (o.state === 'ok' || o.state === 'err') { popIco(t); if (prev !== 'ok' && prev !== 'err') scan(t); }
+    else if (first) scan(t);
+  }
+  function hideToast() {        // 手動關閉（✕）
+    clearTimeout(hideTimer);
+    if (!toastEl) return;
+    var el = toastEl; toastEl = null;
+    if (!GS) { el.remove(); return; }
+    GS.to(el, { xPercent: 120, autoAlpha: 0, duration: dur(.4), ease: 'power2.in',
+      onComplete: function () { el.remove(); } });
+  }
+  function exitThenReload(delay) {  // 顯示結果 → 出場動畫播完 → reload 刷新清單
+    hideTimer = setTimeout(function () {
+      var el = toastEl; toastEl = null;
+      if (!el || !GS) { location.reload(); return; }
+      GS.to(el, { xPercent: 120, autoAlpha: 0, duration: dur(.4), ease: 'power2.in',
+        onComplete: function () { location.reload(); } });
+    }, delay);
+  }
 
   // ---------- 帳號可搜尋下拉（多選 chips） ----------
   var search = document.getElementById('accSearch');
@@ -471,11 +570,10 @@ export async function registerAdstream(app: FastifyInstance) {
   });
 
   // ---------- 立即執行（背景 job + 輪詢） ----------
-  var runStatus = document.getElementById('runStatus');
   document.querySelectorAll('.runBtn').forEach(function (b) {
     b.addEventListener('click', function () {
       b.disabled = true;
-      runStatus.innerHTML = '<div class="msg"><span class="spin"></span> 建立工作中…</div>';
+      setToast({ state: 'run', tag: 'SYNC', msg: '建立工作中…', ico: 'spin' });
       fetch('${BASE_PATH}/configs/' + b.getAttribute('data-id') + '/run', { method: 'POST' })
         .then(function (r) { return r.json(); }).then(function (d) {
           if (!d.ok) throw new Error(d.error || '建立失敗');
@@ -483,30 +581,30 @@ export async function registerAdstream(app: FastifyInstance) {
             fetch('${BASE_PATH}/job/' + d.jobId).then(function (r) { return r.json(); }).then(function (j) {
               if (j.error) {
                 clearInterval(poll);
-                runStatus.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + j.error + '</div>';
-                setTimeout(function () { location.reload(); }, 2000);
+                setToast({ state: 'err', tag: 'ERROR', msg: j.error, ico: 'err' });
+                exitThenReload(2600);
               } else if (j.done) {
                 clearInterval(poll);
-                runStatus.innerHTML = '<div class="msg msg-ok">完成：' + (j.summary || '') + '</div>';
-                setTimeout(function () { location.reload(); }, 1500);
+                setToast({ state: 'ok', tag: 'DONE', msg: '完成：' + (j.summary || ''), ico: 'ok' });
+                exitThenReload(1800);
               } else {
-                runStatus.innerHTML = '<div class="msg"><span class="spin"></span> ' + j.phase + '</div>';
+                setToast({ state: 'run', tag: 'SYNC', msg: j.phase, ico: 'spin' });
               }
             });
           }, 1500);
         }).catch(function (err) {
-          runStatus.innerHTML = '<div class="msg msg-err">' + err.message + '</div>';
+          setToast({ state: 'err', tag: 'ERROR', msg: err.message, ico: 'err' });
         });
     });
   });
 
-  // ---------- 重抓昨天（下拉點擊展開 + 觸發 /rerun，沿用 runStatus 輪詢）----------
+  // ---------- 重抓昨天（下拉點擊展開 + 觸發 /rerun，沿用 toast 輪詢）----------
   function pollRerun(jobId) {
     var poll = setInterval(function () {
       fetch('${BASE_PATH}/job/' + jobId).then(function (r){return r.json();}).then(function (j) {
-        if (j.error) { clearInterval(poll); runStatus.innerHTML = '<div class="msg msg-err" style="white-space:pre-wrap">' + j.error + '</div>'; setTimeout(function(){location.reload();},2000); }
-        else if (j.done) { clearInterval(poll); runStatus.innerHTML = '<div class="msg msg-ok">完成：' + (j.summary||'') + '</div>'; setTimeout(function(){location.reload();},1500); }
-        else { runStatus.innerHTML = '<div class="msg"><span class="spin"></span> ' + j.phase + '</div>'; }
+        if (j.error) { clearInterval(poll); setToast({ state: 'err', tag: 'ERROR', msg: j.error, ico: 'err' }); exitThenReload(2600); }
+        else if (j.done) { clearInterval(poll); setToast({ state: 'ok', tag: 'DONE', msg: '完成：' + (j.summary||''), ico: 'ok' }); exitThenReload(1800); }
+        else { setToast({ state: 'run', tag: 'RERUN', msg: j.phase, ico: 'spin' }); }
       });
     }, 1500);
   }
@@ -524,14 +622,14 @@ export async function registerAdstream(app: FastifyInstance) {
   document.querySelectorAll('.rerunOpt').forEach(function (a) {
     a.addEventListener('click', function () {
       var dd = a.closest('.dropdown'); if (dd) dd.classList.remove('open');
-      runStatus.innerHTML = '<div class="msg"><span class="spin"></span> 建立重抓工作中…</div>';
+      setToast({ state: 'run', tag: 'RERUN', msg: '建立重抓工作中…', ico: 'spin' });
       fetch('${BASE_PATH}/configs/' + a.getAttribute('data-id') + '/rerun', {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ scope: a.getAttribute('data-scope') }),
       }).then(function (r){return r.json();}).then(function (d) {
         if (!d.ok) throw new Error(d.error || '建立失敗');
         pollRerun(d.jobId);
-      }).catch(function (err) { runStatus.innerHTML = '<div class="msg msg-err">' + err.message + '</div>'; });
+      }).catch(function (err) { setToast({ state: 'err', tag: 'ERROR', msg: err.message, ico: 'err' }); });
     });
   });
 })();`;
