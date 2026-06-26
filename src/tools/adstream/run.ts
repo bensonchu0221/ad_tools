@@ -28,7 +28,8 @@ const CV_COLS = [
 // 故另打 getAdLists 建 ad_id→title 對照接回（見 fetchHeadlineMap），接在 ad_name 後
 export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, 'ad_name', 'headline', ...CV_COLS];
 
-// R 報表原生欄位（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）；前面補 synced_at
+// R 報表原生欄位＝API 回應的 key（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）。
+// 這份是「取值用」的 key，順序＝寫入 sheet 的欄序；不可改名（改了 r[c] 就取不到值）。前面補 synced_at。
 const R_COLS = [
   'day', 'country', 'group_id', 'cr_id', 'cpg_id', 'ad_channel', 'ad_domain',
   'impression', 'click', 'install', 'conversion', 'payment_revenue',
@@ -37,7 +38,20 @@ const R_COLS = [
   'behavior0', 'behavior1', 'behavior2', 'behavior3', 'behavior4', 'behavior5', 'behavior6',
   'currency', 'group_name', 'cr_name', 'cr_title', 'target_info', 'cr_image', 'cpg_name', 'ad_target',
 ] as const;
-export const R_SHEET_HEADER = ['synced_at', ...R_COLS];
+// sheet 表頭「友善名」：rixbee 的 behavior0~6 是轉換事件代號，BI 看不懂，故翻成可讀名。
+// 對照來源＝週報 weeklyreport/types.ts BEHAVIOR_MAP（同一個 rixbee API、同一組 behavior 欄）。
+// ⚠️ 只改「表頭文字」，不動 R_COLS 取值的 key、不改欄位數與順序 → 舊資料仍對齊，毋須重抓。
+// 其餘欄位（impression/click/conversion…）英文本身已可讀，維持原名。
+const R_HEADER_LABEL: Record<string, string> = {
+  behavior0: 'cv_view_content',
+  behavior1: 'cv_complete_checkout',
+  behavior2: 'cv_checkout',
+  behavior3: 'cv_bookmark',
+  behavior4: 'cv_add_to_cart',
+  behavior5: 'cv_search',
+  behavior6: 'cv_complete_registration',
+};
+export const R_SHEET_HEADER = ['synced_at', ...R_COLS.map((c) => R_HEADER_LABEL[c] ?? c)];
 
 // R 抓全欄位用的 dimensions（同週報 fetchRData）；metrics 留空＝API 回全部指標（含 behavior0-6）
 const R_DIMENSIONS = ['day', 'country', 'group_id', 'cr_id', 'cpg_id', 'ad_channel', 'ad_target'];
