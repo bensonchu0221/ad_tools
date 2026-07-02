@@ -105,3 +105,50 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
     device: { byClickShare, byCtr },
   };
 }
+
+const pct = (x: number) => (x * 100).toFixed(2) + '%';
+const int = (x: number) => Math.round(x).toLocaleString('en-US');
+
+/**
+ * 依「有料才寫」組四段文案：概況 / 成長(只比CTR) / 素材 / 裝置。
+ * prev=null 或 prev.ctr=0 走無前次分支。
+ */
+export function buildNarrative(
+  s: SnapshotSummary,
+  prev: { ctr: number; startDate: string; endDate: string } | null
+): string {
+  const lines: string[] = [];
+
+  // 1) 概況段（一定有）
+  let overview = `本次 popIn 共帶入 ${int(s.imp)} 次品牌曝光、${int(s.click)} 次點擊進站，整體平均 CTR ${pct(s.ctr)}。`;
+  if (s.spend > 0) overview += `本次投放花費約 ${int(s.spend)} 元。`;
+  const events = Object.entries(s.cvDetail).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+  if (events.length) {
+    overview += '主要轉換：' + events.map(([label, n]) => `${label} ${int(n)} 筆`).join('、') + '。';
+  }
+  lines.push(overview);
+
+  // 2) 成長段（只比 CTR）
+  if (prev && prev.ctr > 0) {
+    const delta = (s.ctr - prev.ctr) / prev.ctr;
+    const dir = delta >= 0 ? '提升' : '下降';
+    lines.push(`CTR 較前次（${prev.startDate}~${prev.endDate}）${dir} ${pct(Math.abs(delta))}（${pct(prev.ctr)} → ${pct(s.ctr)}）。`);
+  } else if (prev) {
+    lines.push(`前次 CTR 為 0，本次 CTR ${pct(s.ctr)}（無法計算成長率）。`);
+  } else {
+    lines.push('（無前次資料，本次為首次紀錄。）');
+  }
+
+  // 3) 素材段（有 top_asset 才寫）
+  if (s.topAsset) {
+    lines.push(`本次表現最佳素材文案為「${s.topAsset.title}」，CTR ${pct(s.topAsset.ctr)}。`);
+  }
+
+  // 4) 裝置段（deviceAgg 非空才寫）
+  const dev: string[] = [];
+  if (s.device.byClickShare) dev.push(`進站流量主要集中於${s.device.byClickShare.label}（占點擊 ${pct(s.device.byClickShare.share)}）`);
+  if (s.device.byCtr) dev.push(`各裝置以${s.device.byCtr.label}效率最佳，CTR ${pct(s.device.byCtr.ctr)}`);
+  if (dev.length) lines.push(dev.join('；') + '。');
+
+  return lines.join('\n');
+}
