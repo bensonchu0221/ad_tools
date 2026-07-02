@@ -1,6 +1,7 @@
 // AdStream Lab：廣告凝視者（tool#3）的視覺重新設計實驗頁。
-// 功能與 tools/adstream/route.ts 完全對等（表單/清單/執行/重抓/測試連線/排程一律不變）；
-// 只有前端骨架（HTML/CSS/JS）是全新的、低對比暖色編輯感設計，走獨立路由，不動原頁一行。
+// 功能與 tools/adstream/route.ts 完全對等（表單/清單/執行/重抓/測試連線一律不變）；
+// 前端骨架是全新的「Signal Desk」暗色儀表盤設計——雙訊號色（D=cyan／R=amber，色彩即資訊），
+// 每筆設定＝一條 channel strip，含同步時間軸 gauge（回補起始→已同步→今天/終止日）。
 // 同步邏輯直接沿用 ../adstream/run.js，不重覆實作。
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
@@ -50,178 +51,244 @@ function updateJob(id: string, patch: Partial<RunJob>): void {
 const esc = (s: string) =>
   String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-// ---------- 頁面外殼：獨立的暖色低對比編輯感視覺系統（不套用 sbui.ts） ----------
+// ---------- 同步時間軸 gauge（signature 元件） ----------
+// 依 回補起始 → 已同步 → 目標(終止日或今天) 算出進度，回傳 {pct, state, cursorLabel}。
+// state：'idle'＝尚未跑過、'live'＝同步中且未到終止、'done'＝已達終止日。
+function daysBetween(a: string, b: string): number {
+  const ms = Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z');
+  return Math.round(ms / 86400000);
+}
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+function syncGauge(c: BulkConfigRow): { pct: number; state: 'idle' | 'live' | 'done'; span: number; doneDays: number } {
+  const start = c.backfillStartDate;
+  const target = c.endDate ?? todayISO();
+  const span = Math.max(1, daysBetween(start, target));
+  if (!c.lastSyncedDate) return { pct: 0, state: 'idle', span, doneDays: 0 };
+  const doneDays = Math.max(0, Math.min(span, daysBetween(start, c.lastSyncedDate)));
+  const pct = Math.round((doneDays / span) * 100);
+  const reachedEnd = !!c.endDate && c.lastSyncedDate >= c.endDate;
+  return { pct, state: reachedEnd ? 'done' : 'live', span, doneDays };
+}
+
+// ---------- 頁面外殼：獨立的「Signal Desk」暗色儀表盤視覺系統 ----------
 const FONTS = `<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Fraunces:ital,opsz,wght@1,9..144,500&display=swap" rel="stylesheet">`;
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&display=swap" rel="stylesheet">`;
 
 const BASE_CSS = `
   @font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/inter-400.woff2') format('woff2')}
   @font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/inter-500.woff2') format('woff2')}
+  @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/ibm-plex-mono-400.woff2') format('woff2')}
+  @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/ibm-plex-mono-500.woff2') format('woff2')}
+  @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:600;font-display:swap;src:url('/fonts/ibm-plex-mono-600.woff2') format('woff2')}
   @font-face{font-family:'Noto Sans TC';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/noto-sans-tc-400.woff2') format('woff2')}
   @font-face{font-family:'Noto Sans TC';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/noto-sans-tc-500.woff2') format('woff2')}
+  @font-face{font-family:'Noto Sans TC';font-style:normal;font-weight:700;font-display:swap;src:url('/fonts/noto-sans-tc-700.woff2') format('woff2')}
   :root{
-    --paper:#FAF6F1; --surface:#FFFFFF; --ink:#3A342E; --ink-strong:#241F1A;
-    --line:#E9E1D6; --line-soft:#F1ECE4; --accent:#D9714B; --accent-soft:#F4DED0;
-    --mut:#8C8072; --ok:#4F7A5C; --ok-soft:#E2ECE3; --err:#AD4433; --err-soft:#F3E1DC;
-    --disp:'Fraunces','Noto Sans TC',serif; --body:'Inter','Noto Sans TC',sans-serif;
+    --bg:#0E1014; --panel:#171A20; --panel2:#1E222B; --raise:#232833;
+    --line:#2A2F3A; --line-soft:#20242D;
+    --ink:#E8EAEE; --ink-dim:#A4AAB6; --mut:#6C7280;
+    --d:#4FC4D6; --d-dim:#2C6570; --r:#F2B04A; --r-dim:#7A5E24;
+    --ok:#5FC98A; --err:#F0654F; --warn:#F2B04A;
+    --disp:'Chakra Petch','Noto Sans TC',sans-serif;
+    --body:'Inter','Noto Sans TC',sans-serif;
+    --mono:'IBM Plex Mono','Noto Sans TC',monospace;
   }
   *{box-sizing:border-box}
   html,body{margin:0}
-  body{background:var(--paper);color:var(--ink);font-family:var(--body);font-size:15px;
-    -webkit-font-smoothing:antialiased;line-height:1.6}
-  .wrap{max-width:980px;margin:0 auto;padding:0 28px 64px}
-  .ic{width:16px;height:16px;flex:none}
+  body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:14.5px;line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(circle at 18% -8%,rgba(79,196,214,.06),transparent 42%),radial-gradient(circle at 92% 4%,rgba(242,176,74,.05),transparent 40%)}
+  .ic{width:15px;height:15px;flex:none}
   a{color:inherit}
-  /* 頂列：極簡，非導覽頁，只留回首頁與標記 */
-  .topbar{display:flex;align-items:center;justify-content:space-between;padding:22px 28px;max-width:980px;margin:0 auto}
-  .brand{display:flex;align-items:center;gap:9px;font-family:var(--body);font-weight:500;font-size:13.5px;
-    text-decoration:none;color:var(--mut)}
-  .brand .ic{color:var(--accent)}
-  .brand:hover{color:var(--ink)}
-  .lab-badge{font-size:11px;font-weight:500;letter-spacing:.06em;color:var(--accent);
-    background:var(--accent-soft);border-radius:999px;padding:4px 11px}
-  /* 非對稱 hero：左窄敘述欄 + 右側浮動摘要卡（雜誌感，不做三欄對稱） */
-  .hero{display:grid;grid-template-columns:1.15fr .85fr;gap:56px;align-items:end;padding:28px 0 54px}
-  @media(max-width:760px){.hero{grid-template-columns:1fr;gap:28px}}
-  .eyebrow{font-family:var(--body);font-size:12.5px;font-weight:500;letter-spacing:.08em;
-    text-transform:uppercase;color:var(--accent);margin:0 0 16px}
-  h1{font-family:var(--disp);font-weight:500;font-size:46px;line-height:1.08;letter-spacing:-.01em;
-    color:var(--ink-strong);margin:0}
-  .lede{font-size:15.5px;color:var(--mut);max-width:480px;margin:18px 0 0;line-height:1.7}
-  .stat-float{background:var(--surface);border:1px solid var(--line);border-radius:14px;
-    padding:22px 24px;box-shadow:0 24px 48px -32px rgba(58,52,46,.28)}
-  .stat-float .row{display:flex;align-items:baseline;justify-content:space-between;padding:9px 0;
-    border-bottom:1px solid var(--line-soft)}
-  .stat-float .row:last-child{border-bottom:none}
-  .stat-float .k{font-size:12.5px;color:var(--mut)}
-  .stat-float .v{font-family:var(--disp);font-size:21px;color:var(--ink-strong)}
-  .stat-float .v.accent{color:var(--accent)}
-  /* 段落標籤：細線 + 斜體小標，取代 mono 編號感 */
-  .section-label{display:flex;align-items:center;gap:14px;font-size:12.5px;font-style:italic;
-    color:var(--mut);margin:44px 0 20px}
-  .section-label::after{content:"";flex:1;height:1px;background:var(--line)}
-  /* 設定卡：左側窄註解欄 + 右側欄位（settings-page 常見的非對稱兩欄） */
-  .panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:8px}
-  .cfg-row{display:grid;grid-template-columns:.8fr 1.4fr;gap:36px;padding:26px 28px;border-bottom:1px solid var(--line-soft)}
-  .cfg-row:last-child{border-bottom:none}
-  @media(max-width:720px){.cfg-row{grid-template-columns:1fr;gap:12px}}
-  .cfg-note b{display:block;font-family:var(--disp);font-size:17px;font-weight:500;color:var(--ink-strong);margin-bottom:6px}
-  .cfg-note p{margin:0;font-size:13px;color:var(--mut);line-height:1.65;max-width:280px}
-  .cfg-field{display:flex;flex-direction:column;gap:12px}
+  code{font-family:var(--mono)}
+  /* 狀態列：儀表盤頂緣，系統讀值 */
+  .statusbar{position:sticky;top:0;z-index:40;display:flex;align-items:center;justify-content:space-between;
+    gap:16px;padding:11px 26px;border-bottom:1px solid var(--line);
+    background:rgba(14,16,20,.82);backdrop-filter:blur(10px)}
+  .sb-l{display:flex;align-items:center;gap:11px;font-family:var(--mono);font-size:12.5px;color:var(--ink-dim)}
+  .sb-l a{display:inline-flex;align-items:center;gap:7px;text-decoration:none;color:var(--ink-dim)}
+  .sb-l a:hover{color:var(--ink)}
+  .sb-l .ic{color:var(--d)}
+  .sb-l .sep{color:var(--mut)}
+  .sb-l .here{color:var(--ink)}
+  .sb-r{display:flex;align-items:center;gap:16px;font-family:var(--mono);font-size:11px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--mut)}
+  .sb-r b{color:var(--ink-dim);font-weight:600}
+  .live-dot{display:inline-flex;align-items:center;gap:7px;color:var(--ok)}
+  .live-dot i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 rgba(95,201,138,.6);animation:blip 2.4s ease-out infinite}
+  @keyframes blip{0%{box-shadow:0 0 0 0 rgba(95,201,138,.5)}70%{box-shadow:0 0 0 6px rgba(95,201,138,0)}100%{box-shadow:0 0 0 0 rgba(95,201,138,0)}}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 26px 72px}
+  /* 儀表盤抬頭：工具名 + gauge cluster（非對稱：左標題、右三聯讀值） */
+  .masthead{display:grid;grid-template-columns:1fr auto;gap:40px;align-items:center;padding:44px 0 30px}
+  @media(max-width:820px){.masthead{grid-template-columns:1fr;gap:26px}}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;font-weight:500;
+    letter-spacing:.24em;text-transform:uppercase;color:var(--d);margin:0 0 16px}
+  .eyebrow .ic{width:14px;height:14px}
+  h1{font-family:var(--disp);font-weight:600;font-size:44px;line-height:1;letter-spacing:.01em;margin:0;color:var(--ink)}
+  h1 .en{display:block;font-size:13px;font-weight:500;letter-spacing:.42em;color:var(--mut);margin-top:14px}
+  .lede{font-size:14px;color:var(--ink-dim);max-width:520px;margin:20px 0 0;line-height:1.7}
+  .lede .k{color:var(--d);font-family:var(--mono);font-size:12.5px}
+  .lede .k.amb{color:var(--r)}
+  .cluster{display:flex;gap:0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel)}
+  .gauge{padding:18px 24px;min-width:104px;border-right:1px solid var(--line)}
+  .gauge:last-child{border-right:none}
+  .gauge .g-k{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)}
+  .gauge .g-v{font-family:var(--disp);font-weight:600;font-size:34px;line-height:1.1;margin-top:6px;color:var(--ink);font-variant-numeric:tabular-nums}
+  .gauge.ok .g-v{color:var(--ok)} .gauge.err .g-v{color:var(--err)}
+  /* 段落標題 */
+  .sect{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:11.5px;font-weight:500;
+    letter-spacing:.2em;text-transform:uppercase;color:var(--mut);margin:38px 0 18px}
+  .sect .ic{width:14px;height:14px;color:var(--ink-dim)}
+  .sect::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
+  /* 設定台：非對稱兩欄（左窄註解、右欄位）；分隔線暗調 */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .crow{display:grid;grid-template-columns:.72fr 1.4fr;gap:34px;padding:24px 28px;border-bottom:1px solid var(--line-soft)}
+  .crow:last-child{border-bottom:none}
+  @media(max-width:720px){.crow{grid-template-columns:1fr;gap:12px}}
+  .cnote b{display:block;font-family:var(--disp);font-size:16px;font-weight:600;color:var(--ink);margin-bottom:6px;letter-spacing:.01em}
+  .cnote p{margin:0;font-size:12.5px;color:var(--mut);line-height:1.7;max-width:260px}
+  .cfield{display:flex;flex-direction:column;gap:12px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   @media(max-width:480px){.grid2{grid-template-columns:1fr}}
-  label.fl{font-size:12.5px;font-weight:500;color:var(--ink);margin-bottom:6px;display:block}
-  label.fl .hint{font-weight:400;color:var(--mut);margin-left:6px;font-size:12px}
-  input[type=text],input[type=date],input:not([type]){width:100%;font-family:var(--body);font-size:14.5px;
-    color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:10px;
-    padding:11px 14px;outline:none;transition:border-color .2s ease,background .2s ease,box-shadow .2s ease}
-  input:focus{border-color:var(--accent);background:var(--surface);box-shadow:0 0 0 4px var(--accent-soft)}
-  input:disabled{background:var(--line-soft);color:var(--mut);cursor:not-allowed}
-  .note{font-size:12.5px;color:var(--mut);margin-top:2px}
-  .note a{color:var(--accent);text-decoration:none} .note a:hover{text-decoration:underline}
-  .src-tag{display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;
-    letter-spacing:.04em;line-height:1;padding:4px 7px;border-radius:6px;color:#fff}
-  .src-d{background:var(--ink-strong)} .src-r{background:var(--mut)}
-  /* 授權提示：accent 柔和底色，不是強警示，符合低對比基調 */
-  .sa-grant{margin-top:8px;padding:14px 16px;background:var(--accent-soft);border-radius:10px}
-  .sa-grant .lead{display:flex;gap:8px;font-size:12.5px;color:var(--ink);line-height:1.6}
-  .sa-grant .lead b{color:var(--ink-strong);font-weight:600;white-space:nowrap}
-  .sa-grant .row{display:flex;gap:8px;margin-top:10px}
-  .sa-email{flex:1;display:flex;align-items:center;font-size:12px;color:var(--ink);
-    background:rgba(255,255,255,.6);padding:8px 10px;border-radius:8px;overflow-x:auto;white-space:nowrap}
-  .sa-copy{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);
-    background:var(--surface);border:1px solid transparent;border-radius:8px;padding:0 12px;cursor:pointer;
-    white-space:nowrap;transition:transform .15s ease}
-  .sa-copy:hover{transform:translateY(-1px)}
-  .sa-copy.done{color:var(--ok)}
+  label.fl{display:block;font-family:var(--mono);font-size:11.5px;font-weight:500;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--ink-dim);margin-bottom:8px}
+  label.fl .hint{text-transform:none;letter-spacing:0;color:var(--mut);margin-left:8px;font-family:var(--body);font-size:11.5px}
+  input[type=text],input[type=date],input:not([type]){width:100%;font-family:var(--body);font-size:14px;color:var(--ink);
+    background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 13px;outline:none;
+    transition:border-color .18s ease,box-shadow .18s ease,background .18s ease}
+  input::placeholder{color:var(--mut)}
+  input:focus{border-color:var(--d);background:var(--raise);box-shadow:0 0 0 3px rgba(79,196,214,.14)}
+  input:disabled{opacity:.5;cursor:not-allowed}
+  input[type=date]{color-scheme:dark;font-family:var(--mono)}
+  .note{font-size:12px;color:var(--mut);margin-top:2px}
+  .note a{color:var(--d);text-decoration:none} .note a:hover{text-decoration:underline}
+  /* 訊號源標籤：D=cyan／R=amber（色彩即資訊） */
+  .sig{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;font-weight:600;
+    letter-spacing:.06em;padding:3px 8px;border-radius:5px;line-height:1}
+  .sig-d{color:var(--d);background:rgba(79,196,214,.1);border:1px solid rgba(79,196,214,.28)}
+  .sig-r{color:var(--r);background:rgba(242,176,74,.1);border:1px solid rgba(242,176,74,.28)}
+  /* 授權提示 */
+  .grant{margin-top:8px;padding:13px 15px;background:rgba(79,196,214,.05);border:1px solid rgba(79,196,214,.2);border-radius:9px}
+  .grant .lead{font-size:12.5px;color:var(--ink-dim);line-height:1.6}
+  .grant .lead b{color:var(--ink);font-weight:600}
+  .grant .row{display:flex;gap:8px;margin-top:10px}
+  .grant code{flex:1;display:flex;align-items:center;font-size:11.5px;color:var(--d);background:var(--bg);
+    padding:8px 11px;border-radius:7px;overflow-x:auto;white-space:nowrap;border:1px solid var(--line)}
+  .sa-copy{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--ink-dim);
+    background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:0 13px;cursor:pointer;
+    white-space:nowrap;transition:transform .15s ease,border-color .15s ease}
+  .sa-copy:hover{transform:translateY(-1px);border-color:var(--d)}
+  .sa-copy.done{color:var(--ok);border-color:var(--ok)}
   .inline-join{display:flex;gap:8px}
   .inline-join input{flex:1}
   /* 可搜尋下拉 */
   .combo{position:relative}
-  .combo-list{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:20;max-height:280px;
-    overflow-y:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px;
-    box-shadow:0 20px 40px -18px rgba(58,52,46,.32);display:none;transform-origin:top center}
+  .combo-list{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:20;max-height:280px;overflow-y:auto;
+    background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+    box-shadow:0 24px 48px -18px rgba(0,0,0,.7);display:none;transform-origin:top center}
   .combo-list.open{display:block}
-  .combo-list a{display:block;padding:10px 14px;font-size:13.5px;cursor:pointer}
-  .combo-list a:hover{background:var(--line-soft)}
-  .combo-list .empty{padding:10px 14px;font-size:13px;color:var(--mut)}
+  .combo-list a{display:block;padding:10px 13px;font-size:13.5px;cursor:pointer;color:var(--ink-dim)}
+  .combo-list a:hover{background:var(--raise);color:var(--ink)}
+  .combo-list .empty{padding:10px 13px;font-size:13px;color:var(--mut)}
   .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
-  .achip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;
-    background:var(--line-soft);border-radius:999px;padding:6px 8px 6px 13px}
-  .achip button{border:none;background:var(--surface);color:var(--mut);cursor:pointer;
-    width:18px;height:18px;border-radius:999px;display:flex;align-items:center;justify-content:center;padding:0}
+  .achip{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;color:var(--ink);
+    background:rgba(79,196,214,.08);border:1px solid rgba(79,196,214,.24);border-radius:7px;padding:5px 6px 5px 11px}
+  .achip button{border:none;background:var(--panel2);color:var(--mut);cursor:pointer;width:17px;height:17px;
+    border-radius:5px;display:flex;align-items:center;justify-content:center;padding:0}
   .achip button:hover{color:var(--err)}
   .achip button .ic{width:10px;height:10px}
-  /* 按鈕：Emil Kowalski 風格——按下輕微內縮，靠 JS spring 回彈，不靠純 CSS transition 撐場面 */
-  .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--body);font-weight:500;font-size:13.5px;
-    border:none;border-radius:10px;padding:11px 20px;cursor:pointer;will-change:transform}
-  .btn-pri{color:#fff;background:var(--ink-strong)}
-  .btn-pri:hover{background:var(--accent)}
-  .btn-pri:disabled{opacity:.5;cursor:not-allowed}
-  .btn-go{width:100%;justify-content:center;color:#fff;background:var(--ink-strong)}
-  .btn-go:hover{background:var(--accent)}
-  .btn-go:disabled{opacity:.5;cursor:wait}
-  .btn-line{color:var(--ink);background:var(--surface);border:1px solid var(--line);padding:8px 14px;font-size:12.5px}
-  .btn-line:hover{border-color:var(--ink)}
-  .btn-danger{color:var(--err)}
-  .btn-danger:hover{border-color:var(--err);background:var(--err-soft)}
+  /* 按鈕 */
+  .btn{display:inline-flex;align-items:center;gap:7px;font-family:var(--body);font-weight:500;font-size:13px;
+    border:none;border-radius:9px;padding:10px 17px;cursor:pointer;will-change:transform;transition:background .15s,border-color .15s,color .15s}
+  .btn .ic{width:14px;height:14px}
+  .btn-pri{color:var(--bg);background:var(--d);font-weight:600}
+  .btn-pri:hover{background:#67d3e3}
+  .btn-pri:disabled{opacity:.45;cursor:not-allowed}
+  .btn-line{color:var(--ink-dim);background:var(--panel2);border:1px solid var(--line);padding:8px 13px;font-size:12.5px}
+  .btn-line:hover{border-color:var(--d);color:var(--ink)}
+  .btn-line .ic{color:var(--mut)} .btn-line:hover .ic{color:var(--d)}
+  .btn-danger:hover{border-color:var(--err);color:var(--err)}
+  .btn-danger:hover .ic{color:var(--err)}
   .acts{display:flex;gap:7px;flex-wrap:wrap}
   .hidden{display:none}
   /* 訊息 */
-  .msg{display:flex;align-items:center;gap:9px;font-size:13.5px;border-radius:10px;padding:11px 14px}
-  .msg-warn{background:var(--accent-soft);color:var(--ink-strong)}
-  .msg-ok{background:var(--ok-soft);color:var(--ok)}
-  .msg-err{background:var(--err-soft);color:var(--err)}
-  /* 清單：以行卡呈現，取代滿版粗表格線，維持資料密度但降對比 */
-  .cfg-list{display:flex;flex-direction:column}
-  .cfg-item{padding:22px 4px;border-bottom:1px solid var(--line-soft)}
-  .cfg-item:last-child{border-bottom:none}
-  .cfg-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap}
-  .cfg-title{font-family:var(--disp);font-size:19px;font-weight:500;color:var(--ink-strong)}
-  .meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin:16px 0}
-  .meta-cell .k{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
-  .meta-cell .v{font-size:13.5px;color:var(--ink)}
-  .meta-cell .v a{color:var(--accent);text-decoration:none}
-  .st{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:500;
-    padding:4px 10px;border-radius:999px}
-  .st-queued{color:var(--mut);background:var(--line-soft)}
-  .st-run{color:var(--accent);background:var(--accent-soft)}
-  .st-done{color:var(--ok);background:var(--ok-soft)}
-  .st-fail{color:var(--err);background:var(--err-soft)}
-  .cfg-msg{font-size:12.5px;color:var(--mut);margin-top:10px;max-width:52rem}
-  .empty-note{padding:36px 4px;color:var(--mut);font-size:13.5px}
+  .msg{display:flex;align-items:center;gap:9px;font-size:13px;border-radius:9px;padding:11px 14px}
+  .msg .ic{width:15px;height:15px}
+  .msg-warn{background:rgba(242,176,74,.1);border:1px solid rgba(242,176,74,.28);color:var(--warn)}
+  .msg-ok{background:rgba(95,201,138,.1);border:1px solid rgba(95,201,138,.28);color:var(--ok)}
+  .msg-err{background:rgba(240,101,79,.1);border:1px solid rgba(240,101,79,.28);color:var(--err)}
+  /* Channel strip：每筆設定一條監控通道 */
+  .channels{display:flex;flex-direction:column;gap:12px}
+  .ch{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;
+    transition:border-color .18s ease}
+  .ch:hover{border-color:var(--line-soft)}
+  .ch-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .ch-led{width:9px;height:9px;border-radius:50%;flex:none;background:var(--mut)}
+  .ch-led.ok{background:var(--ok);box-shadow:0 0 8px rgba(95,201,138,.6)}
+  .ch-led.err{background:var(--err);box-shadow:0 0 8px rgba(240,101,79,.6)}
+  .ch-led.run{background:var(--d);box-shadow:0 0 8px rgba(79,196,214,.6);animation:blip 1.4s ease-out infinite}
+  .ch-name{font-family:var(--disp);font-size:17px;font-weight:600;color:var(--ink);letter-spacing:.01em}
+  .ch-sigs{display:flex;gap:6px}
+  .ch-status{margin-left:auto;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+    display:inline-flex;align-items:center;gap:6px}
+  .ch-status.ok{color:var(--ok)} .ch-status.err{color:var(--err)} .ch-status.run{color:var(--d)} .ch-status.idle{color:var(--mut)}
+  /* 同步時間軸 gauge（signature） */
+  .track{margin:16px 0 4px}
+  .track-scale{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--mut);margin-bottom:7px}
+  .track-scale .cur{color:var(--d)}
+  .track-scale .cur.done{color:var(--ok)} .track-scale .cur.amb{color:var(--r)}
+  .rail{position:relative;height:6px;border-radius:99px;background:var(--panel2);overflow:hidden}
+  .rail .fill{position:absolute;inset:0 auto 0 0;border-radius:99px;
+    background:linear-gradient(90deg,var(--d),var(--r));transition:width .6s cubic-bezier(.2,.8,.2,1)}
+  .rail.done .fill{background:linear-gradient(90deg,var(--ok),var(--ok))}
+  .rail .head{position:absolute;top:50%;width:2px;height:14px;transform:translate(-50%,-50%);
+    background:var(--ink);border-radius:2px;transition:left .6s cubic-bezier(.2,.8,.2,1)}
+  .rail.idle .fill{width:0}
+  .track-meta{display:flex;gap:20px;margin-top:12px;font-size:12px;color:var(--ink-dim);flex-wrap:wrap}
+  .track-meta .m{display:flex;align-items:center;gap:7px}
+  .track-meta .m .lb{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)}
+  .track-meta .m .vl{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+  .track-meta .m a{color:var(--d);text-decoration:none;display:inline-flex;align-items:center;gap:4px}
+  .ch-msg{font-size:12px;color:var(--mut);margin-top:12px;font-family:var(--mono);line-height:1.6;
+    max-width:60rem;overflow:hidden;text-overflow:ellipsis}
+  .ch-acts{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft)}
+  .empty-note{padding:40px 22px;text-align:center;color:var(--mut);font-size:13.5px;
+    border:1px dashed var(--line);border-radius:12px}
   /* 重抓下拉 */
   .dropdown{position:relative;display:inline-block}
-  .dropdown-menu{position:absolute;z-index:20;top:calc(100% + 6px);left:0;
-    background:var(--surface);border:1px solid var(--line);border-radius:10px;min-width:168px;
-    box-shadow:0 20px 40px -16px rgba(58,52,46,.32);overflow:hidden;opacity:0;pointer-events:none;transform:scale(.94) translateY(-4px)}
+  .dropdown-menu{position:absolute;z-index:20;top:calc(100% + 6px);left:0;background:var(--panel2);
+    border:1px solid var(--line);border-radius:9px;min-width:172px;box-shadow:0 20px 40px -16px rgba(0,0,0,.7);
+    overflow:hidden;opacity:0;pointer-events:none;transform:scale(.94) translateY(-4px)}
   .dropdown.open .dropdown-menu{pointer-events:auto}
-  .dropdown-menu a{display:block;padding:10px 14px;font-size:13px;cursor:pointer}
-  .dropdown-menu a:hover{background:var(--line-soft)}
-  /* Toast：spring 進出場（JS 控制），暖色卡片取代冷 mono 條 */
+  .dropdown-menu a{display:block;padding:10px 14px;font-size:12.5px;color:var(--ink-dim);cursor:pointer}
+  .dropdown-menu a:hover{background:var(--raise);color:var(--ink)}
+  /* Toast：spring 進出場 */
   .toast-dock{position:fixed;right:24px;bottom:24px;z-index:60;display:flex;flex-direction:column-reverse;
-    gap:10px;width:340px;max-width:calc(100vw - 32px);pointer-events:none}
-  .toast{pointer-events:auto;position:relative;display:flex;align-items:flex-start;gap:12px;
-    background:var(--surface);border:1px solid var(--line);border-radius:14px;
-    padding:14px 34px 14px 16px;box-shadow:0 24px 48px -18px rgba(58,52,46,.4);will-change:transform,opacity}
-  .toast .t-ico{flex:none;display:flex;align-items:center;justify-content:center;width:28px;height:28px;
-    border-radius:999px;color:var(--accent);background:var(--accent-soft)}
-  .toast.is-ok .t-ico{color:var(--ok);background:var(--ok-soft)}
-  .toast.is-err .t-ico{color:var(--err);background:var(--err-soft)}
+    gap:10px;width:346px;max-width:calc(100vw - 32px);pointer-events:none}
+  .toast{pointer-events:auto;position:relative;display:flex;align-items:flex-start;gap:12px;background:var(--panel2);
+    border:1px solid var(--line);border-left:2px solid var(--d);border-radius:11px;
+    padding:14px 34px 14px 15px;box-shadow:0 24px 52px -18px rgba(0,0,0,.75);will-change:transform,opacity}
+  .toast.is-ok{border-left-color:var(--ok)} .toast.is-err{border-left-color:var(--err)}
+  .toast .t-ico{flex:none;display:flex;align-items:center;justify-content:center;width:26px;height:26px;
+    border-radius:7px;color:var(--d);background:rgba(79,196,214,.12)}
+  .toast.is-ok .t-ico{color:var(--ok);background:rgba(95,201,138,.12)}
+  .toast.is-err .t-ico{color:var(--err);background:rgba(240,101,79,.12)}
   .toast .t-ico .ic{width:14px;height:14px}
   .toast .t-ico .spin-ic{animation:spin 1s linear infinite}
   .toast .t-body{display:flex;flex-direction:column;gap:3px;min-width:0}
-  .toast .t-tag{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--mut)}
-  .toast .t-msg{font-size:13px;line-height:1.5;color:var(--ink);white-space:pre-wrap;word-break:break-word;
-    max-height:8.4em;overflow-y:auto}
-  .toast .t-close{position:absolute;top:10px;right:10px;border:none;background:none;color:var(--mut);cursor:pointer;padding:2px}
+  .toast .t-tag{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)}
+  .toast .t-msg{font-size:12.5px;line-height:1.5;color:var(--ink);white-space:pre-wrap;word-break:break-word;max-height:8.4em;overflow-y:auto}
+  .toast .t-close{position:absolute;top:9px;right:9px;border:none;background:none;color:var(--mut);cursor:pointer;padding:2px}
   .toast .t-close .ic{width:12px;height:12px}
   .toast .t-close:hover{color:var(--ink)}
   @keyframes spin{to{transform:rotate(360deg)}}
-  footer{padding:50px 4px 20px;font-size:12px;color:var(--mut)}
-  @media(prefers-reduced-motion:reduce){.toast .t-ico .spin-ic{animation:none}}
-  @media(max-width:600px){h1{font-size:34px}.cfg-row{padding:20px 18px}.wrap{padding:0 18px 48px}.topbar{padding:18px}}
+  footer{padding:52px 2px 20px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mut)}
+  @media(prefers-reduced-motion:reduce){.live-dot i,.ch-led.run{animation:none}.toast .t-ico .spin-ic{animation:none}.rail .fill,.rail .head{transition:none}}
+  @media(max-width:600px){h1{font-size:34px}.wrap{padding:0 16px 56px}.statusbar{padding:11px 16px}.crow{padding:20px 18px}
+    .sb-r .hide-sm{display:none}.cluster{width:100%}.gauge{flex:1;min-width:0}}
 `;
 
 function shell(o: { title: string; body: string; script?: string }): string {
@@ -235,9 +302,15 @@ ${FONTS}
 <style>${BASE_CSS}</style>
 </head>
 <body>
-  <div class="topbar">
-    <a class="brand" href="/">${icon('eye')}ad_tools</a>
-    <span class="lab-badge">design lab</span>
+  <div class="statusbar">
+    <div class="sb-l">
+      <a href="/">${icon('radio')}ad_tools</a>
+      <span class="sep">/</span><span class="here">adstream</span>
+    </div>
+    <div class="sb-r">
+      <span class="hide-sm">schedule <b>daily · t-1</b></span>
+      <span class="live-dot"><i></i>live</span>
+    </div>
   </div>
   <div class="wrap">${o.body}</div>
 ${o.script ? `<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script><script>${o.script}</script>` : ''}
@@ -325,16 +398,41 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     const failCount = configs.filter((c) => c.lastRunStatus === 'error').length;
 
     const items = configs.map((c) => {
-      const statusBadge =
-        c.lastRunStatus === 'success' ? `<span class="st st-done">${icon('check', 'ic')}成功</span>`
-        : c.lastRunStatus === 'error' ? `<span class="st st-fail">${icon('x', 'ic')}失敗</span>`
-        : c.lastRunStatus === 'running' ? `<span class="st st-run">執行中</span>`
-        : `<span class="st st-queued">未執行</span>`;
+      const st = c.lastRunStatus;
+      const ledCls = st === 'success' ? 'ok' : st === 'error' ? 'err' : st === 'running' ? 'run' : '';
+      const statusText =
+        st === 'success' ? `<span class="ch-status ok">${icon('circleDot', 'ic')}nominal</span>`
+        : st === 'error' ? `<span class="ch-status err">${icon('alert', 'ic')}fault</span>`
+        : st === 'running' ? `<span class="ch-status run">syncing</span>`
+        : `<span class="ch-status idle">standby</span>`;
+
       const accPairs = c.accountIds.map((id) => ({ id: String(id), name: accLabel(id) }));
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
         `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"`;
       const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0;
+      const sigs = [
+        hasD ? `<span class="sig sig-d">D · ${c.accountIds.length}</span>` : '',
+        hasR ? `<span class="sig sig-r">R · ${c.rUserIds.length}</span>` : '',
+      ].join('');
+
+      // 同步時間軸 gauge
+      const g = syncGauge(c);
+      const targetLabel = c.endDate ?? '今天';
+      const curCls = g.state === 'done' ? 'cur done' : 'cur amb';
+      const track = `
+        <div class="track">
+          <div class="track-scale">
+            <span>${esc(c.backfillStartDate)}</span>
+            <span class="${g.state === 'idle' ? 'cur' : curCls}">${g.state === 'idle' ? '尚未同步' : `已同步 ${esc(c.lastSyncedDate ?? '')} · ${g.pct}%`}</span>
+            <span>${esc(targetLabel)}</span>
+          </div>
+          <div class="rail ${g.state}">
+            <span class="fill" style="width:${g.pct}%"></span>
+            <span class="head" style="left:${g.pct}%"></span>
+          </div>
+        </div>`;
+
       const rerunCtrl =
         hasD && hasR
           ? `<div class="dropdown">
@@ -348,22 +446,22 @@ export async function registerAdstreamLab(app: FastifyInstance) {
           : hasR
           ? `<button class="btn btn-line rerunOpt" data-id="${c.id}" data-scope="r">${icon('rotate')}重抓昨天（R）</button>`
           : `<button class="btn btn-line rerunOpt" data-id="${c.id}" data-scope="d">${icon('rotate')}重抓昨天（D）</button>`;
-      return `<div class="cfg-item">
-        <div class="cfg-head">
-          <span class="cfg-title">${esc(c.name)}</span>
-          ${statusBadge}
+
+      return `<div class="ch">
+        <div class="ch-top">
+          <span class="ch-led ${ledCls}"></span>
+          <span class="ch-name">${esc(c.name)}</span>
+          <span class="ch-sigs">${sigs}</span>
+          ${statusText}
         </div>
-        <div class="meta-grid">
-          <div class="meta-cell"><div class="k">D 帳號</div><div class="v">${c.accountIds.map((id) => esc(accLabel(id))).join('、') || '—'}</div></div>
-          <div class="meta-cell"><div class="k">R 帳號</div><div class="v">${c.rUserIds.map((a) => esc(a)).join('、') || '—'}</div></div>
-          <div class="meta-cell"><div class="k">Sheet</div><div class="v"><a href="${esc(c.sheetUrl)}" target="_blank">開啟 ${icon('externalLink', 'ic')}</a></div></div>
-          <div class="meta-cell"><div class="k">回補起始</div><div class="v">${c.backfillStartDate}</div></div>
-          <div class="meta-cell"><div class="k">終止日</div><div class="v">${c.endDate ?? '不限'}</div></div>
-          <div class="meta-cell"><div class="k">已同步到</div><div class="v">${c.lastSyncedDate ?? '—'}</div></div>
-          <div class="meta-cell"><div class="k">上次執行</div><div class="v">${c.lastRunAt ?? '—'}</div></div>
+        ${track}
+        <div class="track-meta">
+          <div class="m"><span class="lb">sheet</span><span class="vl"><a href="${esc(c.sheetUrl)}" target="_blank">開啟${icon('externalLink', 'ic')}</a></span></div>
+          <div class="m"><span class="lb">last run</span><span class="vl">${c.lastRunAt ?? '—'}</span></div>
+          <div class="m"><span class="lb">terminal</span><span class="vl">${c.endDate ?? '不限'}</span></div>
         </div>
-        ${c.lastRunMessage ? `<div class="cfg-msg" title="${esc(c.lastRunMessage)}">${esc(c.lastRunMessage)}</div>` : ''}
-        <div class="acts" style="margin-top:16px">
+        ${c.lastRunMessage ? `<div class="ch-msg" title="${esc(c.lastRunMessage)}">${esc(c.lastRunMessage)}</div>` : ''}
+        <div class="ch-acts">
           <button class="btn btn-line runBtn" data-id="${c.id}">${icon('play')}立即執行</button>
           ${rerunCtrl}
           <button class="btn btn-line editBtn" ${editAttrs}>${icon('pencil')}編輯</button>
@@ -373,65 +471,59 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     }).join('');
 
     const listSection = configs.length
-      ? `<div class="cfg-list">${items}</div>`
-      : `<div class="empty-note">尚無設定，從上方新增第一筆同步排程。</div>`;
+      ? `<div class="channels">${items}</div>`
+      : `<div class="empty-note">尚無通道。從上方新增第一組同步設定，開始把原始報表串進 Google Sheet。</div>`;
 
     const body = `
-    <header class="hero">
+    <header class="masthead">
       <div>
-        <p class="eyebrow">${icon('eye')} internal sync tool</p>
-        <h1>廣告凝視者</h1>
-        <p class="lede">把多個 D 帳號、R(Rixbee) 帳號的 bulk 原始報表，定期同步進你指定的 Google Sheet。D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」——首次依回補起始日補到昨天，之後每天抓 T-1。</p>
+        <p class="eyebrow">${icon('activity')} internal sync desk</p>
+        <h1>廣告凝視者<span class="en">ADSTREAM</span></h1>
+        <p class="lede">把多個 D 帳號、R(Rixbee) 帳號的 bulk 原始報表，定期串進你指定的 Google Sheet：D 寫 <span class="k">${RAW_TAB}</span>、R 寫 <span class="k amb">${R_RAW_TAB}</span>。首次依回補起始日補到昨天，之後每天抓 T-1。</p>
       </div>
-      <div class="stat-float">
-        <div class="row"><span class="k">設定總數</span><span class="v">${configs.length}</span></div>
-        <div class="row"><span class="k">上次成功</span><span class="v accent">${doneCount}</span></div>
-        <div class="row"><span class="k">上次失敗</span><span class="v">${failCount}</span></div>
+      <div class="cluster">
+        <div class="gauge"><div class="g-k">channels</div><div class="g-v">${String(configs.length).padStart(2, '0')}</div></div>
+        <div class="gauge ok"><div class="g-k">nominal</div><div class="g-v">${String(doneCount).padStart(2, '0')}</div></div>
+        <div class="gauge ${failCount ? 'err' : ''}"><div class="g-k">fault</div><div class="g-v">${String(failCount).padStart(2, '0')}</div></div>
       </div>
     </header>
 
     ${hasDb ? '' : `<div class="msg msg-warn">${icon('alert')}未設定資料庫，無法新增設定</div>`}
     ${dbError ? `<div class="msg msg-err">${icon('alert')}資料庫連線失敗：${esc(dbError)}</div>` : ''}
 
-    <div class="section-label">設定一組新的同步</div>
+    <div class="sect">${icon('plus')} new channel</div>
     <div class="panel">
       <input type="hidden" id="editingId" value="">
-      <div class="cfg-row">
-        <div class="cfg-note"><b id="formTitle">新增設定</b><p>取個好認的名稱，之後在清單裡一眼認出這組同步跑的是誰的資料。</p></div>
-        <div class="cfg-field">
+      <div class="crow">
+        <div class="cnote"><b id="formTitle">新增設定</b><p>取個好認的名稱，之後在通道清單裡一眼認出這組同步跑的是誰的資料。</p></div>
+        <div class="cfield">
           <label class="fl">設定名稱</label>
           <input type="text" id="name" placeholder="例如：A 客戶每日同步" ${hasDb ? '' : 'disabled'}>
         </div>
       </div>
 
-      <div class="cfg-row">
-        <div class="cfg-note"><b>同步區間</b><p>首次執行會從回補起始日一路補到昨天；之後每天自動抓 T-1。終止日留空代表持續同步、不設上限。</p></div>
-        <div class="cfg-field">
+      <div class="crow">
+        <div class="cnote"><b>同步區間</b><p>首次執行從回補起始日補到昨天，之後每天自動抓 T-1。終止日留空＝持續同步、不設上限。</p></div>
+        <div class="cfield">
           <div class="grid2">
-            <div>
-              <label class="fl">回補起始日</label>
-              <input type="date" id="backfill" ${hasDb ? '' : 'disabled'}>
-            </div>
-            <div>
-              <label class="fl">終止日 <span class="hint">留空＝不限</span></label>
-              <input type="date" id="endDate" ${hasDb ? '' : 'disabled'}>
-            </div>
+            <div><label class="fl">回補起始日</label><input type="date" id="backfill" ${hasDb ? '' : 'disabled'}></div>
+            <div><label class="fl">終止日 <span class="hint">留空＝不限</span></label><input type="date" id="endDate" ${hasDb ? '' : 'disabled'}></div>
           </div>
         </div>
       </div>
 
-      <div class="cfg-row">
-        <div class="cfg-note"><b>寫入目的地</b><p>把服務帳號加為 Sheet 的編輯者，同步才寫得進去；貼上連結後記得先測試連線。</p></div>
-        <div class="cfg-field">
+      <div class="crow">
+        <div class="cnote"><b>寫入目的地</b><p>把服務帳號加為 Sheet 的編輯者，同步才寫得進去。貼上連結後先測試連線。</p></div>
+        <div class="cfield">
           <label class="fl">Google Sheet 連結</label>
           <div class="inline-join">
             <input type="text" id="sheetUrl" placeholder="https://docs.google.com/spreadsheets/d/…" ${hasDb ? '' : 'disabled'}>
-            <button class="btn btn-line" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>測試連線</button>
+            <button class="btn btn-line" id="testBtn" type="button" ${hasDb ? '' : 'disabled'}>${icon('zap')}測試連線</button>
           </div>
-          <div class="sa-grant">
-            <div class="lead"><b>編輯者權限：</b><span>把這個服務帳號加為此 Sheet 的編輯者。</span></div>
+          <div class="grant">
+            <div class="lead"><b>編輯者權限：</b>把這個服務帳號加為此 Sheet 的編輯者。</div>
             <div class="row">
-              <code class="sa-email" id="saEmail">${SA_EMAIL}</code>
+              <code id="saEmail">${SA_EMAIL}</code>
               <button class="sa-copy" id="saCopy" type="button">${icon('copy', 'ic')}複製</button>
             </div>
           </div>
@@ -439,11 +531,11 @@ export async function registerAdstreamLab(app: FastifyInstance) {
         </div>
       </div>
 
-      <div class="cfg-row">
-        <div class="cfg-note"><b>帳戶來源</b><p>D、R 至少擇一。D 帳號可多選；R Account ID 可填多組，用逗號分開，類型會自動偵測。</p></div>
-        <div class="cfg-field">
+      <div class="crow">
+        <div class="cnote"><b>訊號源</b><p>D、R 至少擇一。<span style="color:var(--d)">D 帳號</span>可多選；<span style="color:var(--r)">R Account ID</span> 可填多組、逗號分隔，類型自動偵測。</p></div>
+        <div class="cfield">
           <div>
-            <label class="fl"><span class="src-tag src-d">D</span> Discovery 帳號</label>
+            <label class="fl"><span class="sig sig-d">D</span>&nbsp; discovery 帳號</label>
             <div class="combo">
               <input type="text" id="accSearch" placeholder="搜尋帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
               <div id="accList" class="combo-list"></div>
@@ -452,15 +544,15 @@ export async function registerAdstreamLab(app: FastifyInstance) {
             <div class="note">找不到帳號或 token？<a href="/tools/adpreview/tokens" target="_blank">管理 D 帳號 token →</a></div>
           </div>
           <div style="margin-top:18px">
-            <label class="fl"><span class="src-tag src-r">R</span> Rixbee Account ID</label>
+            <label class="fl"><span class="sig sig-r">R</span>&nbsp; rixbee account id</label>
             <input type="text" id="rUserIds" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
           </div>
         </div>
       </div>
 
-      <div class="cfg-row">
-        <div class="cfg-note"></div>
-        <div class="cfg-field">
+      <div class="crow">
+        <div class="cnote"></div>
+        <div class="cfield">
           <div class="acts">
             <button class="btn btn-pri" id="saveBtn" type="button" ${hasDb ? '' : 'disabled'}>${icon('check')}儲存設定</button>
             <button class="btn btn-line hidden" id="cancelBtn" type="button">取消編輯</button>
@@ -470,10 +562,10 @@ export async function registerAdstreamLab(app: FastifyInstance) {
       </div>
     </div>
 
-    <div class="section-label">已設定清單</div>
+    <div class="sect">${icon('radio')} channels · ${configs.length}</div>
     ${listSection}
     <div class="toast-dock" id="toastDock" aria-live="polite" aria-atomic="true"></div>
-    <footer>popin ad-ops · adstream lab</footer>`;
+    <footer>popin ad-ops · adstream desk</footer>`;
 
     const script = `
 (function () {
@@ -482,16 +574,16 @@ export async function registerAdstreamLab(app: FastifyInstance) {
   var prefersReduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function dur(v) { return prefersReduce ? 0 : v; }
 
-  // ---------- 按鈕按壓回彈（Emil Kowalski 風格微互動：按下內縮、放開 spring 回彈）----------
+  // 按鈕按壓回彈（spring）
   document.querySelectorAll('.btn').forEach(function (b) {
     if (!GS) return;
-    b.addEventListener('pointerdown', function () { GS.to(b, { scale: .96, duration: dur(.12), ease: 'power2.out' }); });
+    b.addEventListener('pointerdown', function () { GS.to(b, { scale: .95, duration: dur(.12), ease: 'power2.out' }); });
     ['pointerup', 'pointerleave'].forEach(function (ev) {
       b.addEventListener(ev, function () { GS.to(b, { scale: 1, duration: dur(.5), ease: 'elastic.out(1, 0.5)' }); });
     });
   });
 
-  // ---------- 浮動 Toast（spring 進出場）----------
+  // 浮動 Toast（spring 進出場）
   var dock = document.getElementById('toastDock');
   var toastEl = null, hideTimer = null;
   var ICON = {
@@ -534,19 +626,17 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     if (!toastEl) return;
     var el = toastEl; toastEl = null;
     if (!GS) { el.remove(); return; }
-    GS.to(el, { x: 60, autoAlpha: 0, scale: .92, duration: dur(.35), ease: 'power2.in',
-      onComplete: function () { el.remove(); } });
+    GS.to(el, { x: 60, autoAlpha: 0, scale: .92, duration: dur(.35), ease: 'power2.in', onComplete: function () { el.remove(); } });
   }
   function exitThenReload(delay) {
     hideTimer = setTimeout(function () {
       var el = toastEl; toastEl = null;
       if (!el || !GS) { location.reload(); return; }
-      GS.to(el, { x: 60, autoAlpha: 0, scale: .92, duration: dur(.35), ease: 'power2.in',
-        onComplete: function () { location.reload(); } });
+      GS.to(el, { x: 60, autoAlpha: 0, scale: .92, duration: dur(.35), ease: 'power2.in', onComplete: function () { location.reload(); } });
     }, delay);
   }
 
-  // ---------- 帳號可搜尋下拉（多選 chips） ----------
+  // 帳號可搜尋下拉（多選 chips）
   var search = document.getElementById('accSearch');
   var list = document.getElementById('accList');
   var chips = document.getElementById('chips');
@@ -580,7 +670,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     }).join('') || '<div class="empty">無符合帳號</div>';
   }
   if (enabled) {
-    fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = d; renderList(''); });
+    fetch('${BASE_PATH}/accounts').then(function (r) { return r.json(); }).then(function (d) { accounts = Array.isArray(d) ? d : []; renderList(''); });
     search.addEventListener('focus', openList);
     search.addEventListener('blur', function () { setTimeout(function () { list.classList.remove('open'); }, 120); });
     search.addEventListener('input', function () { openList(); renderList(search.value.trim()); });
@@ -595,7 +685,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     });
   }
 
-  // ---------- 複製服務帳號 email ----------
+  // 複製服務帳號 email
   var saCopy = document.getElementById('saCopy');
   if (saCopy) saCopy.addEventListener('click', function () {
     var email = (document.getElementById('saEmail') || {}).textContent || '';
@@ -606,7 +696,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     });
   });
 
-  // ---------- 測試連線 ----------
+  // 測試連線
   var testBtn = document.getElementById('testBtn');
   var testResult = document.getElementById('testResult');
   var testedUrl = '';
@@ -628,7 +718,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     });
   });
 
-  // ---------- 儲存 / 編輯 ----------
+  // 儲存 / 編輯
   var saveBtn = document.getElementById('saveBtn');
   var cancelBtn = document.getElementById('cancelBtn');
   var saveResult = document.getElementById('saveResult');
@@ -697,7 +787,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     });
   });
 
-  // ---------- 刪除 ----------
+  // 刪除
   document.querySelectorAll('.delBtn').forEach(function (b) {
     b.addEventListener('click', function () {
       if (!confirm('確定刪除這個設定？')) return;
@@ -708,7 +798,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     });
   });
 
-  // ---------- 立即執行（背景 job + 輪詢） ----------
+  // 立即執行（背景 job + 輪詢）
   document.querySelectorAll('.runBtn').forEach(function (b) {
     b.addEventListener('click', function () {
       b.disabled = true;
@@ -737,7 +827,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
     });
   });
 
-  // ---------- 重抓昨天 ----------
+  // 重抓昨天
   function pollRerun(jobId) {
     var poll = setInterval(function () {
       fetch('${BASE_PATH}/job/' + jobId).then(function (r){return r.json();}).then(function (j) {
@@ -778,7 +868,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
   });
 })();`;
 
-    reply.type('text/html').send(shell({ title: '廣告凝視者 · Lab', body, script }));
+    reply.type('text/html').send(shell({ title: '廣告凝視者 · Signal Desk', body, script }));
   });
 
   // ---------- D 帳號清單 ----------
