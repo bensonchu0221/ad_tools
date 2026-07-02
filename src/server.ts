@@ -11,6 +11,7 @@ import { renderSlotBoard } from './core/slotboard.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyreport/route.js';
 import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.js';
+import { registerAdstreamLab } from './tools/adstream-lab/route.js'; // 視覺重新設計實驗頁，先不上首頁選單，僅供直接網址訪問
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics } from './core/store.js';
@@ -87,6 +88,7 @@ app.get('/health/db', async (req, reply) => {
 await registerAdpreview(app);
 await registerWeeklyReport(app);
 await registerAdstream(app);
+await registerAdstreamLab(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));
