@@ -635,6 +635,105 @@ export async function markWeeklyJobFailed(id: number, error: string): Promise<vo
   );
 }
 
+// ---------- 週報自動文案快照（weekly_snapshots；本工具自管） ----------
+// 每次跑完週報存一列「摘要」，供同帳戶下次跑時比 CTR。只存彙總數字，不存 raw 逐列。
+export interface WeeklySnapshotRow {
+  id: number;
+  accountKey: string;
+  accountName: string;
+  startDate: string;
+  endDate: string;
+  days: number;
+  imp: number;
+  click: number;
+  spend: number;
+  cv: number;
+  ctr: number;
+  cvDetail: Record<string, number>; // 中文事件名 → 筆數
+  topAsset: { title: string; imp: number; click: number; ctr: number } | null;
+  narrativeText: string;
+  createdAt: string;
+}
+
+let weeklySnapshotsSchemaReady = false;
+async function ensureWeeklySnapshotsSchema(p: mysql.Pool): Promise<void> {
+  if (weeklySnapshotsSchemaReady) return;
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS weekly_snapshots (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      account_key VARCHAR(128) NOT NULL,
+      account_name VARCHAR(255) NULL,
+      start_date VARCHAR(10) NOT NULL,
+      end_date VARCHAR(10) NOT NULL,
+      days INT NOT NULL,
+      imp BIGINT NOT NULL DEFAULT 0,
+      click BIGINT NOT NULL DEFAULT 0,
+      spend DOUBLE NOT NULL DEFAULT 0,
+      cv BIGINT NOT NULL DEFAULT 0,
+      ctr DOUBLE NOT NULL DEFAULT 0,
+      cv_detail_json TEXT NULL,
+      top_asset_json TEXT NULL,
+      narrative_text TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_account_key (account_key)
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  weeklySnapshotsSchemaReady = true;
+}
+
+/** 存一筆快照（append，不覆蓋；比對靠 account_key + 最新一筆）。 */
+export async function saveWeeklySnapshot(
+  row: Omit<WeeklySnapshotRow, 'id' | 'createdAt'>
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureWeeklySnapshotsSchema(p);
+  await p.query(
+    `INSERT INTO weekly_snapshots
+      (account_key, account_name, start_date, end_date, days, imp, click, spend, cv, ctr,
+       cv_detail_json, top_asset_json, narrative_text)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.accountKey, row.accountName, row.startDate, row.endDate, row.days,
+     row.imp, row.click, row.spend, row.cv, row.ctr,
+     JSON.stringify(row.cvDetail),
+     row.topAsset ? JSON.stringify(row.topAsset) : null,
+     row.narrativeText]
+  );
+}
+
+/** 取同帳戶最近一筆快照（前次）；無則 null。 */
+export async function getLatestSnapshot(accountKey: string): Promise<WeeklySnapshotRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureWeeklySnapshotsSchema(p);
+  const [rows] = await p.query(
+    `SELECT id, account_key, account_name, start_date, end_date, days, imp, click, spend, cv, ctr,
+       cv_detail_json, top_asset_json, narrative_text,
+       DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+     FROM weekly_snapshots WHERE account_key = ? ORDER BY id DESC LIMIT 1`,
+    [accountKey]
+  );
+  const r = (rows as any[])[0];
+  if (!r) return null;
+  return {
+    id: r.id,
+    accountKey: r.account_key,
+    accountName: r.account_name ?? '',
+    startDate: r.start_date,
+    endDate: r.end_date,
+    days: r.days,
+    imp: Number(r.imp),
+    click: Number(r.click),
+    spend: Number(r.spend),
+    cv: Number(r.cv),
+    ctr: Number(r.ctr),
+    cvDetail: r.cv_detail_json ? JSON.parse(r.cv_detail_json) : {},
+    topAsset: r.top_asset_json ? JSON.parse(r.top_asset_json) : null,
+    narrativeText: r.narrative_text ?? '',
+    createdAt: r.created_at,
+  };
+}
+
 /** /health/db 診斷用 */
 export async function dbDiagnostics() {
   const p = getPool();
