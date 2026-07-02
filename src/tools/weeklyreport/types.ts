@@ -81,7 +81,8 @@ export interface DRow {
   date: string; // YYYY-MM-DD
   account_name: string;
   campaign_name: string;
-  ad_title: string;
+  ad_name: string; // 廣告/素材名稱（getAdLists 的 ad_name，如「圖片1_0516」）→ Raw_Data 的 assetname 欄
+  ad_title: string; // 廣告文案標題（getAdLists 的 title，長句）→ Raw_Data 的 ad_title 欄
   ad_image: string;
   imp: number;
   click: number;

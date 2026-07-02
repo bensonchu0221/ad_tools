@@ -458,6 +458,7 @@ async function fetchDData(
       rows.push({
         account_name: cam?.account ?? '',
         campaign_name: cam?.name ?? '',
+        ad_name: ad?.ad_name ?? '', // 素材名稱（getAdLists 帶回，非報表欄位）
         ad_title: ad?.title ?? '',
         ad_image: ad?.image ?? '',
         ...data,

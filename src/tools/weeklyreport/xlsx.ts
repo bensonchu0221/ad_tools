@@ -281,7 +281,7 @@ export async function buildXlsx(
   for (const v of result.dRaw) {
     const [cv, mcv] = calcConversions(v, buckets);
     s5.addRow([
-      'D', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', '', v.campaign_name ?? '', '', '',
+      'D', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', '', v.campaign_name ?? '', '', v.ad_name ?? '',
       '', v.ad_title ?? '', v.ad_image ?? '', v.imp ?? 0, v.click ?? 0, v.charge ?? 0, cv, mcv,
       0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
       v.cv_view_content ?? 0, v.cv_add_to_cart ?? 0, v.cv_app_install ?? 0, v.cv_complete_registration ?? 0,
