@@ -131,6 +131,7 @@ function writeSummarySheet(
 export async function buildXlsx(
   result: ReportResult,
   buckets: WeeklyReportInput['buckets'],
+  narrative: string,
   onPhase?: (phase: string) => void
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
@@ -315,6 +316,18 @@ export async function buildXlsx(
     }
     s6.addRow(rowVals);
   }
+
+  // ---------- Sheet：文案（自動產生的客戶文案；AM 潤飾後複製使用） ----------
+  const sNarr = wb.addWorksheet('文案');
+  sNarr.getColumn(1).width = 100;
+  sNarr.getCell('A1').value = '客戶文案（自動產生，僅供參考，請 AM 潤飾後使用）';
+  sNarr.getCell('A1').font = { bold: true };
+  const narrLines = (narrative || '（本次無文案）').split('\n');
+  narrLines.forEach((ln, i) => {
+    const cell = sNarr.getCell(`A${i + 3}`);
+    cell.value = ln;
+    cell.alignment = { wrapText: true, vertical: 'top' };
+  });
 
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf as ArrayBuffer);
