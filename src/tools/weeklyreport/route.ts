@@ -12,11 +12,14 @@ import {
   markWeeklyJobPhase,
   markWeeklyJobDone,
   markWeeklyJobFailed,
+  getLatestSnapshot,
+  saveWeeklySnapshot,
 } from '../../core/store.js';
 import { uploadWeeklyXlsx, downloadWeekly } from '../../core/gcs.js';
 import { currentUser } from '../../core/auth.js';
 import { buildReport } from './report.js';
 import { buildXlsx } from './xlsx.js';
+import { summarizeReport, buildNarrative } from './narrative.js';
 import { weeklyFormPage } from './form.js';
 import { type WeeklyReportInput } from './types.js';
 
@@ -149,7 +152,38 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         void markWeeklyJobPhase(job.id, phase);
       };
       const result = await buildReport(input, onPhase);
-      const buffer = await buildXlsx(result, input.buckets, onPhase);
+
+      // 自動文案＋快照（附加價值，失敗不可拖垮報表）
+      let narrative = '';
+      try {
+        onPhase('產生文案中…');
+        const summary = summarizeReport(result, input);
+        const prev = await getLatestSnapshot(summary.accountKey);
+        narrative = buildNarrative(
+          summary,
+          prev ? { ctr: prev.ctr, startDate: prev.startDate, endDate: prev.endDate } : null
+        );
+        await saveWeeklySnapshot({
+          accountKey: summary.accountKey,
+          accountName: summary.accountName,
+          startDate: summary.startDate,
+          endDate: summary.endDate,
+          days: summary.days,
+          imp: summary.imp,
+          click: summary.click,
+          spend: summary.spend,
+          cv: summary.cv,
+          ctr: summary.ctr,
+          cvDetail: summary.cvDetail,
+          topAsset: summary.topAsset,
+          narrativeText: narrative,
+        });
+      } catch (e: any) {
+        app.log.error(e, 'weekly narrative/snapshot failed');
+        narrative = ''; // 退空：Excel 照出、報表不受影響
+      }
+
+      const buffer = await buildXlsx(result, input.buckets, narrative, onPhase);
       const fileName = `dr_weekly_${input.startDate.replace(/-/g, '')}_${input.endDate.replace(/-/g, '')}.xlsx`;
       const gcsObject = await uploadWeeklyXlsx(job.id, fileName, buffer);
       await markWeeklyJobDone(job.id, { gcsObject, fileName, warnings: result.warnings });
