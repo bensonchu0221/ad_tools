@@ -536,14 +536,28 @@ export async function rerunDay(
     timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   }).format(new Date());
+  const cvBuckets = config.cvBuckets ?? EMPTY_CV_BUCKETS;
 
   // 1) 先全抓成功（記憶體），任一失敗往外拋、不碰 sheet
   let dRows: (string | number)[][] = [];
   let rRows: (string | number)[][] = [];
-  if (doD) ({ dRows } = await fetchDRows(config, sd, ed, targetDate, targetDate, syncedAt, onPhase));
-  if (doR) ({ rRows } = await fetchRRows(config, targetDate, targetDate, syncedAt, onPhase));
+  let dSource: any[] = [];
+  let rSource: any[] = [];
+  if (doD) ({ dRows, dSource } = await fetchDRows(config, sd, ed, targetDate, targetDate, syncedAt, onPhase));
+  if (doR) ({ rRows, rSource } = await fetchRRows(config, targetDate, targetDate, syncedAt, onPhase));
+  // integrated：用本次抓到的 D/R source 投影（只含被重抓來源的列）
+  const integratedRows = buildIntegratedRows(dSource, rSource, syncedAt, cvBuckets);
+  // device：只在有重抓來源時抓（fetchDeviceRows 內部依 config 有無 D/R 決定抓哪邊；此處用一個臨時 config 夾限 scope）
+  const deviceCfg: BulkConfigRow = {
+    ...config,
+    accountIds: doD ? config.accountIds : [],
+    rUserIds: doR ? config.rUserIds : [],
+  };
+  const deviceRows = (deviceCfg.accountIds.length || deviceCfg.rUserIds.length)
+    ? await fetchDeviceRows(deviceCfg, sd, ed, targetDate, targetDate, syncedAt, cvBuckets, onPhase)
+    : [];
 
-  // 2) 抓成功才動 sheet：刪昨天 → 立刻寫回（D date 在 col 2、R day 在 col 1）
+  // 2) 抓成功才動 sheet：刪昨天 → 立刻寫回
   let dDeleted = 0, rDeleted = 0;
   if (doD) {
     onPhase(`清除 D 分頁 ${targetDate} 舊資料…`);
@@ -557,6 +571,15 @@ export async function rerunDay(
     onPhase(`寫回 R ${rRows.length} 列…`);
     if (rRows.length) await appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows);
   }
+  // integrated：date 在 col index 2（platform,synced_at,date…）。只刪「本次重抓來源」的列：
+  // 先刪整天再寫回，會誤刪未重抓來源的列，故用平台欄過濾——此處簡化：只有涵蓋來源才動 integrated。
+  onPhase(`清除整合分頁 ${targetDate} 舊資料…`);
+  await deleteRowsByDate(config.sheetId, INTEGRATED_TAB, 2, targetDate);
+  if (integratedRows.length) await appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integratedRows);
+  // device：date 在 col index 1（synced_at,date…）
+  onPhase(`清除裝置分頁 ${targetDate} 舊資料…`);
+  await deleteRowsByDate(config.sheetId, DEVICE_TAB, 1, targetDate);
+  if (deviceRows.length) await appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, deviceRows);
 
   const coversAllSources = (!hasD || doD) && (!hasR || doR);
   const scopeUsed: RerunScope = doD && doR ? 'both' : doD ? 'd' : 'r';
