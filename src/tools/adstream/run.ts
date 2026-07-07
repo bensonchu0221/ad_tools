@@ -4,7 +4,7 @@
 // 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋（D/R 共用同一個進度游標）。
 import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
-import { getDAccountTokenById, listDAccounts } from '../../core/store.js';
+import { getDAccountTokenById, listDAccounts, EMPTY_CV_BUCKETS, type BucketEvent, type CvBuckets } from '../../core/store.js';
 import { appendRows, deleteRowsByDate } from '../../core/gsheets.js';
 import type { BulkConfigRow } from '../../core/store.js';
 
@@ -52,6 +52,47 @@ const R_HEADER_LABEL: Record<string, string> = {
   behavior6: 'cv_complete_registration',
 };
 export const R_SHEET_HEADER = ['synced_at', ...R_COLS.map((c) => R_HEADER_LABEL[c] ?? c)];
+
+// R 友善名 → behaviorK 反查（R_HEADER_LABEL 的反向）。integrated / device 算 R 桶時用：
+// 桶裡的 R event 是友善名（cv_add_to_cart…），實際值在 fetchReport 回應的 behaviorK 欄。
+const R_LABEL_TO_BEHAVIOR: Record<string, string> = Object.fromEntries(
+  Object.entries(R_HEADER_LABEL).map(([behavior, label]) => [label, behavior])
+);
+
+// cv1~4 桶鍵（順序固定）
+export const CV_BUCKET_KEYS = ['cv1', 'cv2', 'cv3', 'cv4'] as const;
+
+// 拖拉事件池（來源固定；UI chip 用同一份）——D 是使用者指定子集（不含 cv_purchase/lead/other）
+export const D_EVENT_POOL = [
+  'cv', 'mcv', 'cv_view_content', 'cv_add_to_cart', 'cv_app_install',
+  'cv_complete_registration', 'cv_add_paymentInfo', 'cv_start_checkout',
+  'cv_search', 'cv_add_to_wishlist',
+];
+export const R_EVENT_POOL = [
+  'cv_view_content', 'cv_complete_checkout', 'cv_checkout', 'cv_bookmark',
+  'cv_add_to_cart', 'cv_search', 'cv_complete_registration',
+];
+
+/**
+ * 算某桶內「D 事件」在一列上的加總。fieldPrefix 供裝置表帶 pc_/mobile_ 前綴
+ * （如桶事件 'cv' → 裝置列取 row['pc_cv']；integrated 用空前綴取 row['cv']）。
+ */
+export function sumBucketD(row: any, bucket: BucketEvent[], fieldPrefix = ''): number {
+  let s = 0;
+  for (const b of bucket) if (b.src === 'D') s += Number(row[`${fieldPrefix}${b.event}`]) || 0;
+  return s;
+}
+
+/** 算某桶內「R 事件」在一列上的加總（友善名 → behaviorK → row[behaviorK]）。 */
+export function sumBucketR(row: any, bucket: BucketEvent[]): number {
+  let s = 0;
+  for (const b of bucket) {
+    if (b.src !== 'R') continue;
+    const k = R_LABEL_TO_BEHAVIOR[b.event];
+    if (k) s += Number(row[k]) || 0;
+  }
+  return s;
+}
 
 // R 抓全欄位用的 dimensions（同週報 fetchRData）；metrics 留空＝API 回全部指標（含 behavior0-6）
 const R_DIMENSIONS = ['day', 'country', 'group_id', 'cr_id', 'cpg_id', 'ad_channel', 'ad_target'];
