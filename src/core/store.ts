@@ -279,7 +279,7 @@ export interface BulkConfigInput {
   rUserIds: string[];
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；可空＝不限
-  cvBuckets: CvBuckets; // cv1~4 拖拉桶
+  cvBuckets?: CvBuckets; // cv1~4 拖拉桶
 }
 
 let bulkSchemaReady = false;
@@ -431,7 +431,7 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
       input.endDate || null,
-      JSON.stringify(input.cvBuckets),
+      JSON.stringify(input.cvBuckets ?? EMPTY_CV_BUCKETS),
       createdBy ?? null,
     ]
   );
@@ -454,7 +454,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
       input.endDate || null,
-      JSON.stringify(input.cvBuckets),
+      JSON.stringify(input.cvBuckets ?? EMPTY_CV_BUCKETS),
       id,
     ]
   );
