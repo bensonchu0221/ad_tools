@@ -161,7 +161,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         const prev = await getLatestSnapshot(summary.accountKey);
         narrative = buildNarrative(
           summary,
-          prev ? { ctr: prev.ctr, startDate: prev.startDate, endDate: prev.endDate } : null
+          prev ? { ctr: prev.ctr, click: prev.click, cv: prev.cv, startDate: prev.startDate, endDate: prev.endDate } : null
         );
         await saveWeeklySnapshot({
           accountKey: summary.accountKey,

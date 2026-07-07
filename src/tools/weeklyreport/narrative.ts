@@ -19,6 +19,12 @@ export interface SnapshotSummary {
     byClickShare: { label: string; share: number } | null; // 點擊占比最高的裝置
     byCtr: { label: string; ctr: number } | null; // CTR 最高的裝置
   };
+  // 延伸洞察（記憶體欄位、不落 DB，比照 device）：客群成效、投放走勢
+  audience: {
+    byClickShare: { label: string; share: number } | null; // 點擊占比最高的客群（D=campaign_name/R=groupname）
+    byCtr: { label: string; ctr: number } | null; // CTR 最高的客群
+  };
+  trend: { firstCtr: number; lastCtr: number } | null; // 報表期間內首週→末週 CTR（≥2 週有曝光才有）
 }
 
 // 轉換事件欄位 → 中文名。D 平台 cv_* 與 R 平台友善名，中文相同者累加時自動合併。
@@ -96,6 +102,32 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
     }
   }
 
+  // 客群：點擊占比最高 + CTR 最高（audiences 可能為空 → 皆 null）。作法比照裝置段。
+  // audiences 的 key：D=campaign_name、R=groupname，直接當客群名顯示。
+  const auds = [...result.audiences.entries()].filter(([, m]) => m.imp > 0 || m.click > 0);
+  const audTotalClick = auds.reduce((s, [, m]) => s + m.click, 0);
+  let audByClickShare: { label: string; share: number } | null = null;
+  let audByCtr: { label: string; ctr: number } | null = null;
+  if (auds.length) {
+    const topClick = [...auds].sort((x, y) => y[1].click - x[1].click)[0];
+    if (audTotalClick > 0 && topClick[1].click > 0) {
+      audByClickShare = { label: topClick[0], share: topClick[1].click / audTotalClick };
+    }
+    const withImp = auds.filter(([, m]) => m.imp > 0);
+    if (withImp.length) {
+      const top = withImp.sort((x, y) => (y[1].click / y[1].imp) - (x[1].click / x[1].imp))[0];
+      audByCtr = { label: top[0], ctr: top[1].click / top[1].imp };
+    }
+  }
+
+  // 走勢：報表期間內分週 CTR（weekly 對齊 periods）。只有 ≥2 週有曝光才算首→末。
+  const weekCtrs = result.weekly.map((m) => (m.imp > 0 ? m.click / m.imp : null));
+  const weekIdx = weekCtrs.map((c, i) => (c !== null ? i : -1)).filter((i) => i >= 0);
+  let trend: { firstCtr: number; lastCtr: number } | null = null;
+  if (result.periods.length >= 2 && weekIdx.length >= 2) {
+    trend = { firstCtr: weekCtrs[weekIdx[0]]!, lastCtr: weekCtrs[weekIdx[weekIdx.length - 1]]! };
+  }
+
   const accountKey = input.dAccountId
     ? input.dAccountId
     : 'r:' + [...input.rUserIds].sort().join(',');
@@ -107,19 +139,24 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
     startDate: input.startDate, endDate: input.endDate, days,
     imp, click, spend, cv, ctr, cvDetail, topAsset,
     device: { byClickShare, byCtr },
+    audience: { byClickShare: audByClickShare, byCtr: audByCtr },
+    trend,
   };
 }
 
 const pct = (x: number) => (x * 100).toFixed(2) + '%';
 const int = (x: number) => Math.round(x).toLocaleString('en-US');
+// 金額：≥100 取整數（CPA 等通常較大），<100 留兩位（CPC/CPM 常是個位數）
+const money = (x: number) => (x >= 100 ? int(x) : x.toFixed(2));
 
 /**
- * 依「有料才寫」組四段文案：概況 / 成長(只比CTR) / 素材 / 裝置。
- * prev=null 或 prev.ctr=0 走無前次分支。
+ * 依「有料才寫」組文案：原四段（概況 / 成長(只比CTR) / 素材 / 裝置）在上，
+ * 下方以「── 延伸洞察 ──」分隔線隔開延伸三段（成本效率 / 客群 / 走勢，有料才寫）。
+ * prev=null 或 prev.ctr=0 走無前次分支；CVR 前次比較需 prev.click/cv。
  */
 export function buildNarrative(
   s: SnapshotSummary,
-  prev: { ctr: number; startDate: string; endDate: string } | null
+  prev: { ctr: number; click: number; cv: number; startDate: string; endDate: string } | null
 ): string {
   const lines: string[] = [];
 
@@ -153,6 +190,48 @@ export function buildNarrative(
   if (s.device.byClickShare) dev.push(`進站流量主要集中於${s.device.byClickShare.label}（占點擊 ${pct(s.device.byClickShare.share)}）`);
   if (s.device.byCtr) dev.push(`各裝置以${s.device.byCtr.label}效率最佳，CTR ${pct(s.device.byCtr.ctr)}`);
   if (dev.length) lines.push(dev.join('；') + '。');
+
+  // ===== 延伸洞察（原內容下方、以分隔線隔開；有料才寫，全空則整塊不出） =====
+  const extra: string[] = [];
+
+  // 5) 成本效率段（有花費或轉換才寫）：CVR/CPA/CPC/CPM，CVR 另掛前次比較
+  if (s.spend > 0 || s.cv > 0) {
+    const parts: string[] = [];
+    if (s.click > 0) parts.push(`CVR ${pct(s.cv / s.click)}`);
+    if (s.spend > 0 && s.cv > 0) parts.push(`CPA ${money(s.spend / s.cv)} 元`);
+    if (s.spend > 0 && s.click > 0) parts.push(`CPC ${money(s.spend / s.click)} 元`);
+    if (s.spend > 0 && s.imp > 0) parts.push(`CPM ${money((s.spend / s.imp) * 1000)} 元`);
+    if (parts.length) {
+      let line = '成本效率：' + parts.join('、') + '。';
+      // CVR 前次比較（只有 CVR 掛，符合 v1「只比率」；prev.click=0 或本次 click=0 則略）
+      if (prev && prev.click > 0 && s.click > 0) {
+        const prevCvr = prev.cv / prev.click;
+        const cvr = s.cv / s.click;
+        if (prevCvr > 0) {
+          const d = (cvr - prevCvr) / prevCvr;
+          line += `（CVR 較前次 ${d >= 0 ? '提升' : '下降'} ${pct(Math.abs(d))}）`;
+        }
+      }
+      extra.push(line);
+    }
+  }
+
+  // 6) 客群成效段（audiences 非空才寫）：占點擊最高 + CTR 最佳
+  const aud: string[] = [];
+  if (s.audience.byClickShare) aud.push(`〈${s.audience.byClickShare.label}〉貢獻最多進站（占點擊 ${pct(s.audience.byClickShare.share)}）`);
+  if (s.audience.byCtr) aud.push(`〈${s.audience.byCtr.label}〉CTR 最佳 ${pct(s.audience.byCtr.ctr)}`);
+  if (aud.length) extra.push('客群成效：' + aud.join('；') + '。');
+
+  // 7) 投放走勢段（≥2 週有曝光才寫）：首週→末週 CTR 方向
+  if (s.trend) {
+    const dir = s.trend.lastCtr - s.trend.firstCtr >= 0 ? '提升' : '下降';
+    extra.push(`投放走勢：CTR 由首週 ${pct(s.trend.firstCtr)} 至末週 ${pct(s.trend.lastCtr)}（${dir}）。`);
+  }
+
+  if (extra.length) {
+    lines.push('── 延伸洞察 ──');
+    lines.push(...extra);
+  }
 
   return lines.join('\n');
 }
