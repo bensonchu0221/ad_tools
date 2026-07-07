@@ -2,7 +2,7 @@
 // Google Sheet 的兩個分頁（D→d_bulk_raw_data、R→r_bulk_raw_data）。
 // 增量規則：每次抓「上次同步日隔天 → 昨天(T-1)」。沒有上次同步日就從設定的回補起始日開始，
 // 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋（D/R 共用同一個進度游標）。
-import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports } from '../../core/popin.js';
+import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports, getCampaignDeviceReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { getDAccountTokenById, listDAccounts, EMPTY_CV_BUCKETS, type BucketEvent, type CvBuckets } from '../../core/store.js';
 import { appendRows, deleteRowsByDate } from '../../core/gsheets.js';
@@ -36,6 +36,25 @@ export const INTEGRATED_HEADER = [
   'ad_id', 'ad_name', 'headline', 'ad_link',
   'imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4',
 ];
+
+// device_summary 分頁（聚合型，每同步日 4 列：PC/Mobile/Tablet/Others；跨帳號加總、cv1~4 用同一組桶）
+export const DEVICE_TAB = 'device_summary';
+export const DEVICE_HEADER = ['synced_at', 'date', 'device', 'imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4'];
+
+// 裝置桶與口徑（沿用 weeklyreport report.ts）：D 只有 pc_/mobile_ 有 base 指標；R device_type 代碼對照
+const DEVICE_ORDER = ['PC', 'Mobile', 'Tablet', 'Others'] as const;
+const D_DEVICE_PREFIX: { prefix: string; label: string }[] = [
+  { prefix: 'pc', label: 'PC' },
+  { prefix: 'mobile', label: 'Mobile' },
+];
+const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5': 'Tablet' };
+const rDeviceBucket = (code: any): string => R_DEVICE_BUCKET[String(code)] ?? 'Others';
+
+// 日期正規化成 YYYY-MM-DD（吃 D 的 date(可能 YYYY-MM-DD/YYYYMMDD) 與 R 的 day(YYYYMMDD)）
+const toYmdDash = (d: any): string => {
+  const c = String(d ?? '').replace(/[-/]/g, '');
+  return c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4, 6)}-${c.slice(6, 8)}` : String(d ?? '');
+};
 
 // R 報表原生欄位＝API 回應的 key（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）。
 // 這份是「取值用」的 key，順序＝寫入 sheet 的欄序；不可改名（改了 r[c] 就取不到值）。前面補 synced_at。
@@ -353,6 +372,95 @@ export function buildIntegratedRows(
   return rows;
 }
 
+type DevAgg = { imp: number; click: number; spend: number; cv1: number; cv2: number; cv3: number; cv4: number };
+const emptyDevAgg = (): DevAgg => ({ imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 });
+
+/**
+ * 聚合裝置列：把 D campaign 層裝置回應（pc_/mobile_ 前綴）與 R device_type 列，
+ * 依 (date, device) 累加 base(imp/click/spend) 與 cv1~4（同一組桶），輸出「日期×裝置」列。
+ * 跨帳號加總（呼叫端把多帳號 dRows 併在一起傳入）。純函式，供 poc 驗。
+ */
+export function buildDeviceRows(
+  deviceInputs: { dRows: any[]; rRows: any[] }, syncedAt: string, cvBuckets: CvBuckets
+): (string | number)[][] {
+  const map = new Map<string, DevAgg>(); // key = date|device
+  const get = (date: string, device: string): DevAgg => {
+    const k = `${date}|${device}`;
+    let a = map.get(k);
+    if (!a) { a = emptyDevAgg(); map.set(k, a); }
+    return a;
+  };
+  // D：每列含 pc_/mobile_ 前綴欄；只累加 PC/Mobile（其餘裝置 D 無 base 指標）
+  for (const row of deviceInputs.dRows) {
+    const date = toYmdDash(row.date);
+    for (const { prefix, label } of D_DEVICE_PREFIX) {
+      const a = get(date, label);
+      a.imp += Number(row[`${prefix}_imp`]) || 0;
+      a.click += Number(row[`${prefix}_click`]) || 0;
+      a.spend += Number(row[`${prefix}_charge`]) || 0;
+      a.cv1 += sumBucketD(row, cvBuckets.cv1, `${prefix}_`);
+      a.cv2 += sumBucketD(row, cvBuckets.cv2, `${prefix}_`);
+      a.cv3 += sumBucketD(row, cvBuckets.cv3, `${prefix}_`);
+      a.cv4 += sumBucketD(row, cvBuckets.cv4, `${prefix}_`);
+    }
+  }
+  // R：device_type 樞紐到裝置桶
+  for (const r of deviceInputs.rRows) {
+    const date = toYmdDash(r.day);
+    const a = get(date, rDeviceBucket(r.device_type));
+    a.imp += Number(r.impression) || 0;
+    a.click += Number(r.click) || 0;
+    a.spend += Number(r.payment_revenue) || 0;
+    a.cv1 += sumBucketR(r, cvBuckets.cv1);
+    a.cv2 += sumBucketR(r, cvBuckets.cv2);
+    a.cv3 += sumBucketR(r, cvBuckets.cv3);
+    a.cv4 += sumBucketR(r, cvBuckets.cv4);
+  }
+  // 輸出：日期升序、裝置固定序 PC/Mobile/Tablet/Others；空桶(全 0)仍輸出以維持每日 4 列一致
+  const dates = [...new Set([...map.keys()].map((k) => k.split('|')[0]))].sort();
+  const rows: (string | number)[][] = [];
+  for (const date of dates) {
+    for (const device of DEVICE_ORDER) {
+      const a = map.get(`${date}|${device}`) ?? emptyDevAgg();
+      rows.push([syncedAt, date, device, a.imp, a.click, a.spend, a.cv1, a.cv2, a.cv3, a.cv4]);
+    }
+  }
+  return rows;
+}
+
+/**
+ * 抓該設定所有 D 帳號的 campaign 層裝置報表（platform_cv=1）＋ R 的 device_type 維度，
+ * 併成 buildDeviceRows 的輸入後聚合成 device_summary 列。⚠️ 這是現行沒抓的額外裝置維度 API。
+ * 任一段失敗往外拋，由 runConfig 原子性接住（四張都不寫、游標不推進）。
+ */
+async function fetchDeviceRows(
+  config: BulkConfigRow, sd: string, ed: string, startDate: string, endDate: string,
+  syncedAt: string, cvBuckets: CvBuckets, onPhase: (p: string) => void
+): Promise<(string | number)[][]> {
+  const dDeviceRows: any[] = [];
+  for (const accountId of config.accountIds) {
+    onPhase(`抓取 D 帳號 ${accountId} 裝置維度（platform_cv）…`);
+    const token = await getDAccountTokenById(accountId);
+    if (!token) throw new Error(`D 帳號 id=${accountId} 找不到 token`);
+    const accessToken = await getAccessToken(token);
+    const campaigns = await getCampaigns(accessToken);
+    const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
+    const rows = await getCampaignDeviceReports(accessToken, campaignIds, sd, ed);
+    dDeviceRows.push(...rows);
+  }
+  const rDeviceRows: any[] = [];
+  if (config.rUserIds.length) {
+    onPhase('抓取 R 裝置維度（device_type）…');
+    const userType = await detectRUserType(config.rUserIds, startDate, endDate);
+    const raw = await fetchReport({
+      userType, userIds: config.rUserIds, startDate, endDate,
+      dimensions: ['day', 'device_type'], metrics: [],
+    });
+    rDeviceRows.push(...raw);
+  }
+  return buildDeviceRows({ dRows: dDeviceRows, rRows: rDeviceRows }, syncedAt, cvBuckets);
+}
+
 /**
  * 執行一次同步。onPhase 用來回報進度（手動執行頁輪詢用）。
  * 原子性：D/R 任一段抓取失敗就整批拋錯——不寫 sheet、呼叫端也不推進 last_synced_date，下次原樣重抓。
@@ -383,7 +491,9 @@ export async function runConfig(
   // ---- 先全部抓取（D + R），全成功才寫，維持原子性 ----
   const { dRows, dSource, accountStats } = await fetchDRows(config, sd, ed, startDate, endDate, syncedAt, onPhase);
   const { rRows, rSource, rStat } = await fetchRRows(config, startDate, endDate, syncedAt, onPhase);
-  const integratedRows = buildIntegratedRows(dSource, rSource, syncedAt, config.cvBuckets ?? EMPTY_CV_BUCKETS);
+  const cvBuckets = config.cvBuckets ?? EMPTY_CV_BUCKETS;
+  const integratedRows = buildIntegratedRows(dSource, rSource, syncedAt, cvBuckets);
+  const deviceRows = await fetchDeviceRows(config, sd, ed, startDate, endDate, syncedAt, cvBuckets, onPhase);
 
   // ---- 全抓成功後才寫入（各自分頁） ----
   if (dRows.length) {
@@ -397,6 +507,10 @@ export async function runConfig(
   if (integratedRows.length) {
     onPhase(`寫入整合分頁 ${INTEGRATED_TAB}（${integratedRows.length} 列）…`);
     await appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integratedRows);
+  }
+  if (deviceRows.length) {
+    onPhase(`寫入裝置分頁 ${DEVICE_TAB}（${deviceRows.length} 列）…`);
+    await appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, deviceRows);
   }
 
   return { skipped: false, startDate, endDate, dRowCount: dRows.length, rRowCount: rRows.length, accountStats, rStat };
