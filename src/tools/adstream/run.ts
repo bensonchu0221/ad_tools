@@ -25,8 +25,17 @@ const CV_COLS = [
 ] as const;
 // ad_name（廣告名稱）：bulk 只有 ad_id、per-ad 才有可讀名稱，故與 cv_* 一起從 per-ad 取、接在 ad_id 後
 // headline（廣告文案標題＝素材 title）：bulk/per-ad 報表端點都沒有，唯有 getAdLists（廣告本身設定）才有，
-// 故另打 getAdLists 建 ad_id→title 對照接回（見 fetchHeadlineMap），接在 ad_name 後
+// 故另打 getAdLists 建 ad_id→title 對照接回（見 fetchAdMetaMap），接在 ad_name 後
 export const SHEET_HEADER = ['account_name', 'synced_at', ...BULK_COLS, 'ad_name', 'headline', ...CV_COLS];
+
+// integrated 分頁（D+R 整合，零額外 API；D 列 ad 層、R 列 cr 層，共同欄對齊 + cv1~4）
+export const INTEGRATED_TAB = 'integrated';
+export const INTEGRATED_HEADER = [
+  'platform', 'synced_at', 'date', 'account_name',
+  'campaign_id', 'campaign_name', 'group_id', 'group_name',
+  'ad_id', 'ad_name', 'headline', 'ad_link',
+  'imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4',
+];
 
 // R 報表原生欄位＝API 回應的 key（實測 35 欄，去掉每列重複的分頁 metadata total_count → 34 欄）。
 // 這份是「取值用」的 key，順序＝寫入 sheet 的欄序；不可改名（改了 r[c] 就取不到值）。前面補 synced_at。
@@ -183,16 +192,19 @@ async function fetchCvDetailMap(
 }
 
 /**
- * 取 ad_id → headline（廣告文案標題＝素材 title）對照。
- * title 只存在於 getAdLists（廣告本身設定），bulk/per-ad 報表端點都沒有，故另打 getAdLists。
- * getAdLists 走 batchFetch 併發、無 per-ad 的 1 req/s 限流，成本低；一個 ad_id（mongo_id）對一個 title。
+ * 取 ad_id → { title(headline), url(廣告連結) } 對照。
+ * title/url 都在 getAdLists（廣告本身設定）回應裡，bulk/per-ad 報表端點都沒有，故另打一次即可拿齊兩者。
+ * 走 batchFetch 併發、無 per-ad 的 1 req/s 限流，成本低；一個 ad_id（mongo_id）對一組 title+url。
  */
-async function fetchHeadlineMap(accessToken: string, campaignIds: string[]): Promise<Map<string, string>> {
+async function fetchAdMetaMap(
+  accessToken: string,
+  campaignIds: string[]
+): Promise<Map<string, { title: string; url: string }>> {
   const ads = await getAdLists(accessToken, campaignIds, { batchSize: 8 });
-  const map = new Map<string, string>();
+  const map = new Map<string, { title: string; url: string }>();
   for (const ad of ads) {
     const aid = String(ad.mongo_id ?? '');
-    if (aid) map.set(aid, ad.title ?? '');
+    if (aid) map.set(aid, { title: ad.title ?? '', url: ad.url ?? '' });
   }
   return map;
 }
@@ -246,15 +258,16 @@ export interface RerunResult {
   coversAllSources: boolean;
 }
 
-/** 抓該設定所有 D 帳號在 [sd,ed] 的 bulk + headline + cv 細分，組成 sheet 列。供 runConfig/rerunDay 共用。 */
+/** 抓該設定所有 D 帳號在 [sd,ed] 的 bulk + adMeta(headline/url) + cv 細分，組成 sheet 列。供 runConfig/rerunDay 共用。 */
 async function fetchDRows(
   config: BulkConfigRow, sd: string, ed: string, startDate: string, endDate: string,
   syncedAt: string, onPhase: (p: string) => void
-): Promise<{ dRows: (string | number)[][]; accountStats: { account: string; rows: number }[] }> {
+): Promise<{ dRows: (string | number)[][]; dSource: any[]; accountStats: { account: string; rows: number }[] }> {
   const nameById = config.accountIds.length
     ? new Map((await listDAccounts()).map((a) => [String(a.accountId), a.accountName]))
     : new Map<string, string>();
   const dRows: (string | number)[][] = [];
+  const dSource: any[] = []; // integrated 用：每列一個 enriched 物件（含桶事件欄位 + 對映欄）
   const accountStats: { account: string; rows: number }[] = [];
   for (const accountId of config.accountIds) {
     const accountName = nameById.get(String(accountId)) ?? accountId;
@@ -265,31 +278,42 @@ async function fetchDRows(
     const campaigns = await getCampaigns(accessToken);
     const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
     const rows = await getAdReportBulk(accessToken, campaignIds, sd, ed);
-    const headlineMap = await fetchHeadlineMap(accessToken, campaignIds);
+    const adMetaMap = await fetchAdMetaMap(accessToken, campaignIds);
     onPhase(`抓取 D 帳號 ${accountName} cv 細分（per-ad，限流較慢）…`);
     const cvMap = await fetchCvDetailMap(accessToken, rows, sd, ed);
     for (const r of rows) {
       const detail: Record<string, any> = cvMap.get(`${dateKey(r.date)}|${r.campaign_id}|${r.ad_id}`) ?? {};
+      const meta = adMetaMap.get(String(r.ad_id));
       dRows.push([
         accountName, syncedAt,
         ...BULK_COLS.map((c) => r[c] ?? ''),
         detail.ad_name ?? '',
-        headlineMap.get(String(r.ad_id)) ?? '',
+        meta?.title ?? '',
         ...CV_COLS.map((c) => detail[c] ?? 0),
       ]);
+      // integrated 投影用的 enriched 列：桶事件欄位（cv/mcv/cv_*）+ 對映欄一應俱全
+      dSource.push({
+        account_name: accountName,
+        date: r.date, campaign_id: r.campaign_id, campaign_name: r.campaign_name,
+        ad_id: r.ad_id, ad_name: detail.ad_name ?? '',
+        headline: meta?.title ?? '', ad_link: meta?.url ?? '',
+        imp: r.imp ?? '', click: r.click ?? '', charge: r.charge ?? '',
+        cv: r.cv ?? 0, mcv: r.mcv ?? 0,
+        ...Object.fromEntries(CV_COLS.map((c) => [c, detail[c] ?? 0])),
+      });
     }
     accountStats.push({ account: accountName, rows: rows.length });
   }
-  return { dRows, accountStats };
+  return { dRows, dSource, accountStats };
 }
 
 /** 抓該設定所有 R 帳號在 [startDate,endDate] 的全欄位報表，組成 sheet 列。供 runConfig/rerunDay 共用。 */
 async function fetchRRows(
   config: BulkConfigRow, startDate: string, endDate: string,
   syncedAt: string, onPhase: (p: string) => void
-): Promise<{ rRows: (string | number)[][]; rStat?: { userType: UserType; rows: number } }> {
+): Promise<{ rRows: (string | number)[][]; rSource: any[]; rStat?: { userType: UserType; rows: number } }> {
   const rRows: (string | number)[][] = [];
-  if (!config.rUserIds.length) return { rRows };
+  if (!config.rUserIds.length) return { rRows, rSource: [] };
   onPhase('偵測 R 帳號類型…');
   const userType = await detectRUserType(config.rUserIds, startDate, endDate);
   onPhase(`抓取 R（${R_TYPE_LABEL[userType]}，${config.rUserIds.join(',')}，${startDate}~${endDate}）…`);
@@ -297,7 +321,36 @@ async function fetchRRows(
     userType, userIds: config.rUserIds, startDate, endDate, dimensions: R_DIMENSIONS, metrics: [],
   });
   for (const r of raw) rRows.push([syncedAt, ...R_COLS.map((c) => r[c] ?? '')]);
-  return { rRows, rStat: { userType, rows: raw.length } };
+  return { rRows, rSource: raw, rStat: { userType, rows: raw.length } };
+}
+
+/**
+ * 把 D source（ad 層）與 R source（cr 層）投影成 integrated 分頁列（共同欄對齊 + cv1~4）。
+ * D 列 cvN=該桶 D 事件加總、R 列 cvN=該桶 R 事件加總；純函式（無 API），供 runConfig / rerunDay 共用。
+ */
+export function buildIntegratedRows(
+  dSource: any[], rSource: any[], syncedAt: string, cvBuckets: CvBuckets
+): (string | number)[][] {
+  const rows: (string | number)[][] = [];
+  for (const s of dSource) {
+    rows.push([
+      'D', syncedAt, s.date ?? '', s.account_name ?? '',
+      s.campaign_id ?? '', s.campaign_name ?? '', '', '', // group_id / group_name：D 無、留空
+      s.ad_id ?? '', s.ad_name ?? '', s.headline ?? '', s.ad_link ?? '',
+      s.imp ?? '', s.click ?? '', s.charge ?? '',
+      ...CV_BUCKET_KEYS.map((k) => sumBucketD(s, cvBuckets[k])),
+    ]);
+  }
+  for (const r of rSource) {
+    rows.push([
+      'R', syncedAt, r.day ?? '', '', // account_name：R 留空
+      r.cpg_id ?? '', r.cpg_name ?? '', r.group_id ?? '', r.group_name ?? '',
+      r.cr_id ?? '', r.cr_name ?? '', r.cr_title ?? '', r.target_info ?? '',
+      r.impression ?? '', r.click ?? '', r.payment_revenue ?? '',
+      ...CV_BUCKET_KEYS.map((k) => sumBucketR(r, cvBuckets[k])),
+    ]);
+  }
+  return rows;
 }
 
 /**
@@ -328,8 +381,9 @@ export async function runConfig(
   }).format(new Date()); // YYYY-MM-DD HH:mm:ss
 
   // ---- 先全部抓取（D + R），全成功才寫，維持原子性 ----
-  const { dRows, accountStats } = await fetchDRows(config, sd, ed, startDate, endDate, syncedAt, onPhase);
-  const { rRows, rStat } = await fetchRRows(config, startDate, endDate, syncedAt, onPhase);
+  const { dRows, dSource, accountStats } = await fetchDRows(config, sd, ed, startDate, endDate, syncedAt, onPhase);
+  const { rRows, rSource, rStat } = await fetchRRows(config, startDate, endDate, syncedAt, onPhase);
+  const integratedRows = buildIntegratedRows(dSource, rSource, syncedAt, config.cvBuckets ?? EMPTY_CV_BUCKETS);
 
   // ---- 全抓成功後才寫入（各自分頁） ----
   if (dRows.length) {
@@ -339,6 +393,10 @@ export async function runConfig(
   if (rRows.length) {
     onPhase(`寫入 R 分頁 ${R_RAW_TAB}（${rRows.length} 列）…`);
     await appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows);
+  }
+  if (integratedRows.length) {
+    onPhase(`寫入整合分頁 ${INTEGRATED_TAB}（${integratedRows.length} 列）…`);
+    await appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integratedRows);
   }
 
   return { skipped: false, startDate, endDate, dRowCount: dRows.length, rRowCount: rRows.length, accountStats, rStat };
