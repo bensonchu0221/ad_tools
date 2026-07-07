@@ -9,7 +9,7 @@ import {
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { currentUser } from '../../core/auth.js';
-import { runConfig, rerunDay, RAW_TAB, R_RAW_TAB, type RerunScope } from './run.js';
+import { runConfig, rerunDay, RAW_TAB, R_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, type RerunScope } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
@@ -54,6 +54,30 @@ const esc = (s: string) =>
 
 // 廣告凝視者特有 CSS（通用元件在 sbui.ts）：已選帳號 chip、Sheet 連結 + 測試按鈕並排、設定名稱兩欄、訊息截斷
 const STYLE = `
+  /* CV 拖拉桶（Slot Board：mono chip pill、格線桶、橘紅 accent hover）
+     cv1~4 各做成獨立「slot 卡」呼應本站版位牆語言；事件池與桶用同一套格線/顏色變數，無新配色 */
+  .cv-pool-label{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--mut);margin-bottom:8px}
+  .cv-chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;
+    background:var(--slot);border:1px solid var(--line);border-radius:5px;padding:5px 9px;margin:0 6px 6px 0;
+    cursor:grab;user-select:none;transition:border-color .15s,box-shadow .15s}
+  .cv-chip:hover{border-color:var(--ink);box-shadow:0 2px 6px rgba(20,22,26,.08)}
+  .cv-chip:active{cursor:grabbing}
+  .cv-chip.dragging{opacity:.35;border-style:dashed}
+  .cv-chip .src{font-size:9px;padding:1px 4px;border-radius:3px}
+  .cv-zone{border:1px solid var(--line);border-radius:6px;padding:10px;min-height:52px;
+    transition:border-color .15s,background .15s}
+  .cv-zone.pool{background:#F1F2F4}
+  .cv-zone.over{border-color:var(--accent);background:rgba(255,84,54,.06)}
+  .cv-buckets{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}
+  @media(max-width:700px){.cv-buckets{grid-template-columns:repeat(2,1fr)}}
+  .cv-slot{background:var(--slot);border:1px solid var(--line);border-top:2px solid var(--line2);
+    border-radius:7px;padding:10px}
+  .cv-bk-label{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.1em;
+    color:var(--accent);margin-bottom:6px;text-transform:uppercase}
+  .cv-bucket{background:#F8FAFC;min-height:72px}
+  .cv-bucket:empty::before{content:'拖放事件到此';display:block;font-family:var(--mono);font-size:10.5px;
+    color:var(--mut);letter-spacing:.03em}
   .achip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;
     background:var(--slot);border:1px solid var(--line);border-radius:999px;padding:4px 10px}
   .achip button{border:none;background:none;color:var(--mut);cursor:pointer;font-size:11px;padding:0;line-height:1}
@@ -220,7 +244,8 @@ export async function registerAdstream(app: FastifyInstance) {
       const accPairs = c.accountIds.map((id) => ({ id: String(id), name: accLabel(id) }));
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
-        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"`;
+        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"` +
+        ` data-cvbuckets="${esc(JSON.stringify(c.cvBuckets ?? { cv1: [], cv2: [], cv3: [], cv4: [] }))}"`;
       // 重抓控制項：D+R 兩來源做下拉（都抓/只D/只R），單一來源做一鍵
       const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0;
       const rerunCtrl =
@@ -325,6 +350,19 @@ export async function registerAdstream(app: FastifyInstance) {
         <input type="text" id="rUserIds" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
       </div>
 
+      <div class="section-label" style="margin:18px 0 16px">CV 整合桶 · integrated / device 共用</div>
+      <div class="field">
+        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R；同桶事件加總）。整合表 D 列只算 D 事件、R 列只算 R 事件；沒拖進桶的不計。</p>
+        <div class="cv-pool-label">事件池</div>
+        <div id="cvPool" class="cv-zone pool" data-bucket="pool"></div>
+        <div class="cv-buckets">
+          <div class="cv-slot"><div class="cv-bk-label">cv1</div><div class="cv-zone cv-bucket" data-bucket="cv1"></div></div>
+          <div class="cv-slot"><div class="cv-bk-label">cv2</div><div class="cv-zone cv-bucket" data-bucket="cv2"></div></div>
+          <div class="cv-slot"><div class="cv-bk-label">cv3</div><div class="cv-zone cv-bucket" data-bucket="cv3"></div></div>
+          <div class="cv-slot"><div class="cv-bk-label">cv4</div><div class="cv-zone cv-bucket" data-bucket="cv4"></div></div>
+        </div>
+      </div>
+
       <div class="field">
         <div class="acts">
           <button class="btn-pri" id="saveBtn" type="button" ${hasDb ? '' : 'disabled'}>儲存設定</button>
@@ -343,6 +381,9 @@ export async function registerAdstream(app: FastifyInstance) {
     const script = `
 (function () {
   var selected = [];
+  var CV_D_EVENTS = ${JSON.stringify(D_EVENT_POOL)};
+  var CV_R_EVENTS = ${JSON.stringify(R_EVENT_POOL)};
+  var cvBucketsInit = {}; // 編輯時填入既有桶
 
   // ---------- 浮動 Toast（GSAP 進出場；fixed 右下，捲動不消失） ----------
   var GS = window.gsap;
@@ -454,6 +495,52 @@ export async function registerAdstream(app: FastifyInstance) {
     });
   }
 
+  // ---------- CV 拖拉桶（拖 + 點擊循環備援：pool→cv1→cv2→cv3→cv4→pool） ----------
+  var cvOrder = ['pool', 'cv1', 'cv2', 'cv3', 'cv4'];
+  var cvDragging = null;
+  function cvChip(src, event) {
+    var el = document.createElement('div');
+    el.className = 'cv-chip'; el.setAttribute('draggable', 'true');
+    el.setAttribute('data-src', src); el.setAttribute('data-event', event);
+    el.innerHTML = event + '<span class="src src-' + src.toLowerCase() + '">' + src + '</span>';
+    el.addEventListener('dragstart', function () { cvDragging = el; el.classList.add('dragging'); });
+    el.addEventListener('dragend', function () { cvDragging = null; el.classList.remove('dragging'); });
+    el.addEventListener('click', function () {
+      var cur = el.parentElement.getAttribute('data-bucket');
+      var next = cvOrder[(cvOrder.indexOf(cur) + 1) % cvOrder.length];
+      document.querySelector('.cv-zone[data-bucket="' + next + '"]').appendChild(el);
+    });
+    return el;
+  }
+  function cvZone(name) { return document.querySelector('.cv-zone[data-bucket="' + name + '"]'); }
+  function cvRenderInit() {
+    // 清空所有桶
+    ['pool', 'cv1', 'cv2', 'cv3', 'cv4'].forEach(function (z) { cvZone(z).innerHTML = ''; });
+    // 先把 init 桶內的放進對應桶，其餘放 pool
+    var placed = {}; // src|event → true
+    ['cv1', 'cv2', 'cv3', 'cv4'].forEach(function (bk) {
+      (cvBucketsInit[bk] || []).forEach(function (it) {
+        if (!it || (it.src !== 'D' && it.src !== 'R')) return;
+        cvZone(bk).appendChild(cvChip(it.src, it.event));
+        placed[it.src + '|' + it.event] = true;
+      });
+    });
+    CV_D_EVENTS.forEach(function (e) { if (!placed['D|' + e]) cvZone('pool').appendChild(cvChip('D', e)); });
+    CV_R_EVENTS.forEach(function (e) { if (!placed['R|' + e]) cvZone('pool').appendChild(cvChip('R', e)); });
+  }
+  document.querySelectorAll('.cv-zone').forEach(function (zone) {
+    zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('over'); });
+    zone.addEventListener('dragleave', function () { zone.classList.remove('over'); });
+    zone.addEventListener('drop', function (e) { e.preventDefault(); zone.classList.remove('over'); if (cvDragging) zone.appendChild(cvDragging); });
+  });
+  function cvBucketValues(name) {
+    return Array.prototype.map.call(
+      document.querySelectorAll('.cv-zone[data-bucket="' + name + '"] [data-event]'),
+      function (el) { return { src: el.getAttribute('data-src'), event: el.getAttribute('data-event') }; }
+    );
+  }
+  cvRenderInit();
+
   // ---------- 複製服務帳號 email ----------
   var saCopy = document.getElementById('saCopy');
   if (saCopy) saCopy.addEventListener('click', function () {
@@ -504,6 +591,7 @@ export async function registerAdstream(app: FastifyInstance) {
     selected = []; renderChips();
     testResult.innerHTML = ''; saveResult.innerHTML = '';
     testedUrl = ''; originalSheetUrl = ''; // 新增：尚未測試、無原連結
+    cvBucketsInit = {}; cvRenderInit();
     document.getElementById('formTitle').textContent = '新增設定';
     cancelBtn.classList.add('hidden');
   }
@@ -521,6 +609,8 @@ export async function registerAdstream(app: FastifyInstance) {
       document.getElementById('endDate').value = b.getAttribute('data-enddate') || '';
       try { selected = JSON.parse(b.getAttribute('data-accounts')) || []; } catch (e) { selected = []; }
       renderChips();
+      try { cvBucketsInit = JSON.parse(b.getAttribute('data-cvbuckets') || '{}'); } catch (e) { cvBucketsInit = {}; }
+      cvRenderInit();
       document.getElementById('formTitle').textContent = '編輯設定 #' + editingId.value;
       cancelBtn.classList.remove('hidden');
       window.scrollTo(0, 0);
@@ -551,6 +641,7 @@ export async function registerAdstream(app: FastifyInstance) {
         name: name, sheetUrl: sheetUrl, backfillStartDate: backfill, endDate: endDate,
         accountIdsJson: JSON.stringify(selected.map(function (s) { return s.id; })),
         rUserIds: rUserIds,
+        cvBucketsJson: JSON.stringify({ cv1: cvBucketValues('cv1'), cv2: cvBucketValues('cv2'), cv3: cvBucketValues('cv3'), cv4: cvBucketValues('cv4') }),
       }),
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d.ok) { location.reload(); }
@@ -676,7 +767,19 @@ export async function registerAdstream(app: FastifyInstance) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(backfillStartDate)) return { error: '回補起始日格式錯誤' };
     if (endDate && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return { error: '終止日格式錯誤' };
     if (endDate && endDate < backfillStartDate) return { error: '終止日不可早於回補起始日' };
-    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, backfillStartDate, endDate: endDate || null } };
+
+    // CV 桶：容錯解析，格式錯視為空桶（不擋存檔）
+    let cvBuckets = { cv1: [], cv2: [], cv3: [], cv4: [] } as any;
+    try {
+      const parsed = JSON.parse(body?.cvBucketsJson ?? '{}');
+      const pick = (arr: any) => Array.isArray(arr)
+        ? arr.filter((x: any) => x && (x.src === 'D' || x.src === 'R') && typeof x.event === 'string')
+              .map((x: any) => ({ src: x.src, event: String(x.event) }))
+        : [];
+      cvBuckets = { cv1: pick(parsed.cv1), cv2: pick(parsed.cv2), cv3: pick(parsed.cv3), cv4: pick(parsed.cv4) };
+    } catch { /* 空桶 */ }
+
+    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, backfillStartDate, endDate: endDate || null, cvBuckets } };
   }
 
   // ---------- 新增 ----------
