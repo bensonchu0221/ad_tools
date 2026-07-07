@@ -177,6 +177,9 @@ async function executeAndRecord(
     if (res.rStat) {
       parts.push(`R ${res.rRowCount} 列（${rTypeLabel[res.rStat.userType] ?? res.rStat.userType}）`);
     }
+    // 整合表／裝置表列數也帶出來：跳過本機驗證直接上線時，操作者靠這個一眼看出兩張新分頁有沒有真的寫入
+    parts.push(`整合 ${res.integratedRowCount} 列`);
+    parts.push(`裝置 ${res.deviceRowCount} 列`);
     const msg = `同步 ${res.startDate}~${res.endDate}：${parts.join('；') || '無資料'}`;
     await markBulkRun(config.id, { status: 'success', message: msg, syncedDate: res.endDate });
     return msg;

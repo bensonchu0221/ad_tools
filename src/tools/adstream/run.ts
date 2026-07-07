@@ -259,6 +259,8 @@ export interface RunResult {
   endDate: string | null;
   dRowCount: number;
   rRowCount: number;
+  integratedRowCount: number; // integrated 分頁寫入列數（觀測用，讓操作者看得到新分頁確實寫入）
+  deviceRowCount: number; // device_summary 分頁寫入列數
   accountStats: { account: string; rows: number }[]; // D 各帳號
   rStat?: { userType: UserType; rows: number }; // R（有設定才有）
 }
@@ -478,7 +480,7 @@ export async function runConfig(
 
   // 區間為空：已同步到上限（昨天或終止日），無事可做——在打任何 API 前早停
   if (startDate > endDate) {
-    return { skipped: true, startDate: null, endDate, dRowCount: 0, rRowCount: 0, accountStats: [] };
+    return { skipped: true, startDate: null, endDate, dRowCount: 0, rRowCount: 0, integratedRowCount: 0, deviceRowCount: 0, accountStats: [] };
   }
 
   const sd = compact(startDate);
@@ -513,7 +515,7 @@ export async function runConfig(
     await appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, deviceRows);
   }
 
-  return { skipped: false, startDate, endDate, dRowCount: dRows.length, rRowCount: rRows.length, accountStats, rStat };
+  return { skipped: false, startDate, endDate, dRowCount: dRows.length, rRowCount: rRows.length, integratedRowCount: integratedRows.length, deviceRowCount: deviceRows.length, accountStats, rStat };
 }
 
 /**
