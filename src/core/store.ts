@@ -226,6 +226,33 @@ export async function deleteToken(id: number): Promise<boolean> {
 
 // ---------- AdStream 設定（adstream_configs；本工具自管） ----------
 
+// CV 拖拉桶：每個桶放若干事件，src 區分 D/R（兩平台事件同名，靠 src 分）。
+// integrated 與 device_summary 兩張分頁共用同一組桶（存在每個任務設定裡）。
+export type BucketEvent = { src: 'D' | 'R'; event: string };
+export interface CvBuckets {
+  cv1: BucketEvent[];
+  cv2: BucketEvent[];
+  cv3: BucketEvent[];
+  cv4: BucketEvent[];
+}
+export const EMPTY_CV_BUCKETS: CvBuckets = { cv1: [], cv2: [], cv3: [], cv4: [] };
+
+/** 容錯解析 cv_buckets JSON：壞資料/null/舊設定一律回空桶（cv1~4 皆 0，不擋流程）。 */
+export function parseCvBuckets(s: any): CvBuckets {
+  try {
+    const o = typeof s === 'string' ? JSON.parse(s) : s;
+    const pick = (arr: any): BucketEvent[] =>
+      Array.isArray(arr)
+        ? arr
+            .filter((x) => x && (x.src === 'D' || x.src === 'R') && typeof x.event === 'string')
+            .map((x) => ({ src: x.src as 'D' | 'R', event: String(x.event) }))
+        : [];
+    return { cv1: pick(o?.cv1), cv2: pick(o?.cv2), cv3: pick(o?.cv3), cv4: pick(o?.cv4) };
+  } catch {
+    return { cv1: [], cv2: [], cv3: [], cv4: [] };
+  }
+}
+
 export interface BulkConfigRow {
   id: number;
   name: string;
@@ -240,6 +267,7 @@ export interface BulkConfigRow {
   lastRunStatus: string | null; // success / error / running
   lastRunMessage: string | null;
   createdBy: string | null; // 建立者 email；舊資料為 null（只有管理者看得到）
+  cvBuckets: CvBuckets; // cv1~4 拖拉桶；舊設定為空桶
   createdAt: string;
 }
 
@@ -251,6 +279,7 @@ export interface BulkConfigInput {
   rUserIds: string[];
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；可空＝不限
+  cvBuckets: CvBuckets; // cv1~4 拖拉桶
 }
 
 let bulkSchemaReady = false;
@@ -271,6 +300,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       last_run_at DATETIME NULL,
       last_run_status VARCHAR(32) NULL,
       last_run_message TEXT NULL,
+      cv_buckets TEXT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) DEFAULT CHARSET=utf8mb4`
   );
@@ -299,6 +329,10 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
   if (!(await hasCol('end_date'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN end_date DATE NULL`);
   }
+  // cv1~4 拖拉桶（integrated / device_summary 共用；舊設定 null＝空桶）
+  if (!(await hasCol('cv_buckets'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN cv_buckets TEXT NULL`);
+  }
   // 舊 account_names 欄保留當 rollback，但放寬可空（不再寫入）；只在仍為 NOT NULL 時改一次
   const [legacyCol] = await p.query(
     `SELECT is_nullable FROM information_schema.columns
@@ -317,7 +351,7 @@ const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_i
   DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
-  last_run_status, last_run_message, created_by,
+  last_run_status, last_run_message, created_by, cv_buckets,
   DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
   FROM adstream_configs`;
 
@@ -345,6 +379,7 @@ function mapBulkRow(r: any): BulkConfigRow {
     lastRunStatus: r.last_run_status,
     lastRunMessage: r.last_run_message,
     createdBy: r.created_by ?? null,
+    cvBuckets: parseCvBuckets(r.cv_buckets),
     createdAt: r.created_at,
   };
 }
@@ -386,8 +421,8 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date, end_date, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date, end_date, cv_buckets, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
@@ -396,6 +431,7 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
       input.endDate || null,
+      JSON.stringify(input.cvBuckets),
       createdBy ?? null,
     ]
   );
@@ -408,7 +444,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
   await ensureBulkSchema(p);
   const [res] = await p.query(
     `UPDATE adstream_configs
-     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, backfill_start_date = ?, end_date = ?
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, backfill_start_date = ?, end_date = ?, cv_buckets = ?
      WHERE id = ?`,
     [
       input.name.trim(),
@@ -418,6 +454,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
       JSON.stringify(input.rUserIds),
       input.backfillStartDate,
       input.endDate || null,
+      JSON.stringify(input.cvBuckets),
       id,
     ]
   );
