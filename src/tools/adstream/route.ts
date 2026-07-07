@@ -502,7 +502,11 @@ export async function registerAdstream(app: FastifyInstance) {
     var el = document.createElement('div');
     el.className = 'cv-chip'; el.setAttribute('draggable', 'true');
     el.setAttribute('data-src', src); el.setAttribute('data-event', event);
-    el.innerHTML = event + '<span class="src src-' + src.toLowerCase() + '">' + src + '</span>';
+    el.textContent = event;
+    var s = document.createElement('span');
+    s.className = 'src src-' + src.toLowerCase();
+    s.textContent = src;
+    el.appendChild(s);
     el.addEventListener('dragstart', function () { cvDragging = el; el.classList.add('dragging'); });
     el.addEventListener('dragend', function () { cvDragging = null; el.classList.remove('dragging'); });
     el.addEventListener('click', function () {
@@ -773,8 +777,10 @@ export async function registerAdstream(app: FastifyInstance) {
     try {
       const parsed = JSON.parse(body?.cvBucketsJson ?? '{}');
       const pick = (arr: any) => Array.isArray(arr)
-        ? arr.filter((x: any) => x && (x.src === 'D' || x.src === 'R') && typeof x.event === 'string')
-              .map((x: any) => ({ src: x.src, event: String(x.event) }))
+        ? arr.filter((x: any) => x && typeof x?.event === 'string' &&
+            ((x.src === 'D' && D_EVENT_POOL.includes(x.event)) ||
+             (x.src === 'R' && R_EVENT_POOL.includes(x.event))))
+              .map((x: any) => ({ src: x.src as 'D' | 'R', event: String(x.event) }))
         : [];
       cvBuckets = { cv1: pick(parsed.cv1), cv2: pick(parsed.cv2), cv3: pick(parsed.cv3), cv4: pick(parsed.cv4) };
     } catch { /* 空桶 */ }
