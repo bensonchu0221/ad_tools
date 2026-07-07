@@ -288,7 +288,7 @@ export async function registerAdstream(app: FastifyInstance) {
 
     const body = `
     <div class="crumb"><a href="/">// tools</a> / adstream</div>
-    <h1>廣告凝視者</h1>
+    <h1>Report Hub</h1>
     <p class="sub">把多個 D 帳號 / R(Rixbee) 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」兩個分頁（append）。D、R 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
 
     ${hasDb ? '' : '<div class="msg msg-warn" style="margin-top:18px">未設定資料庫，無法新增設定</div>'}
@@ -730,7 +730,7 @@ export async function registerAdstream(app: FastifyInstance) {
 })();`;
 
     reply.type('text/html').send(
-      sbPage({ title: '廣告凝視者 · Slot Board', active: 'adstream', body, style: STYLE, script, width: '1120px' })
+      sbPage({ title: 'Report Hub · Slot Board', active: 'adstream', body, style: STYLE, script, width: '1120px' })
     );
   });
 

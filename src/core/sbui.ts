@@ -8,7 +8,7 @@ import { FONT_FACES } from './fonts-face.js';
 const NAV: { key: string; label: string; href: string }[] = [
   { key: 'adpreview', label: '廣告預覽', href: '/tools/adpreview' },
   { key: 'weeklyreport', label: 'D&R 週報', href: '/tools/weeklyreport' },
-  { key: 'adstream', label: '廣告凝視者', href: '/tools/adstream' },
+  { key: 'adstream', label: 'Report Hub', href: '/tools/adstream' },
 ];
 
 // 共用 CSS：base（變數/字體/版面/topbar/分頁）＋ 通用表單元件（卡片/輸入/可搜尋下拉/訊息/表格/狀態）。
