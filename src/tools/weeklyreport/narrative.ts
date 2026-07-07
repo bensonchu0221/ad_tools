@@ -69,10 +69,14 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
   addEvents(result.dRaw as any);
   addEvents(result.rRaw as any);
 
-  // 最佳素材：assets 已按 spend 降序
-  const a = result.assets[0];
+  // 最佳素材：取 CTR（click/imp）最高者（僅計有曝光的素材）。
+  // 注意 result.assets 是按 spend 降序，直接取 [0] 會誤把「花費最高」當「CTR 最高」。
+  const withImpAssets = result.assets.filter((x) => x.imp > 0);
+  const a = withImpAssets.length
+    ? withImpAssets.sort((x, y) => (y.click / y.imp) - (x.click / x.imp))[0]
+    : null;
   const topAsset = a
-    ? { title: a.asset_title || '(無標題)', imp: a.imp, click: a.click, ctr: a.imp > 0 ? a.click / a.imp : 0 }
+    ? { title: a.asset_title || '(無標題)', imp: a.imp, click: a.click, ctr: a.click / a.imp }
     : null;
 
   // 裝置：點擊占比最高 + CTR 最高（deviceAgg 可能為空 → 皆 null）
