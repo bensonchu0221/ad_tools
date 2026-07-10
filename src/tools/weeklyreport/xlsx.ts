@@ -272,6 +272,7 @@ export async function buildXlsx(
     'CompleteCheckout', 'AddToCart', 'ViewContent', 'Checkout', 'Bookmark', 'Search', 'CompleteRegistration',
     'cv_view_content', 'cv_add_to_cart', 'cv_app_install', 'cv_complete_registration',
     'cv_add_paymentInfo', 'cv_start_checkout', 'cv_search', 'cv_add_to_wishlist',
+    'conv_interest', 'conv_decision', 'conv_buy',
   ];
   s5.addRow(RAW_HEADERS);
 
@@ -287,6 +288,7 @@ export async function buildXlsx(
       0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
       v.cv_view_content ?? 0, v.cv_add_to_cart ?? 0, v.cv_app_install ?? 0, v.cv_complete_registration ?? 0,
       v.cv_add_paymentInfo ?? 0, v.cv_start_checkout ?? 0, v.cv_search ?? 0, v.cv_add_to_wishlist ?? 0,
+      0, 0, 0, // MGID 專屬轉換欄補 0
     ]);
   }
   for (const v of result.rRaw) {
@@ -296,6 +298,19 @@ export async function buildXlsx(
       v.AdAssets, v.assettitle, v.assetimage, v.Impressions, v.Clicks, v.Spend, cv, mcv,
       v.CompleteCheckout, v.AddToCart, v.ViewContent, v.Checkout, v.Bookmark, v.Search, v.CompleteRegistration,
       0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
+      0, 0, 0, // MGID 專屬轉換欄補 0
+    ]);
+  }
+  // MGID 列（platform='M'）：teaser_title→assetname/ad_title、teaser_image→ad_image；
+  // D/R 專屬事件欄補 0，尾三欄填 conv_interest/decision/buy（Raw 無損）。
+  for (const v of result.mRaw) {
+    const [cv, mcv] = calcConversions(v, buckets);
+    s5.addRow([
+      'M', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', v.campaign_id ?? '', v.campaign_name ?? '', '', v.teaser_title ?? '',
+      '', v.teaser_title ?? '', v.teaser_image ?? '', v.imp ?? 0, v.click ?? 0, v.spend ?? 0, cv, mcv,
+      0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
+      0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
+      v.conv_interest ?? 0, v.conv_decision ?? 0, v.conv_buy ?? 0, // MGID 三階轉換
     ]);
   }
 

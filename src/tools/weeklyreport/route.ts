@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import {
   dbAvailable,
   listDAccounts,
+  listMgidAccounts,
   enqueueWeeklyJob,
   listWeeklyJobs,
   getWeeklyJob,
@@ -46,6 +47,12 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     reply.send(rows);
   });
 
+  // ---------- MGID 帳號清單（顯示 client_name、值存 api_client_id） ----------
+  app.get(`${BASE_PATH}/mgid-accounts`, async (_req, reply) => {
+    const rows = await listMgidAccounts();
+    reply.send(rows.map((r) => ({ apiClientId: r.apiClientId, clientName: r.clientName })));
+  });
+
   // ---------- 入列一份週報（背景由 cron worker 序列執行） ----------
   app.post(`${BASE_PATH}/generate`, async (req, reply) => {
     if (!dbAvailable()) return reply.send({ ok: false, error: '未設定資料庫，無法使用佇列' });
@@ -53,7 +60,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     const account = (b.account ?? '').trim(); // account_id
     const accountName = (b.accountName ?? '').trim(); // 顯示用
     const rAid = (b.rAid ?? '').trim();
-    if (!account && !rAid) return reply.send({ ok: false, error: 'D 帳號與 Rixbee Account ID 至少填一個' });
+    const mgidRaw = (b.mgidClientIds ?? '').trim();
+    const mgidClientIds = mgidRaw ? mgidRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    if (!account && !rAid && !mgidClientIds.length) return reply.send({ ok: false, error: 'D 帳號、Rixbee Account ID、MGID 帳號至少填一個' });
 
     let buckets: WeeklyReportInput['buckets'];
     try {
@@ -88,10 +97,11 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       // campaign end_date 過濾門檻固定 3 個月（保守值）：UI 已移除此旋鈕，
       // 賭「end_date 都可靠」風險不值得（end_date 過期但重啟投放的 campaign 設小會誤剪），故不再用最激進的 1
       expireMonths: 3,
+      mgidClientIds,
     };
 
-    // label：帳號（D 名 / R ids）＋日期區間，清單顯示用
-    const who = accountName || (input.rUserIds.length ? `R:${input.rUserIds.join(',')}` : '');
+    // label：帳號（D 名 / R ids / M ids）＋日期區間，清單顯示用
+    const who = accountName || (input.rUserIds.length ? `R:${input.rUserIds.join(',')}` : '') || (mgidClientIds.length ? `M:${mgidClientIds.join(',')}` : '');
     const label = `${who} ${startDate}~${endDate}`.trim();
     const jobId = await enqueueWeeklyJob({
       label,
@@ -184,7 +194,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       }
 
       const buffer = await buildXlsx(result, input.buckets, narrative, onPhase);
-      const fileName = `dr_weekly_${input.startDate.replace(/-/g, '')}_${input.endDate.replace(/-/g, '')}.xlsx`;
+      const fileName = `weekly_${input.startDate.replace(/-/g, '')}_${input.endDate.replace(/-/g, '')}.xlsx`;
       const gcsObject = await uploadWeeklyXlsx(job.id, fileName, buffer);
       await markWeeklyJobDone(job.id, { gcsObject, fileName, warnings: result.warnings });
       reply.send({ ok: true, jobId: job.id, fileName });

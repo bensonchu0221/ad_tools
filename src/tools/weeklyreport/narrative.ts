@@ -48,6 +48,10 @@ const EVENT_LABELS: Record<string, string> = {
   Bookmark: '加入書籤',
   Search: '搜尋',
   CompleteRegistration: '完成註冊',
+  // MGID 三階漏斗
+  conv_interest: '興趣',
+  conv_decision: '決策',
+  conv_buy: '購買',
 };
 
 // 裝置英文鍵 → 中文（deviceAgg 的 key 是 PC/Mobile/Tablet/Others）
@@ -74,6 +78,7 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
   };
   addEvents(result.dRaw as any);
   addEvents(result.rRaw as any);
+  addEvents(result.mRaw as any);
 
   // 最佳素材：取 CTR（click/imp）最高者（僅計有曝光的素材）。
   // 注意 result.assets 是按 spend 降序，直接取 [0] 會誤把「花費最高」當「CTR 最高」。
@@ -130,8 +135,12 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
 
   const accountKey = input.dAccountId
     ? input.dAccountId
-    : 'r:' + [...input.rUserIds].sort().join(',');
-  const accountName = input.dAccountName || (input.rUserIds.length ? 'R:' + input.rUserIds.join(',') : '');
+    : input.rUserIds.length
+      ? 'r:' + [...input.rUserIds].sort().join(',')
+      : 'm:' + [...(input.mgidClientIds ?? [])].sort().join(',');
+  const accountName = input.dAccountName
+    || (input.rUserIds.length ? 'R:' + input.rUserIds.join(',') : '')
+    || (input.mgidClientIds?.length ? 'M:' + input.mgidClientIds.join(',') : '');
   const days = Math.round((Date.parse(input.endDate) - Date.parse(input.startDate)) / 86400000) + 1;
 
   return {

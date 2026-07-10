@@ -1,6 +1,6 @@
 // D&R 週報表單頁渲染（Slot Board）。由 route.ts 的 GET BASE_PATH 使用；basePath 讓表單 fetch 指向同工具端點。
 import { sbPage } from '../../core/sbui.js';
-import { R_EVENTS, D_EVENTS } from './types.js';
+import { R_EVENTS, D_EVENTS, M_EVENTS } from './types.js';
 
 // 週報特有 CSS（通用元件在 sbui.ts）：事件 chip + 拖拉分桶 + 日期列
 const STYLE = `
@@ -26,15 +26,16 @@ const STYLE = `
 
 export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: number): string {
   // 事件 chip：mono pill，可拖；右側小方塊標來源 D/R
-  const chip = (v: string, label: string, src: 'R' | 'D') =>
+  const chip = (v: string, label: string, src: 'R' | 'D' | 'M') =>
     `<div class="chip" draggable="true" data-event="${v}">${label}<span class="src src-${src.toLowerCase()}">${src}</span></div>`;
   const dChips = D_EVENTS.map((e) => chip(e.value, e.label, 'D')).join('');
   const rChips = R_EVENTS.map((e) => chip(e.value, e.label, 'R')).join('');
+  const mChips = M_EVENTS.map((e) => chip(e.value, e.label, 'M')).join('');
 
   const body = `
     <div class="crumb"><a href="/">// tools</a> / weekly</div>
-    <h1>D&amp;R 週報產生器</h1>
-    <p class="sub">抓取 Discovery（D）與 Rixbee（R）兩邊報表整合後產出 Excel（日報／週報／素材／受眾／Raw）。D、R 至少擇一填寫。</p>
+    <h1>整合週報產生器</h1>
+    <p class="sub">抓取 Discovery（D）、Rixbee（R）、MGID（M）三平台報表整合後產出 Excel（日報／週報／素材／受眾／裝置／Raw）。D、R、M 至少擇一填寫。</p>
 
     <div class="section-label">設定 · config</div>
     <form id="wrForm">
@@ -56,10 +57,22 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         </div>
 
         <div class="field">
+          <div class="flabel"><span class="src src-m">M</span><span class="nm">MGID 帳號</span><span class="hint">可多選，點選加入</span></div>
+          <div id="mgidChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+          <div class="combo">
+            <input type="text" id="mgidSearch" placeholder="搜尋 MGID 帳號…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
+            <input type="hidden" name="mgidClientIds" id="mgidValue">
+            <div id="mgidList" class="combo-list"></div>
+          </div>
+          <div class="note">找不到帳號？<a href="/tools/tokens#mgid" target="_blank">管理 MGID token →</a></div>
+          ${hasDb ? '' : '<div class="warn">未設定資料庫，MGID 帳號暫不可用</div>'}
+        </div>
+
+        <div class="field">
           <div class="flabel"><span class="nm">轉換事件對應</span></div>
           <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進下方的 CV / MCV / MCV2 框（或點一下事件循環切換位置）。沒分配的事件不計入轉換。</p>
           <div class="pool-label">事件池</div>
-          <div id="eventPool" class="dnd-zone pool" data-bucket="pool">${dChips}${rChips}</div>
+          <div id="eventPool" class="dnd-zone pool" data-bucket="pool">${dChips}${rChips}${mChips}</div>
           <div class="buckets">
             <div><div class="bk-label">CV</div><div class="dnd-zone bucket" data-bucket="cv"></div></div>
             <div><div class="bk-label">MCV</div><div class="dnd-zone bucket" data-bucket="mcv"></div></div>
@@ -138,6 +151,51 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     });
   }
 
+  // ---------- MGID 帳號可搜尋多選 ----------
+  var mSearch = document.getElementById('mgidSearch');
+  var mHidden = document.getElementById('mgidValue');
+  var mList = document.getElementById('mgidList');
+  var mChipBox = document.getElementById('mgidChips');
+  var mgidAll = [];
+  var mgidSel = []; // {apiClientId, clientName}
+
+  function mgidSync() {
+    mHidden.value = mgidSel.map(function (x) { return x.apiClientId; }).join(',');
+    mChipBox.innerHTML = mgidSel.map(function (x) {
+      return '<span class="chip" style="cursor:default">' + x.clientName +
+        '<span data-rm="' + x.apiClientId + '" style="cursor:pointer;font-weight:700">×</span></span>';
+    }).join('');
+  }
+  function mgidRender(kw) {
+    var k = kw.toLowerCase();
+    var chosen = {}; mgidSel.forEach(function (x) { chosen[x.apiClientId] = 1; });
+    var hits = mgidAll.filter(function (a) {
+      return !chosen[a.apiClientId] && a.clientName.toLowerCase().indexOf(k) !== -1;
+    }).slice(0, 50);
+    mList.innerHTML = hits.map(function (a) {
+      return '<a data-id="' + a.apiClientId + '" data-name="' + a.clientName.replace(/"/g, '&quot;') + '">' + a.clientName + '</a>';
+    }).join('') || '<div class="empty">無符合帳號</div>';
+  }
+  if (mSearch && !mSearch.disabled) {
+    fetch('${basePath}/mgid-accounts').then(function (r) { return r.json(); }).then(function (d) { mgidAll = d; });
+    mSearch.addEventListener('focus', function () { mList.classList.add('open'); mgidRender(mSearch.value.trim()); });
+    mSearch.addEventListener('input', function () { mList.classList.add('open'); mgidRender(mSearch.value.trim()); });
+    mSearch.addEventListener('blur', function () { setTimeout(function () { mList.classList.remove('open'); }, 120); });
+    mList.addEventListener('mousedown', function (e) {
+      var t = e.target.closest('a[data-id]');
+      if (!t) return;
+      e.preventDefault();
+      mgidSel.push({ apiClientId: t.getAttribute('data-id'), clientName: t.getAttribute('data-name') });
+      mSearch.value = ''; mgidSync(); mgidRender(''); mSearch.blur();
+    });
+    mChipBox.addEventListener('click', function (e) {
+      var rm = e.target.getAttribute('data-rm');
+      if (!rm) return;
+      mgidSel = mgidSel.filter(function (x) { return x.apiClientId !== rm; });
+      mgidSync();
+    });
+  }
+
   // ---------- 拖拉分桶（點擊備援：池→CV→MCV→MCV2→池 循環） ----------
   var dragging = null;
   var zones = Array.prototype.slice.call(document.querySelectorAll('.dnd-zone'));
@@ -178,16 +236,17 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     var account = (hidden && hidden.value) || '';
     var accountName = (search && !search.disabled ? search.value.trim() : '');
     var rAid = document.getElementById('rAid').value.trim();
+    var mgidClientIds = (mHidden && mHidden.value) || '';
     var startDate = document.getElementById('startDate').value;
     var endDate = document.getElementById('endDate').value;
-    if (!account && !rAid) { statusBox.innerHTML = '<div class="msg msg-warn">D 帳號與 Rixbee Account ID 至少填一個</div>'; return; }
+    if (!account && !rAid && !mgidClientIds) { statusBox.innerHTML = '<div class="msg msg-warn">D 帳號、Rixbee Account ID、MGID 帳號至少填一個</div>'; return; }
     if (!startDate || !endDate) { statusBox.innerHTML = '<div class="msg msg-warn">請選擇日期範圍</div>'; return; }
     var days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
     if (days <= 0) { statusBox.innerHTML = '<div class="msg msg-warn">結束日不可早於開始日</div>'; return; }
     if (days > 31) { statusBox.innerHTML = '<div class="msg msg-warn">日期範圍最多 31 天</div>'; return; }
 
     var body = new URLSearchParams({
-      account: account, accountName: accountName, rAid: rAid,
+      account: account, accountName: accountName, rAid: rAid, mgidClientIds: mgidClientIds,
       bucketsJson: JSON.stringify({ cv: bucketValues('cv'), mcv: bucketValues('mcv'), mcv2: bucketValues('mcv2') }),
       startDate: startDate, endDate: endDate, weekStart: document.getElementById('weekStart').value,
     });
@@ -235,5 +294,5 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
   setInterval(loadJobs, 4000);
 })();`;
 
-  return sbPage({ title: 'D&R 週報產生器 · Slot Board', active: 'weeklyreport', body, style: STYLE, script });
+  return sbPage({ title: '整合週報產生器 · Slot Board', active: 'weeklyreport', body, style: STYLE, script });
 }
