@@ -61,7 +61,7 @@ const SB_CSS = `
   .flabel .hint{font-size:12px;color:var(--mut)}
   .src{display:inline-flex;align-items:center;justify-content:center;font-family:var(--mono);
     font-size:9.5px;font-weight:600;line-height:1;padding:3px 5px;border-radius:3px;color:#fff}
-  .src-d{background:var(--ink)} .src-r{background:var(--slate)}
+  .src-d{background:var(--ink)} .src-r{background:var(--slate)} .src-m{background:#5B54D6}
   input[type=text],input[type=date],input[type=number],input:not([type]),select,textarea{width:100%;font-family:var(--body);
     font-size:14px;color:var(--ink);background:var(--slot);border:1px solid var(--line);
     border-radius:5px;padding:10px 12px;outline:none;transition:border-color .15s,box-shadow .15s}

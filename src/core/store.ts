@@ -229,6 +229,40 @@ export async function getMgidTokenById(apiClientId: string): Promise<string | nu
   return r ? r.token : null;
 }
 
+// MGID CRUD：全手動維護（無鏡像、無 source 守衛，皆可編輯／刪除）。
+// 只收串接必要的三欄（client_name / api_client_id / token）；client_id(98xxxx) 純顯示、API 用不到，不經表單。
+export async function addMgidToken(input: { clientName: string; apiClientId: string; token: string }): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  // api_client_id 唯一：重複＝覆蓋 name/token（不動既有 client_id）
+  await p.query(
+    `INSERT INTO ${TOKENS_DB}.mgid_tokens (api_client_id, client_name, token, source) VALUES (?, ?, ?, 'adtools')
+     ON DUPLICATE KEY UPDATE client_name = VALUES(client_name), token = VALUES(token)`,
+    [input.apiClientId.trim(), input.clientName.trim(), input.token.trim()]
+  );
+}
+
+export async function updateMgidToken(id: number, input: { clientName: string; apiClientId: string; token?: string }): Promise<boolean> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const sets = ['client_name = ?', 'api_client_id = ?'];
+  const params: any[] = [input.clientName.trim(), input.apiClientId.trim()];
+  if (input.token && input.token.trim()) {
+    sets.push('token = ?'); // 留空＝不變更 token
+    params.push(input.token.trim());
+  }
+  params.push(id);
+  const [res] = await p.query(`UPDATE ${TOKENS_DB}.mgid_tokens SET ${sets.join(', ')} WHERE id = ?`, params);
+  return (res as any).affectedRows > 0;
+}
+
+export async function deleteMgidToken(id: number): Promise<boolean> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [res] = await p.query(`DELETE FROM ${TOKENS_DB}.mgid_tokens WHERE id = ?`, [id]);
+  return (res as any).affectedRows > 0;
+}
+
 export async function addToken(input: { accountName: string; token: string; accountId?: string }): Promise<void> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');

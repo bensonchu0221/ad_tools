@@ -359,7 +359,7 @@ export async function registerAdstream(app: FastifyInstance) {
           <div id="accList" class="combo-list"></div>
         </div>
         <div id="chips" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>
-        <div class="note">找不到帳號或 token？<a href="/tools/adpreview/tokens" target="_blank">管理 D 帳號 token →</a></div>
+        <div class="note">找不到帳號或 token？<a href="/tools/tokens#d" target="_blank">管理 D 帳號 token →</a></div>
       </div>
 
       <div class="field">

@@ -15,8 +15,10 @@ interface SlotTool {
 // 只處理 & → &amp;，避免 code（如 D&R）破壞 HTML（內容皆為內部固定字串，無其它注入風險）
 const esc = (s: string) => s.replace(/&/g, '&amp;');
 
-// 底部快捷列：常用外部站點一鍵開新分頁（沿用舊首頁右下 FAB 的同一組連結）
+// 底部快捷列：站內 token 管理（同分頁）＋ 常用外部站點（開新分頁，沿用舊首頁右下 FAB）
 const QUICK_LINKS = [
+  { label: 'D token 管理', href: '/tools/tokens#d', internal: true },
+  { label: 'MGID token 管理', href: '/tools/tokens#mgid', internal: true },
   { label: 'timeoff', href: 'https://timeoff.pacnexus.net/' },
   { label: 'lunchbox', href: 'https://lunchbox.pacnexus.net/' },
   { label: 'cmp', href: 'https://cmp.pacnexus.net/cmp' },
@@ -116,7 +118,9 @@ export function renderSlotBoard(tools: SlotTool[]): string {
     <div class="ext">${external.map(ext).join('')}
     </div>` : ''}
     <div class="section-label" style="margin-top:40px">快捷 · quick access</div>
-    <div class="quick">${QUICK_LINKS.map((q) => `<a href="${q.href}" target="_blank">${q.label} <span>↗</span></a>`).join('')}</div>
+    <div class="quick">${QUICK_LINKS.map((q) => q.internal
+        ? `<a href="${q.href}">${q.label} <span>→</span></a>`
+        : `<a href="${q.href}" target="_blank">${q.label} <span>↗</span></a>`).join('')}</div>
     <footer>popin ad-ops · asia-east1</footer>`;
 
   return sbPage({ title: '廣告投放工具台 · Slot Board', body, style: STYLE, width: '1080px' });

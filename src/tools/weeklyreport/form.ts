@@ -46,7 +46,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
             <input type="hidden" name="account" id="accValue">
             <div id="accList" class="combo-list"></div>
           </div>
-          <div class="note">找不到帳號或 token？<a href="/tools/adpreview/tokens" target="_blank">管理 D 帳號 token →</a></div>
+          <div class="note">找不到帳號或 token？<a href="/tools/tokens#d" target="_blank">管理 D 帳號 token →</a></div>
           ${hasDb ? '' : '<div class="warn">未設定資料庫，D 帳號暫不可用（仍可只跑 R）</div>'}
         </div>
 

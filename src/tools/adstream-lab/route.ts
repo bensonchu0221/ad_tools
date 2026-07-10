@@ -541,7 +541,7 @@ export async function registerAdstreamLab(app: FastifyInstance) {
               <div id="accList" class="combo-list"></div>
             </div>
             <div id="chips" class="chips"></div>
-            <div class="note">找不到帳號或 token？<a href="/tools/adpreview/tokens" target="_blank">管理 D 帳號 token →</a></div>
+            <div class="note">找不到帳號或 token？<a href="/tools/tokens#d" target="_blank">管理 D 帳號 token →</a></div>
           </div>
           <div style="margin-top:18px">
             <label class="fl"><span class="sig sig-r">R</span>&nbsp; rixbee account id</label>
