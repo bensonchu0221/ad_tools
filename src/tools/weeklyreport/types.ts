@@ -13,6 +13,7 @@ export interface WeeklyReportInput {
   endDate: string; // YYYY-MM-DD
   weekStart: number; // 週起始日 1(一)~7(日)
   expireMonths: number; // campaign 結束超過 N 個月不抓報表（1/3/6）
+  mgidClientIds: string[]; // MGID api_client_id 陣列（空陣列 = 不抓 M）
 }
 
 /**
@@ -38,6 +39,13 @@ export const D_EVENTS = [
   { value: 'cv_start_checkout', label: '開始結帳' },
   { value: 'cv_search', label: '搜索/查詢' },
   { value: 'cv_add_to_wishlist', label: '加入願望清單' },
+] as const;
+
+/** MGID 三階漏斗事件 chip（.src-m 靛紫；value 對應 MRow 上的欄位名，供 calcConversions 比對） */
+export const M_EVENTS = [
+  { value: 'conv_interest', label: '興趣' },
+  { value: 'conv_decision', label: '決策' },
+  { value: 'conv_buy', label: '購買' },
 ] as const;
 
 /** rixbee API behaviorN → 友善欄位名（照舊 rixbee.php 對應） */
@@ -74,6 +82,23 @@ export interface RRow {
   Bookmark: number;
   Search: number;
   CompleteRegistration: number;
+}
+
+/** MGID 標準化列（teaser≈ad 層）。轉換欄名與 M_EVENTS.value 一致，供 calcConversions 累加。 */
+export interface MRow {
+  date: string; // YYYY-MM-DD（同 D 的 dash 格式）
+  account_name: string; // MGID 帳號名（client_name）
+  campaign_id: string;
+  campaign_name: string; // 受眾分析 key
+  teaser_id: string;
+  teaser_title: string; // 素材文案（≈headline）
+  teaser_image: string; // imageLink → 素材分析縮圖
+  imp: number;
+  click: number;
+  spend: number;
+  conv_interest: number;
+  conv_decision: number;
+  conv_buy: number;
 }
 
 /** D 報表列（date_reporting 回傳 + campaign/ad 補欄位，照舊 discovery.php enrich） */
@@ -135,4 +160,5 @@ export interface ReportResult {
   deviceRaw: DeviceRawRow[]; // 裝置層原始寬列（raw_data_device 工作表）；D+R 各列、每列一個 平台×日期×campaign
   dRaw: DRow[];
   rRaw: RRow[];
+  mRaw: MRow[]; // MGID 標準化列（Raw_Data 的 M 列來源）
 }

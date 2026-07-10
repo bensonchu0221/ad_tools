@@ -88,6 +88,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       // campaign end_date 過濾門檻固定 3 個月（保守值）：UI 已移除此旋鈕，
       // 賭「end_date 都可靠」風險不值得（end_date 過期但重啟投放的 campaign 設小會誤剪），故不再用最激進的 1
       expireMonths: 3,
+      mgidClientIds: [],
     };
 
     // label：帳號（D 名 / R ids）＋日期區間，清單顯示用

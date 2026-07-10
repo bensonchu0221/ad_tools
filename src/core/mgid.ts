@@ -29,6 +29,7 @@ export interface MgidReportRow {
   teaserId: string;
   teaserTitle: string; // teaser title＝對齊 D 的 headline
   teaserUrl: string;
+  teaserImage: string; // teaser imageLink → 素材分析縮圖（對齊 D 的 ad_image）
   adRequests: number;
   imp: number;
   click: number;
@@ -160,11 +161,11 @@ async function fetchCampaignNameMap(client: MgidClient): Promise<Record<string, 
   return fetchListPaged(client, 'campaigns', (c) => c?.name ?? '');
 }
 
-/** 取 client 的 teaserId→{title,url} 對照（分頁把全部撈齊）；title 對齊 D 的 headline。 */
+/** 取 client 的 teaserId→{title,url,image} 對照（分頁把全部撈齊）；title 對齊 D 的 headline、image 進素材分析。 */
 async function fetchTeaserMetaMap(
   client: MgidClient
-): Promise<Record<string, { title: string; url: string }>> {
-  return fetchListPaged(client, 'teasers', (t) => ({ title: t?.title ?? '', url: t?.url ?? '' }));
+): Promise<Record<string, { title: string; url: string; image: string }>> {
+  return fetchListPaged(client, 'teasers', (t) => ({ title: t?.title ?? '', url: t?.url ?? '', image: t?.imageLink ?? '' }));
 }
 
 /** 抓單一視窗、單一維度組的 statistics-reports 全部列（offset 分頁）。 */
@@ -219,6 +220,7 @@ export async function fetchMgidReport(
         teaserId: tid,
         teaserTitle: meta?.title ?? '',
         teaserUrl: meta?.url ?? '',
+        teaserImage: meta?.image ?? '',
         adRequests: Number(r.adRequests) || 0,
         imp: Number(r.impressions) || 0,
         click: Number(r.clicks) || 0,

@@ -608,7 +608,7 @@ export async function buildReport(
     addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
 
-  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw: [] };
 }
 
 /** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用） */
