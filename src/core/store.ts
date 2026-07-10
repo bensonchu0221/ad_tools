@@ -188,6 +188,47 @@ export async function getDAccountTokenById(accountId: string): Promise<string | 
   return r ? r.token : null;
 }
 
+// ---------- MGID 帳號 token（共用庫 nexus.mgid_tokens；一帳一 token，唯一鍵 api_client_id） ----------
+// 與 d_tokens 不同：無舊鏡像來源、無節流同步，全 source='adtools' 手動維護（見 skill mgid-api）。
+// 查詢鍵一律用 api_client_id（URL 路徑用、token 綁它）；client_id(98xxxx) 只作顯示。
+
+export interface MgidAccountRow {
+  id: number;
+  apiClientId: string; // 86xxxx，URL 路徑用
+  clientId: string | null; // 98xxxx，顯示用
+  clientName: string;
+  updatedTime: string;
+}
+
+/** MGID 帳號清單（不含 token 值），供 UI 下拉「顯示 client_name、值存 api_client_id」。 */
+export async function listMgidAccounts(): Promise<MgidAccountRow[]> {
+  const p = getPool();
+  if (!p) return [];
+  const [rows] = await p.query(
+    `SELECT id, api_client_id, client_id, client_name, updated_time
+     FROM ${TOKENS_DB}.mgid_tokens ORDER BY client_name`
+  );
+  return (rows as any[]).map((r) => ({
+    id: r.id,
+    apiClientId: String(r.api_client_id),
+    clientId: r.client_id != null ? String(r.client_id) : null,
+    clientName: r.client_name,
+    updatedTime: r.updated_time,
+  }));
+}
+
+/** 用 api_client_id 取 MGID token（穩定鍵）。 */
+export async function getMgidTokenById(apiClientId: string): Promise<string | null> {
+  const p = getPool();
+  if (!p) return null;
+  const [rows] = await p.query(
+    `SELECT token FROM ${TOKENS_DB}.mgid_tokens WHERE api_client_id = ? LIMIT 1`,
+    [apiClientId]
+  );
+  const r = (rows as any[])[0];
+  return r ? r.token : null;
+}
+
 export async function addToken(input: { accountName: string; token: string; accountId?: string }): Promise<void> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
@@ -226,9 +267,10 @@ export async function deleteToken(id: number): Promise<boolean> {
 
 // ---------- AdStream 設定（adstream_configs；本工具自管） ----------
 
-// CV 拖拉桶：每個桶放若干事件，src 區分 D/R（兩平台事件同名，靠 src 分）。
+// CV 拖拉桶：每個桶放若干事件，src 區分 D/R/M（各平台事件可同名，靠 src 分）。
 // integrated 與 device_summary 兩張分頁共用同一組桶（存在每個任務設定裡）。
-export type BucketEvent = { src: 'D' | 'R'; event: string };
+// M＝MGID，事件是固定三階漏斗 conv_interest/conv_decision/conv_buy（非語意事件）。
+export type BucketEvent = { src: 'D' | 'R' | 'M'; event: string };
 export interface CvBuckets {
   cv1: BucketEvent[];
   cv2: BucketEvent[];
@@ -244,8 +286,8 @@ export function parseCvBuckets(s: any): CvBuckets {
     const pick = (arr: any): BucketEvent[] =>
       Array.isArray(arr)
         ? arr
-            .filter((x) => x && (x.src === 'D' || x.src === 'R') && typeof x.event === 'string')
-            .map((x) => ({ src: x.src as 'D' | 'R', event: String(x.event) }))
+            .filter((x) => x && (x.src === 'D' || x.src === 'R' || x.src === 'M') && typeof x.event === 'string')
+            .map((x) => ({ src: x.src as 'D' | 'R' | 'M', event: String(x.event) }))
         : [];
     return { cv1: pick(o?.cv1), cv2: pick(o?.cv2), cv3: pick(o?.cv3), cv4: pick(o?.cv4) };
   } catch {
@@ -260,6 +302,7 @@ export interface BulkConfigRow {
   sheetId: string;
   accountIds: string[]; // 多個 D 帳號 account_id（穩定鍵，對應 d_tokens.account_id）；可空＝不抓 D
   rUserIds: string[]; // 多個 Rixbee Account ID；可空＝不抓 R
+  mgidClientIds: string[]; // 多個 MGID api_client_id（對應 mgid_tokens.api_client_id）；可空＝不抓 M
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；抓到此日（含）後停止同步。null=不限、持續每日 T-1
   lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過
@@ -277,6 +320,7 @@ export interface BulkConfigInput {
   sheetId: string;
   accountIds: string[];
   rUserIds: string[];
+  mgidClientIds?: string[]; // 可省（如 adstream-lab 未支援）＝不抓 M
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；可空＝不限
   cvBuckets?: CvBuckets; // cv1~4 拖拉桶
@@ -317,6 +361,10 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
   if (!(await hasCol('r_user_ids'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN r_user_ids TEXT NULL`);
   }
+  // MGID api_client_id 清單（JSON 陣列）；舊資料 null＝不抓 M
+  if (!(await hasCol('mgid_client_ids'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN mgid_client_ids TEXT NULL`);
+  }
   // account_names → account_ids 遷移（by-id 改造）：補欄位，舊欄位放寬可空（資料轉換由 poc 腳本做）
   if (!(await hasCol('account_ids'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN account_ids TEXT NULL`);
@@ -346,7 +394,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
 }
 
 // 日期欄位用 DATE_FORMAT 取字串，避免 mysql2 回 Date 物件帶時區誤差
-const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids,
+const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids,
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
@@ -372,6 +420,7 @@ function mapBulkRow(r: any): BulkConfigRow {
     sheetId: r.sheet_id,
     accountIds: parseJsonArray(r.account_ids),
     rUserIds: parseJsonArray(r.r_user_ids),
+    mgidClientIds: parseJsonArray(r.mgid_client_ids),
     backfillStartDate: r.backfill_start_date,
     endDate: r.end_date ?? null,
     lastSyncedDate: r.last_synced_date,
@@ -421,14 +470,15 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, backfill_start_date, end_date, cv_buckets, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids, backfill_start_date, end_date, cv_buckets, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
       input.sheetId.trim(),
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
+      JSON.stringify(input.mgidClientIds ?? []),
       input.backfillStartDate,
       input.endDate || null,
       JSON.stringify(input.cvBuckets ?? EMPTY_CV_BUCKETS),
@@ -444,7 +494,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
   await ensureBulkSchema(p);
   const [res] = await p.query(
     `UPDATE adstream_configs
-     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, backfill_start_date = ?, end_date = ?, cv_buckets = ?
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, mgid_client_ids = ?, backfill_start_date = ?, end_date = ?, cv_buckets = ?
      WHERE id = ?`,
     [
       input.name.trim(),
@@ -452,6 +502,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
       input.sheetId.trim(),
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
+      JSON.stringify(input.mgidClientIds ?? []),
       input.backfillStartDate,
       input.endDate || null,
       JSON.stringify(input.cvBuckets ?? EMPTY_CV_BUCKETS),

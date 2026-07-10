@@ -3,13 +3,13 @@ import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { sbPage } from '../../core/sbui.js';
 import {
-  dbAvailable, listDAccounts,
+  dbAvailable, listDAccounts, listMgidAccounts,
   listBulkConfigs, getBulkConfig, findConfigBySheetId, addBulkConfig, updateBulkConfig, deleteBulkConfig, markBulkRun,
-  type BulkConfigRow, type DAccountRow,
+  type BulkConfigRow, type DAccountRow, type MgidAccountRow,
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { currentUser } from '../../core/auth.js';
-import { runConfig, rerunDay, RAW_TAB, R_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, type RerunScope } from './run.js';
+import { runConfig, rerunDay, RAW_TAB, R_RAW_TAB, M_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RerunScope } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
@@ -54,6 +54,8 @@ const esc = (s: string) =>
 
 // 廣告凝視者特有 CSS（通用元件在 sbui.ts）：已選帳號 chip、Sheet 連結 + 測試按鈕並排、設定名稱兩欄、訊息截斷
 const STYLE = `
+  /* MGID 平台徽章色（D=ink、R=slate、M=橘紅 accent 以資區別） */
+  .src-m{background:var(--accent)}
   /* CV 拖拉桶（Slot Board：mono chip pill、格線桶、橘紅 accent hover）
      cv1~4 各做成獨立「slot 卡」呼應本站版位牆語言；事件池與桶用同一套格線/顏色變數，無新配色 */
   .cv-pool-label{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.12em;
@@ -177,6 +179,9 @@ async function executeAndRecord(
     if (res.rStat) {
       parts.push(`R ${res.rRowCount} 列（${rTypeLabel[res.rStat.userType] ?? res.rStat.userType}）`);
     }
+    if (res.mStat.length) {
+      parts.push(`MGID ${res.mRowCount} 列（${res.mStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`);
+    }
     // 整合表／裝置表列數也帶出來：跳過本機驗證直接上線時，操作者靠這個一眼看出兩張新分頁有沒有真的寫入
     parts.push(`整合 ${res.integratedRowCount} 列`);
     parts.push(`裝置 ${res.deviceRowCount} 列`);
@@ -199,6 +204,7 @@ async function rerunAndRecord(
     const parts: string[] = [];
     if (res.dRows || res.dDeleted) parts.push(`D 刪 ${res.dDeleted}／寫 ${res.dRows}`);
     if (res.rRows || res.rDeleted) parts.push(`R 刪 ${res.rDeleted}／寫 ${res.rRows}`);
+    if (res.mRows || res.mDeleted) parts.push(`MGID 刪 ${res.mDeleted}／寫 ${res.mRows}`);
     const msg = `重抓 ${res.targetDate}：${parts.join('；') || '無資料'}`;
     let syncedDate: string | undefined;
     if (res.coversAllSources) {
@@ -222,13 +228,15 @@ export async function registerAdstream(app: FastifyInstance) {
     const viewer = currentUser(req);
     let configs: BulkConfigRow[] = [];
     let accounts: DAccountRow[] = [];
+    let mgidAccounts: MgidAccountRow[] = [];
     let dbError = '';
     if (hasDb) {
       try {
-        // 設定存 account_id，顯示需 id→名字對照
-        [configs, accounts] = await Promise.all([
+        // 設定存 account_id / api_client_id，顯示需 id→名字對照
+        [configs, accounts, mgidAccounts] = await Promise.all([
           listBulkConfigs(isAdmin(viewer) ? null : viewer),
           listDAccounts(),
+          listMgidAccounts(),
         ]);
       } catch (e: any) {
         dbError = String(e?.message ?? e);
@@ -236,6 +244,8 @@ export async function registerAdstream(app: FastifyInstance) {
     }
     const nameById = new Map(accounts.map((a) => [String(a.accountId), a.accountName]));
     const accLabel = (id: string) => nameById.get(String(id)) ?? id;
+    const mgidNameById = new Map(mgidAccounts.map((a) => [String(a.apiClientId), a.clientName]));
+    const mgidLabel = (id: string) => mgidNameById.get(String(id)) ?? id;
 
     const rows = configs.map((c) => {
       const statusBadge =
@@ -245,29 +255,33 @@ export async function registerAdstream(app: FastifyInstance) {
         : '<span class="st st-queued">未執行</span>';
       // chip 還原用 [{id,name}]：編輯時不必等帳號清單載入即可顯示名字
       const accPairs = c.accountIds.map((id) => ({ id: String(id), name: accLabel(id) }));
+      const mgidPairs = c.mgidClientIds.map((id) => ({ id: String(id), name: mgidLabel(id) }));
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
-        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"` +
+        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-mgid="${esc(JSON.stringify(mgidPairs))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"` +
         ` data-cvbuckets="${esc(JSON.stringify(c.cvBuckets ?? { cv1: [], cv2: [], cv3: [], cv4: [] }))}"`;
-      // 重抓控制項：D+R 兩來源做下拉（都抓/只D/只R），單一來源做一鍵
-      const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0;
+      // 重抓控制項：多來源做下拉（全部＋各單一），單一來源做一鍵
+      const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0, hasM = c.mgidClientIds.length > 0;
+      const srcs = [
+        ...(hasD ? [{ k: 'd', label: 'D' }] : []),
+        ...(hasR ? [{ k: 'r', label: 'R' }] : []),
+        ...(hasM ? [{ k: 'm', label: 'MGID' }] : []),
+      ];
       const rerunCtrl =
-        hasD && hasR
+        srcs.length > 1
           ? `<div class="dropdown">
                <button class="btn-line rerunMenu" data-id="${c.id}">重抓昨天 ▾</button>
                <div class="dropdown-menu">
-                 <a class="rerunOpt" data-id="${c.id}" data-scope="both">重抓昨天（D+R）</a>
-                 <a class="rerunOpt" data-id="${c.id}" data-scope="d">只重抓 D</a>
-                 <a class="rerunOpt" data-id="${c.id}" data-scope="r">只重抓 R</a>
+                 <a class="rerunOpt" data-id="${c.id}" data-scope="both">重抓昨天（全部）</a>
+                 ${srcs.map((s) => `<a class="rerunOpt" data-id="${c.id}" data-scope="${s.k}">只重抓 ${s.label}</a>`).join('')}
                </div>
              </div>`
-          : hasR
-          ? `<button class="btn-line rerunOpt" data-id="${c.id}" data-scope="r">重抓昨天（R）</button>`
-          : `<button class="btn-line rerunOpt" data-id="${c.id}" data-scope="d">重抓昨天（D）</button>`;
+          : `<button class="btn-line rerunOpt" data-id="${c.id}" data-scope="${srcs[0].k}">重抓昨天（${srcs[0].label}）</button>`;
       return `<tr>
         <td>${esc(c.name)}</td>
         <td class="muted">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
         <td class="muted">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
+        <td class="muted">${c.mgidClientIds.map((id) => esc(mgidLabel(id))).join('<br>') || '—'}</td>
         <td class="muted"><a href="${esc(c.sheetUrl)}" target="_blank" style="color:var(--accent)">開啟 ↗</a></td>
         <td class="muted">${c.backfillStartDate}</td>
         <td class="muted">${c.endDate ?? '<span style="color:var(--mut)">不限</span>'}</td>
@@ -285,14 +299,14 @@ export async function registerAdstream(app: FastifyInstance) {
 
     const listSection = configs.length
       ? `<div class="card"><div class="tbl-wrap"><table class="qtable">
-          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>Sheet</th><th>回補起始</th><th>終止日</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
+          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>MGID 帳號</th><th>Sheet</th><th>回補起始</th><th>終止日</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div></div>`
       : '<div class="card"><div class="note" style="margin-top:0">尚無設定</div></div>';
 
     const body = `
     <div class="crumb"><a href="/">// tools</a> / adstream</div>
     <h1>Report Hub</h1>
-    <p class="sub">把多個 D 帳號 / R(Rixbee) 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」兩個分頁（append）。D、R 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
+    <p class="sub">把多個 D 帳號 / R(Rixbee) / MGID 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」、MGID 寫「${M_RAW_TAB}」（append），另有 integrated／device_summary 整合分頁。D、R、MGID 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
 
     ${hasDb ? '' : '<div class="msg msg-warn" style="margin-top:18px">未設定資料庫，無法新增設定</div>'}
     ${dbError ? `<div class="msg msg-err" style="margin-top:18px">資料庫連線失敗：${esc(dbError)}</div>` : ''}
@@ -353,9 +367,18 @@ export async function registerAdstream(app: FastifyInstance) {
         <input type="text" id="rUserIds" placeholder="例如：9218 或 9218,9219" ${hasDb ? '' : 'disabled'}>
       </div>
 
+      <div class="field">
+        <div class="flabel"><span class="src src-m">M</span><span class="nm">MGID 帳號</span><span class="hint">可多選，搜尋後點選加入</span></div>
+        <div class="combo">
+          <input type="text" id="mgidSearch" placeholder="搜尋 MGID 帳號名稱…" autocomplete="off" ${hasDb ? '' : 'disabled'}>
+          <div id="mgidList" class="combo-list"></div>
+        </div>
+        <div id="mgidChips" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>
+      </div>
+
       <div class="section-label" style="margin:18px 0 16px">CV 整合桶 · integrated / device 共用</div>
       <div class="field">
-        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R；同桶事件加總）。整合表 D 列只算 D 事件、R 列只算 R 事件；沒拖進桶的不計。</p>
+        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總）。整合表 D 列只算 D 事件、R 列只算 R 事件、M 列只算 MGID 事件；沒拖進桶的不計。MGID 是固定三階漏斗 interest/decision/buy。</p>
         <div class="cv-pool-label">事件池</div>
         <div id="cvPool" class="cv-zone pool" data-bucket="pool"></div>
         <div class="cv-buckets">
@@ -383,9 +406,11 @@ export async function registerAdstream(app: FastifyInstance) {
 
     const script = `
 (function () {
-  var selected = [];
+  var selected = [];      // 已選 D 帳號 [{id,name}]
+  var mgidSelected = [];  // 已選 MGID 帳號 [{id,name}]
   var CV_D_EVENTS = ${JSON.stringify(D_EVENT_POOL)};
   var CV_R_EVENTS = ${JSON.stringify(R_EVENT_POOL)};
+  var CV_M_EVENTS = ${JSON.stringify(M_EVENT_POOL)};
   var cvBucketsInit = {}; // 編輯時填入既有桶
 
   // ---------- 浮動 Toast（GSAP 進出場；fixed 右下，捲動不消失） ----------
@@ -498,6 +523,49 @@ export async function registerAdstream(app: FastifyInstance) {
     });
   }
 
+  // ---------- MGID 帳號可搜尋下拉（多選 chips；與 D 同構，各自獨立 state） ----------
+  var mgidSearchEl = document.getElementById('mgidSearch');
+  var mgidListEl = document.getElementById('mgidList');
+  var mgidChipsEl = document.getElementById('mgidChips');
+  var mgidAccounts = [];
+  var mgidEnabled = !!(mgidSearchEl && !mgidSearchEl.disabled);
+  function mgidHasId(id) { return mgidSelected.some(function (s) { return s.id === id; }); }
+  function mgidRenderChips() {
+    mgidChipsEl.innerHTML = mgidSelected.map(function (a, i) {
+      return '<span class="achip">' + a.name + '<button type="button" data-i="' + i + '" class="rmMgidChip">✕</button></span>';
+    }).join('');
+  }
+  mgidChipsEl.addEventListener('click', function (e) {
+    var b = e.target.closest('.rmMgidChip');
+    if (!b) return;
+    mgidSelected.splice(Number(b.getAttribute('data-i')), 1);
+    mgidRenderChips();
+  });
+  function mgidRenderList(kw) {
+    var k = kw.toLowerCase();
+    var hits = mgidAccounts.filter(function (a) {
+      return a.clientName.toLowerCase().indexOf(k) !== -1 && !mgidHasId(String(a.apiClientId));
+    }).slice(0, 50);
+    mgidListEl.innerHTML = hits.map(function (a) {
+      return '<a data-id="' + a.apiClientId + '" data-name="' + a.clientName.replace(/"/g, '&quot;') + '">' + a.clientName + '</a>';
+    }).join('') || '<div class="empty">無符合帳號</div>';
+  }
+  if (mgidEnabled) {
+    fetch('${BASE_PATH}/mgid-accounts').then(function (r) { return r.json(); }).then(function (d) { mgidAccounts = d; mgidRenderList(''); });
+    mgidSearchEl.addEventListener('focus', function () { mgidListEl.classList.add('open'); });
+    mgidSearchEl.addEventListener('blur', function () { setTimeout(function () { mgidListEl.classList.remove('open'); }, 120); });
+    mgidSearchEl.addEventListener('input', function () { mgidListEl.classList.add('open'); mgidRenderList(mgidSearchEl.value.trim()); });
+    mgidListEl.addEventListener('mousedown', function (e) {
+      var t = e.target.closest('a[data-id]');
+      if (!t) return;
+      e.preventDefault();
+      var id = String(t.getAttribute('data-id'));
+      if (!mgidHasId(id)) { mgidSelected.push({ id: id, name: t.getAttribute('data-name') }); mgidRenderChips(); }
+      mgidSearchEl.value = '';
+      mgidRenderList('');
+    });
+  }
+
   // ---------- CV 拖拉桶（拖 + 點擊循環備援：pool→cv1→cv2→cv3→cv4→pool） ----------
   var cvOrder = ['pool', 'cv1', 'cv2', 'cv3', 'cv4'];
   var cvDragging = null;
@@ -527,13 +595,14 @@ export async function registerAdstream(app: FastifyInstance) {
     var placed = {}; // src|event → true
     ['cv1', 'cv2', 'cv3', 'cv4'].forEach(function (bk) {
       (cvBucketsInit[bk] || []).forEach(function (it) {
-        if (!it || (it.src !== 'D' && it.src !== 'R')) return;
+        if (!it || (it.src !== 'D' && it.src !== 'R' && it.src !== 'M')) return;
         cvZone(bk).appendChild(cvChip(it.src, it.event));
         placed[it.src + '|' + it.event] = true;
       });
     });
     CV_D_EVENTS.forEach(function (e) { if (!placed['D|' + e]) cvZone('pool').appendChild(cvChip('D', e)); });
     CV_R_EVENTS.forEach(function (e) { if (!placed['R|' + e]) cvZone('pool').appendChild(cvChip('R', e)); });
+    CV_M_EVENTS.forEach(function (e) { if (!placed['M|' + e]) cvZone('pool').appendChild(cvChip('M', e)); });
   }
   document.querySelectorAll('.cv-zone').forEach(function (zone) {
     zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('over'); });
@@ -596,6 +665,7 @@ export async function registerAdstream(app: FastifyInstance) {
     document.getElementById('backfill').value = '';
     document.getElementById('endDate').value = '';
     selected = []; renderChips();
+    mgidSelected = []; mgidRenderChips();
     testResult.innerHTML = ''; saveResult.innerHTML = '';
     testedUrl = ''; originalSheetUrl = ''; // 新增：尚未測試、無原連結
     cvBucketsInit = {}; cvRenderInit();
@@ -616,6 +686,8 @@ export async function registerAdstream(app: FastifyInstance) {
       document.getElementById('endDate').value = b.getAttribute('data-enddate') || '';
       try { selected = JSON.parse(b.getAttribute('data-accounts')) || []; } catch (e) { selected = []; }
       renderChips();
+      try { mgidSelected = JSON.parse(b.getAttribute('data-mgid') || '[]') || []; } catch (e) { mgidSelected = []; }
+      mgidRenderChips();
       try { cvBucketsInit = JSON.parse(b.getAttribute('data-cvbuckets') || '{}'); } catch (e) { cvBucketsInit = {}; }
       cvRenderInit();
       document.getElementById('formTitle').textContent = '編輯設定 #' + editingId.value;
@@ -630,8 +702,8 @@ export async function registerAdstream(app: FastifyInstance) {
     var rUserIds = document.getElementById('rUserIds').value.trim();
     var backfill = document.getElementById('backfill').value;
     var endDate = document.getElementById('endDate').value;
-    if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds)) {
-      saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D 帳號與 R Account ID 至少擇一</span>';
+    if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds && !mgidSelected.length)) {
+      saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D／R／MGID 帳號至少擇一</span>';
       return;
     }
     // Sheet 連結若與載入時不同（新增＝原連結為空，故必測），必須先「測試連線」成功該連結才放行
@@ -648,6 +720,7 @@ export async function registerAdstream(app: FastifyInstance) {
         name: name, sheetUrl: sheetUrl, backfillStartDate: backfill, endDate: endDate,
         accountIdsJson: JSON.stringify(selected.map(function (s) { return s.id; })),
         rUserIds: rUserIds,
+        mgidClientIdsJson: JSON.stringify(mgidSelected.map(function (s) { return s.id; })),
         cvBucketsJson: JSON.stringify({ cv1: cvBucketValues('cv1'), cv2: cvBucketValues('cv2'), cv3: cvBucketValues('cv3'), cv4: cvBucketValues('cv4') }),
       }),
     }).then(function (r) { return r.json(); }).then(function (d) {
@@ -742,6 +815,11 @@ export async function registerAdstream(app: FastifyInstance) {
     reply.send(await listDAccounts());
   });
 
+  // ---------- MGID 帳號清單 ----------
+  app.get(`${BASE_PATH}/mgid-accounts`, async (_req, reply) => {
+    reply.send(await listMgidAccounts());
+  });
+
   // ---------- 測試 Sheet 連線 ----------
   app.post(`${BASE_PATH}/test-access`, async (req, reply) => {
     const sheetUrl = ((req.body as any)?.sheetUrl ?? '').trim();
@@ -761,6 +839,11 @@ export async function registerAdstream(app: FastifyInstance) {
       const parsed = JSON.parse(body?.accountIdsJson ?? '[]');
       if (Array.isArray(parsed)) accountIds = parsed.map((x: any) => String(x)).filter(Boolean);
     } catch { /* 下方統一檢查 */ }
+    let mgidClientIds: string[] = [];
+    try {
+      const parsed = JSON.parse(body?.mgidClientIdsJson ?? '[]');
+      if (Array.isArray(parsed)) mgidClientIds = parsed.map((x: any) => String(x)).filter(Boolean);
+    } catch { /* 下方統一檢查 */ }
     // R Account ID：逗號分隔文字輸入
     const rUserIds = (body?.rUserIds ?? '')
       .split(/[,，\s]+/)
@@ -770,7 +853,7 @@ export async function registerAdstream(app: FastifyInstance) {
     if (!name) return { error: '請填設定名稱' };
     const sheetId = parseSheetId(sheetUrl);
     if (!sheetId) return { error: '無法解析 Sheet 連結' };
-    if (!accountIds.length && !rUserIds.length) return { error: '請至少選一個 D 帳號或填一個 R Account ID' };
+    if (!accountIds.length && !rUserIds.length && !mgidClientIds.length) return { error: '請至少選一個 D／MGID 帳號或填一個 R Account ID' };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(backfillStartDate)) return { error: '回補起始日格式錯誤' };
     if (endDate && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return { error: '終止日格式錯誤' };
     if (endDate && endDate < backfillStartDate) return { error: '終止日不可早於回補起始日' };
@@ -782,13 +865,14 @@ export async function registerAdstream(app: FastifyInstance) {
       const pick = (arr: any) => Array.isArray(arr)
         ? arr.filter((x: any) => x && typeof x?.event === 'string' &&
             ((x.src === 'D' && D_EVENT_POOL.includes(x.event)) ||
-             (x.src === 'R' && R_EVENT_POOL.includes(x.event))))
-              .map((x: any) => ({ src: x.src as 'D' | 'R', event: String(x.event) }))
+             (x.src === 'R' && R_EVENT_POOL.includes(x.event)) ||
+             (x.src === 'M' && M_EVENT_POOL.includes(x.event))))
+              .map((x: any) => ({ src: x.src as 'D' | 'R' | 'M', event: String(x.event) }))
         : [];
       cvBuckets = { cv1: pick(parsed.cv1), cv2: pick(parsed.cv2), cv3: pick(parsed.cv3), cv4: pick(parsed.cv4) };
     } catch { /* 空桶 */ }
 
-    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, backfillStartDate, endDate: endDate || null, cvBuckets } };
+    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, mgidClientIds, backfillStartDate, endDate: endDate || null, cvBuckets } };
   }
 
   // ---------- 新增 ----------
@@ -878,7 +962,7 @@ export async function registerAdstream(app: FastifyInstance) {
     if (!config) return reply.send({ ok: false, error: '找不到設定' });
     if (!canManage(currentUser(req), config)) return reply.send({ ok: false, error: '無權限操作此設定' });
     const raw = String((req.body as any)?.scope ?? 'both');
-    const scope: RerunScope = raw === 'd' || raw === 'r' ? raw : 'both';
+    const scope: RerunScope = raw === 'd' || raw === 'r' || raw === 'm' ? raw : 'both';
 
     const jobId = randomUUID();
     createJob(jobId);
