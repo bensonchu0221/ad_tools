@@ -190,12 +190,11 @@ export async function getDAccountTokenById(accountId: string): Promise<string | 
 
 // ---------- MGID 帳號 token（共用庫 nexus.mgid_tokens；一帳一 token，唯一鍵 api_client_id） ----------
 // 與 d_tokens 不同：無舊鏡像來源、無節流同步，全 source='adtools' 手動維護（見 skill mgid-api）。
-// 查詢鍵一律用 api_client_id（URL 路徑用、token 綁它）；client_id(98xxxx) 只作顯示。
+// 查詢鍵一律用 api_client_id（URL 路徑用、token 綁它）。（client_id 98xxxx API 用不到，2026-07-11 已從表刪除）
 
 export interface MgidAccountRow {
   id: number;
   apiClientId: string; // 86xxxx，URL 路徑用
-  clientId: string | null; // 98xxxx，顯示用
   clientName: string;
   updatedTime: string;
 }
@@ -205,13 +204,12 @@ export async function listMgidAccounts(): Promise<MgidAccountRow[]> {
   const p = getPool();
   if (!p) return [];
   const [rows] = await p.query(
-    `SELECT id, api_client_id, client_id, client_name, updated_time
+    `SELECT id, api_client_id, client_name, updated_time
      FROM ${TOKENS_DB}.mgid_tokens ORDER BY client_name`
   );
   return (rows as any[]).map((r) => ({
     id: r.id,
     apiClientId: String(r.api_client_id),
-    clientId: r.client_id != null ? String(r.client_id) : null,
     clientName: r.client_name,
     updatedTime: r.updated_time,
   }));

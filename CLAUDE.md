@@ -4,6 +4,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#1＝廣告預覽：在「真實媒體文章頁」的 popin 廣告位換上廣告主素材後供 AM 截圖，取代舊 PPT 產出。
 - tool#2＝D&R 週報：整合 Discovery + Rixbee 報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device 七工作表），取代舊 weeklyreport。
 - tool#3＝AdStream（廣告凝視者）：多 D／R／MGID 帳戶 bulk 原始報表定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw；另有 integrated／device_summary 整合分頁。
+- Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
 - 一律使用繁體中文回答；重要業務邏輯加中文註解
@@ -59,6 +60,12 @@ popin 內部工具集（取代舊 dctool）。
 - **重抓昨天**：清單每設定可「重抓昨天(T-1)」——先抓成功→刪 sheet 昨天列→立刻寫回（冪等，A 路線靠「一設定一 sheet」唯一性約束精準刪除）。依來源動態 UI：只 R/只 D 一鍵、D+R 點擊下拉選都抓/只D/只R。涵蓋全部來源才把游標對齊到昨天(max、不倒退)，只抓單邊不動游標。新增/編輯設定查重 sheet_id 禁止共用。實作：`gsheets.ts deleteRowsByDate`、`run.ts rerunDay`、路由 `/configs/:id/rerun`
 - 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
+
+## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
+- **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
+- **D 分頁**：沿用原語意——鏡像列（`source='dctool'`）唯讀、自建列（`adtools`）受保護可編輯／刪除；KPI 3 磚（總／自建／鏡像）＋來源篩選 chip。走 `store.ts addToken/updateToken/deleteToken`
+- **MGID 分頁**：全手動維護、皆可編輯／刪除（無鏡像/守衛）；KPI 1 磚、無來源 chip；靛紫 `#5B54D6` accent＋`M` 徽章（`sbui.ts .src-m`）作平台辨識。**表單只收串接必要三欄**：`client_name`（寫 Sheet 的 account_name）、`api_client_id`（86xxxx，URL/查詢鍵）、`token`（Bearer）；**無 `client_id`(98xxxx)——API 用不到**（skill mgid-api：URL 用 98xxxx 會 403），2026-07-11 已從 `nexus.mgid_tokens` DROP 該欄（rollback SQL 快照留存）。走 `store.ts addMgidToken/updateMgidToken/deleteMgidToken`（token 留空＝不變更）
+- R token 走全域 env 自動選取（台客/4A/Super），**刻意無管理頁**
 
 ## DB（D 帳號 token）
 - **共用庫 `nexus.d_tokens`**（Cloud SQL `internal-tool`，跨工具共用單一真相）：**唯一鍵＝`account_id`（一帳號一列；欄位 `VARCHAR(64) NOT NULL UNIQUE`，2026-06-16 由 nullable 收緊，配合全面 by-id 取 token）**。`source` 是**守衛旗標**(非唯一鍵)：`dctool`＝舊 dctool 鏡像(可被覆蓋)、`adtools`＝手動接管(AE 在 BH 上傳 / ad_tools UI，受保護)。`store.ts` 用常數 `TOKENS_DB`(預設 `nexus`) 限定表，本工具自管表(adstream_configs 等)仍在連線預設庫 `ad_tools`；同實例跨庫查，`popin` 有 *.* 權限
