@@ -139,7 +139,7 @@ export interface AssetAgg extends MetricAgg {
  * D 端只填 PC/Mobile（tablet/xbox 無 base 指標，沿用裝置分析口徑），R 端 device_type 樞紐補滿四桶。
  */
 export interface DeviceRawRow {
-  platform: 'D' | 'R';
+  platform: 'D' | 'R' | 'M';
   date: string; // D: YYYY-MM-DD；R: YYYY-MM-DD（xlsx 統一格式化）
   account_name: string;
   campaign_id: string;

@@ -9,9 +9,10 @@ import {
   getAdReportIndex,
   getCampaignDeviceReports,
 } from '../../core/popin.js';
-import { getDAccountTokenById } from '../../core/store.js';
+import { getDAccountTokenById, getMgidTokenById, listMgidAccounts } from '../../core/store.js';
 import { downloadImages, clusterImageUrls } from './imagehash.js';
 import type { UserType } from '../../core/rixbee.js';
+import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidDeviceRow } from '../../core/mgid.js';
 import {
   R_BEHAVIOR_MAP,
   type WeeklyReportInput,
@@ -21,6 +22,7 @@ import {
   type RRow,
   type DRow,
   type DeviceRawRow,
+  type MRow,
 } from './types.js';
 
 const R_TYPE_LABEL: Record<UserType, string> = { agency: '台客', direct: '4A', super: 'Super' };
@@ -193,6 +195,35 @@ function buildDDeviceRaw(
     });
   }
   return out;
+}
+
+/**
+ * MGID 裝置列（day×deviceType，device 已正規化 PC/Mobile/Tablet/Others）→
+ * ①裝置分析聚合 deviceAgg ②raw_data_device 寬列（每日一列、campaign 留空、平台 M）。
+ * 轉換口徑與 calcConversions 一致：conv_interest/decision/buy 依拖拉桶換算成 cv/mcv/mcv2。
+ */
+export function buildMgidDevice(
+  devRows: MgidDeviceRow[],
+  buckets: WeeklyReportInput['buckets'],
+  accountName: string
+): { deviceAgg: Map<string, MetricAgg>; raw: DeviceRawRow[] } {
+  const deviceAgg = emptyDeviceAgg();
+  const rawMap = new Map<string, DeviceRawRow>(); // key = date（每日聚一列）
+  for (const r of devRows) {
+    const [cv, mcv, mcv2] = calcConversions(
+      { conv_interest: r.conv_interest, conv_decision: r.conv_decision, conv_buy: r.conv_buy },
+      buckets
+    );
+    const bucket = r.device; // 已是 PC/Mobile/Tablet/Others
+    addTo(deviceAgg.get(bucket)!, r.imp, r.click, r.spend, cv, mcv, mcv2);
+    let row = rawMap.get(r.date);
+    if (!row) {
+      row = { platform: 'M', date: r.date, account_name: accountName, campaign_id: '', campaign_name: '', devices: emptyDeviceMap() };
+      rawMap.set(r.date, row);
+    }
+    addTo(row.devices[bucket], r.imp, r.click, r.spend, cv, mcv, mcv2);
+  }
+  return { deviceAgg, raw: [...rawMap.values()] };
 }
 
 /** 照舊 groupDatesByWeek：起始週前的零頭自成一組，之後每 7 天一組 */
@@ -488,7 +519,60 @@ async function fetchDData(
   return { rows, deviceAgg, deviceRaw };
 }
 
-/** 主流程：並行抓 R+D → 日/週/素材/受眾聚合 ＋ raw */
+/**
+ * 抓 MGID 報表（多帳號序列，避開廣告主 API 併發 6+ 的 429）。回：
+ *  rows＝day×campaign×teaser 標準化 MRow；deviceAgg／deviceRaw＝裝置聚合與每日寬列。
+ * 某帳號查無 token → onWarn 記一筆、跳過，不中斷整份報表。
+ */
+async function fetchMData(
+  input: WeeklyReportInput,
+  buckets: WeeklyReportInput['buckets'],
+  onWarn?: (msg: string) => void
+): Promise<{ rows: MRow[]; deviceAgg: Map<string, MetricAgg>; deviceRaw: DeviceRawRow[] }> {
+  const ids = input.mgidClientIds ?? [];
+  if (!ids.length) return { rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [] };
+
+  const accounts = await listMgidAccounts();
+  const nameById = new Map(accounts.map((a) => [a.apiClientId, a.clientName]));
+  const rows: MRow[] = [];
+  const deviceAgg = emptyDeviceAgg();
+  const deviceRaw: DeviceRawRow[] = [];
+
+  for (const apiClientId of ids) {
+    const token = await getMgidTokenById(apiClientId);
+    const clientName = nameById.get(apiClientId) ?? apiClientId;
+    if (!token) {
+      onWarn?.(`MGID 帳號「${clientName}」查無 token，已略過`);
+      continue;
+    }
+    const client: MgidClient = { apiClientId, token, clientName };
+    const report = await fetchMgidReport(client, input.startDate, input.endDate);
+    const devRows = await fetchMgidDeviceReport(client, input.startDate, input.endDate);
+    for (const r of report) {
+      rows.push({
+        date: r.date,
+        account_name: clientName,
+        campaign_id: r.campaignId,
+        campaign_name: r.campaignName,
+        teaser_id: r.teaserId,
+        teaser_title: r.teaserTitle,
+        teaser_image: r.teaserImage,
+        imp: r.imp,
+        click: r.click,
+        spend: r.spend,
+        conv_interest: r.conv_interest,
+        conv_decision: r.conv_decision,
+        conv_buy: r.conv_buy,
+      });
+    }
+    const dev = buildMgidDevice(devRows, buckets, clientName);
+    mergeDeviceAgg(deviceAgg, dev.deviceAgg);
+    deviceRaw.push(...dev.raw);
+  }
+  return { rows, deviceAgg, deviceRaw };
+}
+
+/** 主流程：並行抓 R+D+M → 日/週/素材/受眾聚合 ＋ raw */
 export async function buildReport(
   input: WeeklyReportInput,
   onPhase?: (phase: string) => void
@@ -506,21 +590,27 @@ export async function buildReport(
     ]);
     return { rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
   };
-  const [rResult, dResult] = await Promise.all([
+  const [rResult, dResult, mResult] = await Promise.all([
     fetchR(),
     input.dAccountId
       ? fetchDData(input, onPhase)
       : Promise.resolve({ rows: [] as DRow[], deviceAgg: emptyDeviceAgg(), deviceRaw: [] as DeviceRawRow[] }),
+    fetchMData(input, input.buckets, (m) => warnings.push(m)),
   ]);
   const rRaw = rResult.rows;
   const dRaw = dResult.rows;
-  // 裝置分析：D 端 platform_cv 只填得了 PC/Mobile，R 端 device_type 補 PC/Mobile/Tablet/Others（同桶累加）
+  const mRaw = mResult.rows;
+  // 裝置分析：D 端 platform_cv 只填得了 PC/Mobile，R 端 device_type 補四桶，M 端 deviceType 補四桶（同桶累加）
   const deviceAgg = dResult.deviceAgg;
   mergeDeviceAgg(deviceAgg, rResult.deviceAgg);
-  // raw_data_device：D 寬列（每 campaign×日期，PC/Mobile）＋ R 寬列（每 campaign×日期，四桶）併排
-  const deviceRaw = [...dResult.deviceRaw, ...rResult.deviceRaw];
+  mergeDeviceAgg(deviceAgg, mResult.deviceAgg);
+  // raw_data_device：D 寬列（campaign×日期，PC/Mobile）＋ R 寬列（campaign×日期，四桶）＋ M 寬列（每日一列，四桶）併排
+  const deviceRaw = [...dResult.deviceRaw, ...rResult.deviceRaw, ...mResult.deviceRaw];
   if (input.dAccountId && dRaw.length === 0) {
     warnings.push(`D 帳號「${input.dAccountName || input.dAccountId}」在走期內查無報表資料`);
+  }
+  if (input.mgidClientIds?.length && mRaw.length === 0) {
+    warnings.push('MGID 帳號在走期內查無報表資料');
   }
 
   onPhase?.('整合計算中…');
@@ -546,6 +636,12 @@ export async function buildReport(
       if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
       addTo(daily.get(compactKey)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
     }
+    for (const row of mRaw) {
+      if (row.date !== dashKey) continue; // M 用 dash 格式（同 D）
+      const [cv, mcv, mcv2] = calcConversions(row, buckets);
+      if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
+      addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.spend), cv, mcv, mcv2);
+    }
   }
   const sortedDaily = new Map([...daily.entries()].sort(([a], [b]) => a.localeCompare(b)));
 
@@ -564,6 +660,7 @@ export async function buildReport(
   const images = await downloadImages([
     ...dRaw.map((r) => r.ad_image ?? ''),
     ...rRaw.map((r) => r.assetimage),
+    ...mRaw.map((r) => r.teaser_image ?? ''),
   ]);
   const imageKeys = await clusterImageUrls(images); // URL → identity key（空 URL 不在 map 內）
   const assetMap = new Map<string, AssetAgg>();
@@ -591,6 +688,10 @@ export async function buildReport(
     const [cv, mcv, mcv2] = calcConversions(row, buckets);
     addAsset(row.assetimage, row.assettitle, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
+  for (const row of mRaw) {
+    const [cv, mcv, mcv2] = calcConversions(row, buckets);
+    addAsset(row.teaser_image ?? '', row.teaser_title ?? '', num(row.imp), num(row.click), num(row.spend), cv, mcv, mcv2);
+  }
   const assets = [...assetMap.values()].sort((a, b) => b.spend - a.spend);
 
   // ---- Section 4：受眾分析（D 以 campaign 名、R 以廣告群組名為鍵）----
@@ -607,8 +708,14 @@ export async function buildReport(
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
     addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
   }
+  for (const row of mRaw) {
+    const key = row.campaign_name ?? '';
+    const [cv, mcv, mcv2] = calcConversions(row, buckets);
+    if (!audiences.has(key)) audiences.set(key, emptyAgg());
+    addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.spend), cv, mcv, mcv2);
+  }
 
-  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw: [] };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };
 }
 
 /** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用） */
