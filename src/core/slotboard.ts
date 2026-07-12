@@ -61,23 +61,16 @@ const STYLE = `
     color:var(--mut);border:1px solid var(--line);border-radius:3px;padding:3px 7px}
   .arrow{font-family:var(--mono);font-size:15px;color:var(--mut);transition:transform .18s,color .18s}
   .slot:hover .arrow{color:var(--accent);transform:translateX(3px)}
-  .ext{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .ext{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media(max-width:820px){.ext{grid-template-columns:1fr 1fr}}
   @media(max-width:560px){.ext{grid-template-columns:1fr}}
-  .ext a{display:flex;align-items:center;justify-content:space-between;
+  .ext a{display:flex;align-items:center;justify-content:space-between;gap:10px;
     background:transparent;border:1px solid var(--line);border-radius:4px;
     padding:13px 16px;text-decoration:none;color:inherit;transition:border-color .18s,background .18s}
   .ext a:hover{border-color:var(--ink);background:var(--slot)}
   .ext .name{font-weight:500;font-size:14px}
   .ext .meta{font-family:var(--mono);font-size:11.5px;color:var(--mut)}
   .ext .ext-arrow{font-family:var(--mono);color:var(--mut)}
-  .quick{display:flex;flex-wrap:wrap;gap:8px}
-  .quick a{display:inline-flex;align-items:center;gap:5px;
-    font-family:var(--mono);font-size:12px;color:var(--ink);text-decoration:none;
-    border:1px solid var(--line);border-radius:999px;padding:6px 13px;
-    transition:border-color .18s,color .18s}
-  .quick a:hover{border-color:var(--accent);color:var(--accent)}
-  .quick a span{color:var(--mut)}
-  .quick a:hover span{color:var(--accent)}
   @media(max-width:560px){.hero h1{font-size:42px}.hero{padding:40px 0 32px}}
   @media(prefers-reduced-motion:reduce){.slot:hover .gaze::before{animation:none}}
 `;
@@ -99,10 +92,17 @@ export function renderSlotBoard(tools: SlotTool[]): string {
         <div class="slot-foot"><span class="tag">${esc(t.tag ?? '')}</span><span class="arrow">→</span></div>
       </a>`;
 
-  const ext = (t: SlotTool) => `
-      <a href="${t.href}" target="_blank">
-        <span><span class="name">${esc(t.name)}</span> &nbsp;<span class="meta">${esc(t.desc)}</span></span>
-        <span class="ext-arrow">↗</span>
+  // 快捷卡：站外工具 + 底部快捷合成一區，依 href 去重（保留先出現者＝資訊較全的站外工具卡）。
+  // 站內連結（token 管理）同分頁開、用 →；站外連結開新分頁、用 ↗
+  const quick = [
+    ...external.map((t) => ({ name: t.name, meta: t.desc, href: t.href, internal: false })),
+    ...QUICK_LINKS.map((q) => ({ name: q.label, meta: '', href: q.href, internal: !!q.internal }))
+  ].filter((q, i, arr) => arr.findIndex((x) => x.href === q.href) === i);
+
+  const quickCard = (q: { name: string; meta: string; href: string; internal: boolean }) => `
+      <a href="${q.href}"${q.internal ? '' : ' target="_blank"'}>
+        <span><span class="name">${esc(q.name)}</span>${q.meta ? ` &nbsp;<span class="meta">${esc(q.meta)}</span>` : ''}</span>
+        <span class="ext-arrow">${q.internal ? '→' : '↗'}</span>
       </a>`;
 
   const body = `
@@ -114,13 +114,9 @@ export function renderSlotBoard(tools: SlotTool[]): string {
     <div class="section-label">內部工具 · ${internal.length} active</div>
     <div class="board">${internal.map(slot).join('')}
     </div>
-    ${external.length ? `<div class="section-label" style="margin-top:40px">站外工具 · external</div>
-    <div class="ext">${external.map(ext).join('')}
-    </div>` : ''}
     <div class="section-label" style="margin-top:40px">快捷 · quick access</div>
-    <div class="quick">${QUICK_LINKS.map((q) => q.internal
-        ? `<a href="${q.href}">${q.label} <span>→</span></a>`
-        : `<a href="${q.href}" target="_blank">${q.label} <span>↗</span></a>`).join('')}</div>
+    <div class="ext">${quick.map(quickCard).join('')}
+    </div>
     <footer>popin ad-ops · asia-east1</footer>`;
 
   return sbPage({ title: '廣告投放工具台 · Slot Board', body, style: STYLE, width: '1080px' });

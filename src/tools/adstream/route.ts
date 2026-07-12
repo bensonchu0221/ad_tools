@@ -374,6 +374,7 @@ export async function registerAdstream(app: FastifyInstance) {
           <div id="mgidList" class="combo-list"></div>
         </div>
         <div id="mgidChips" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px"></div>
+        <div class="note">找不到帳號？<a href="/tools/tokens#mgid" target="_blank">管理 MGID token →</a></div>
       </div>
 
       <div class="section-label" style="margin:18px 0 16px">CV 整合桶 · integrated / device 共用</div>
