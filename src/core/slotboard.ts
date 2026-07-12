@@ -15,15 +15,16 @@ interface SlotTool {
 // 只處理 & → &amp;，避免 code（如 D&R）破壞 HTML（內容皆為內部固定字串，無其它注入風險）
 const esc = (s: string) => s.replace(/&/g, '&amp;');
 
-// 底部快捷列：站內 token 管理（同分頁）＋ 常用外部站點（開新分頁，沿用舊首頁右下 FAB）
+// 快捷區唯一資料源（站內 token 管理 + 站外工具/站點全合併於此）：
+// name＝標題、meta＝附標；internal=true 者同分頁開、用 →，其餘開新分頁、用 ↗
 const QUICK_LINKS = [
-  { label: 'D token 管理', href: '/tools/tokens#d', internal: true },
-  { label: 'MGID token 管理', href: '/tools/tokens#mgid', internal: true },
-  { label: 'timeoff', href: 'https://timeoff.pacnexus.net/' },
-  { label: 'lunchbox', href: 'https://lunchbox.pacnexus.net/' },
-  { label: 'cmp', href: 'https://cmp.pacnexus.net/cmp' },
-  { label: 'budget-hunter', href: 'https://cmp.pacnexus.net/bh' },
-  { label: 'test-media', href: 'https://discovery.popin.tw/dc/dmp/articles/article3.html' }
+  { name: 'D Token', meta: 'Discovery 帳號管理', href: '/tools/tokens#d', internal: true },
+  { name: 'MGID Token', meta: 'MGID 帳號管理', href: '/tools/tokens#mgid', internal: true },
+  { name: 'R 大量上傳 (Broadciel)', meta: 'r_bulk_upload', href: 'https://cmp.pacnexus.net/cmp' },
+  { name: 'Budget Hunter', meta: '神盾追速', href: 'https://cmp.pacnexus.net/bh' },
+  { name: 'Timeoff', meta: '請假系統', href: 'https://timeoff.pacnexus.net/' },
+  { name: 'Lunchbox', meta: '訂餐系統', href: 'https://lunchbox.pacnexus.net/' },
+  { name: 'Test-media', meta: '測試文章頁', href: 'https://discovery.popin.tw/dc/dmp/articles/article3.html' }
 ];
 
 // 首頁特有 CSS（通用部分在 sbui.ts）
@@ -77,7 +78,6 @@ const STYLE = `
 
 export function renderSlotBoard(tools: SlotTool[]): string {
   const internal = tools.filter((t) => !t.external);
-  const external = tools.filter((t) => t.external);
 
   // 內部工具＝一格版位：mono 編號/代號 + 凝視點 signature + 圖示 + 標題/說明 + 類型標籤
   const slot = (t: SlotTool, i: number) => `
@@ -92,14 +92,8 @@ export function renderSlotBoard(tools: SlotTool[]): string {
         <div class="slot-foot"><span class="tag">${esc(t.tag ?? '')}</span><span class="arrow">→</span></div>
       </a>`;
 
-  // 快捷卡：站外工具 + 底部快捷合成一區，依 href 去重（保留先出現者＝資訊較全的站外工具卡）。
-  // 站內連結（token 管理）同分頁開、用 →；站外連結開新分頁、用 ↗
-  const quick = [
-    ...external.map((t) => ({ name: t.name, meta: t.desc, href: t.href, internal: false })),
-    ...QUICK_LINKS.map((q) => ({ name: q.label, meta: '', href: q.href, internal: !!q.internal }))
-  ].filter((q, i, arr) => arr.findIndex((x) => x.href === q.href) === i);
-
-  const quickCard = (q: { name: string; meta: string; href: string; internal: boolean }) => `
+  // 快捷卡：標題 + 附標，站內連結同分頁 →、站外開新分頁 ↗
+  const quickCard = (q: { name: string; meta: string; href: string; internal?: boolean }) => `
       <a href="${q.href}"${q.internal ? '' : ' target="_blank"'}>
         <span><span class="name">${esc(q.name)}</span>${q.meta ? ` &nbsp;<span class="meta">${esc(q.meta)}</span>` : ''}</span>
         <span class="ext-arrow">${q.internal ? '→' : '↗'}</span>
@@ -115,7 +109,7 @@ export function renderSlotBoard(tools: SlotTool[]): string {
     <div class="board">${internal.map(slot).join('')}
     </div>
     <div class="section-label" style="margin-top:40px">快捷 · quick access</div>
-    <div class="ext">${quick.map(quickCard).join('')}
+    <div class="ext">${QUICK_LINKS.map(quickCard).join('')}
     </div>
     <footer>popin ad-ops · asia-east1</footer>`;
 
