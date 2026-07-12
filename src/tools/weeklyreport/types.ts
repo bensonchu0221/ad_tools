@@ -41,11 +41,13 @@ export const D_EVENTS = [
   { value: 'cv_add_to_wishlist', label: '加入願望清單' },
 ] as const;
 
-/** MGID 三階漏斗事件 chip（.src-m 靛紫；value 對應 MRow 上的欄位名，供 calcConversions 比對） */
+/** MGID 三階漏斗事件 chip（.src-m 靛紫；value 對應 MRow 上的欄位名，供 calcConversions 比對）
+ * label 用 MGID 廣告主後台 UI 的名稱（使用者看得懂）：conv_buy=Main goal、conv_decision=goal1、conv_interest=goal2。
+ * 顯示順序照 UI 主→次（Main goal→goal1→goal2）；value 不可動（對映 MRow 欄名）。 */
 export const M_EVENTS = [
-  { value: 'conv_interest', label: '興趣' },
-  { value: 'conv_decision', label: '決策' },
-  { value: 'conv_buy', label: '購買' },
+  { value: 'conv_buy', label: 'Main goal' },
+  { value: 'conv_decision', label: 'goal1' },
+  { value: 'conv_interest', label: 'goal2' },
 ] as const;
 
 /** rixbee API behaviorN → 友善欄位名（照舊 rixbee.php 對應） */

@@ -195,6 +195,21 @@ async function fetchStatWindow(
   return rows;
 }
 
+/** 單筆補打 teaser：/teasers 清單端點只回「當前清單」子集，較舊但仍存在的 teaser 查不到。
+ * 統計報表卻以歷史上跑過的所有 teaser 為維度 → 對這些 teaserId 逐一 GET 單筆端點回填 title/url/image。
+ * 真的查無（如已刪除，回 404）就回 null、維持空白，不中斷。 */
+async function fetchTeaserById(
+  client: MgidClient, tid: string
+): Promise<{ title: string; url: string; image: string } | null> {
+  try {
+    const t = await get(`${BASE}/goodhits/clients/${client.apiClientId}/teasers/${tid}`, client.token);
+    if (!t || typeof t !== 'object') return null;
+    return { title: t.title ?? '', url: t.url ?? '', image: t.imageLink ?? '' };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 抓一個 MGID 帳號在 [startDate,endDate]（YYYY-MM-DD）的 day×campaign×teaser 報表，
  * 合併 campaign/teaser 名稱、攤平金額，回傳已正規化的列。切 90 天一段依序抓再合併。
@@ -206,39 +221,46 @@ export async function fetchMgidReport(
     fetchCampaignNameMap(client),
     fetchTeaserMetaMap(client),
   ]);
-  const out: MgidReportRow[] = [];
+  // 先把各視窗原始列收齊，才能一次找出「/teasers 清單查無」的 teaserId 補打回填（每帳號通常僅數筆）。
+  const allRaw: any[] = [];
   for (const w of reportWindows(startDate, endDate)) {
-    const raw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS]);
-    for (const r of raw) {
-      const cid = String(r.campaignId ?? '');
-      const tid = String(r.teaserId ?? '');
-      const meta = teaserMeta[tid];
-      out.push({
-        date: normDay(r.day),
-        campaignId: cid,
-        campaignName: campName[cid] ?? '',
-        teaserId: tid,
-        teaserTitle: meta?.title ?? '',
-        teaserUrl: meta?.url ?? '',
-        teaserImage: meta?.image ?? '',
-        adRequests: Number(r.adRequests) || 0,
-        imp: Number(r.impressions) || 0,
-        click: Number(r.clicks) || 0,
-        spend: amt(r.spent),
-        cpc: amt(r.cpc),
-        cpm: amt(r.cpm),
-        ctr: Number(r.ctr) || 0,
-        conv_interest: Number(r.conversionsInterest) || 0,
-        conv_decision: Number(r.conversionsDecision) || 0,
-        conv_buy: Number(r.conversionsBuy) || 0,
-        conv_rate_interest: Number(r.conversionsRateInterest) || 0,
-        conv_rate_decision: Number(r.conversionsRateDecision) || 0,
-        conv_rate_buy: Number(r.conversionsRateBuy) || 0,
-        conv_cost_interest: amt(r.conversionsCostInterest),
-        conv_cost_decision: amt(r.conversionsCostDecision),
-        conv_cost_buy: amt(r.conversionsCostBuy),
-      });
-    }
+    allRaw.push(...await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS]));
+  }
+  const missing = [...new Set(allRaw.map((r) => String(r.teaserId ?? '')).filter(Boolean))].filter((t) => !teaserMeta[t]);
+  for (const tid of missing) { // 序列補打（廣告主 API 併發 6+ 會 429）
+    const m = await fetchTeaserById(client, tid);
+    if (m) teaserMeta[tid] = m;
+  }
+  const out: MgidReportRow[] = [];
+  for (const r of allRaw) {
+    const cid = String(r.campaignId ?? '');
+    const tid = String(r.teaserId ?? '');
+    const meta = teaserMeta[tid];
+    out.push({
+      date: normDay(r.day),
+      campaignId: cid,
+      campaignName: campName[cid] ?? '',
+      teaserId: tid,
+      teaserTitle: meta?.title ?? '',
+      teaserUrl: meta?.url ?? '',
+      teaserImage: meta?.image ?? '',
+      adRequests: Number(r.adRequests) || 0,
+      imp: Number(r.impressions) || 0,
+      click: Number(r.clicks) || 0,
+      spend: amt(r.spent),
+      cpc: amt(r.cpc),
+      cpm: amt(r.cpm),
+      ctr: Number(r.ctr) || 0,
+      conv_interest: Number(r.conversionsInterest) || 0,
+      conv_decision: Number(r.conversionsDecision) || 0,
+      conv_buy: Number(r.conversionsBuy) || 0,
+      conv_rate_interest: Number(r.conversionsRateInterest) || 0,
+      conv_rate_decision: Number(r.conversionsRateDecision) || 0,
+      conv_rate_buy: Number(r.conversionsRateBuy) || 0,
+      conv_cost_interest: amt(r.conversionsCostInterest),
+      conv_cost_decision: amt(r.conversionsCostDecision),
+      conv_cost_buy: amt(r.conversionsCostBuy),
+    });
   }
   return out;
 }
