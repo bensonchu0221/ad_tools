@@ -682,7 +682,7 @@ export async function buildReport(
     cv3: number,
     cv4: number
   ) => {
-    const key = `${imageKeys.get(imageUrl) ?? 'noimg'} ${title}`;
+    const key = `${imageKeys.get(imageUrl) ?? 'noimg'}\u0000${title}`;
     if (!assetMap.has(key)) {
       assetMap.set(key, { asset_title: title, asset_image: imageUrl, ...emptyAgg() });
     }
