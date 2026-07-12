@@ -52,7 +52,7 @@ function outline(ws: ExcelJS.Worksheet, r1: number, c1: number, r2: number, c2: 
   }
 }
 
-/** 指標列共用：12 欄（標籤 + imp/click/spend/CTR/CPC/cv/mcv/mcv2/CVR/MCVR/MCV2R） */
+/** 指標列共用：14 欄（標籤 + imp/click/spend/CTR/CPC/cv1~cv4/cv1率~cv4率） */
 function writeMetricRow(ws: ExcelJS.Worksheet, row: number, label: string, m: MetricAgg) {
   const vals: [any, string | null][] = [
     [label, null],
@@ -61,12 +61,14 @@ function writeMetricRow(ws: ExcelJS.Worksheet, row: number, label: string, m: Me
     [m.spend, FMT_INT],
     [m.imp ? m.click / m.imp : 0, FMT_CTR],
     [m.click ? m.spend / m.click : 0, FMT_CPC],
-    [m.cv, FMT_INT],
-    [m.mcv, FMT_INT],
-    [m.mcv2, FMT_INT],
-    [m.click ? m.cv / m.click : 0, FMT_CVR],
-    [m.click ? m.mcv / m.click : 0, FMT_CVR],
-    [m.click ? m.mcv2 / m.click : 0, FMT_CVR],
+    [m.cv1, FMT_INT],
+    [m.cv2, FMT_INT],
+    [m.cv3, FMT_INT],
+    [m.cv4, FMT_INT],
+    [m.click ? m.cv1 / m.click : 0, FMT_CVR],
+    [m.click ? m.cv2 / m.click : 0, FMT_CVR],
+    [m.click ? m.cv3 / m.click : 0, FMT_CVR],
+    [m.click ? m.cv4 / m.click : 0, FMT_CVR],
   ];
   vals.forEach(([v, fmt], i) => {
     const cell = ws.getCell(row, 2 + i); // 從 B 欄開始
@@ -76,20 +78,22 @@ function writeMetricRow(ws: ExcelJS.Worksheet, row: number, label: string, m: Me
 }
 
 function sumAgg(list: MetricAgg[]): MetricAgg {
-  const t = { imp: 0, click: 0, spend: 0, cv: 0, mcv: 0, mcv2: 0 };
+  const t = { imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 };
   for (const m of list) {
     t.imp += m.imp;
     t.click += m.click;
     t.spend += m.spend;
-    t.cv += m.cv;
-    t.mcv += m.mcv;
-    t.mcv2 += m.mcv2;
+    t.cv1 += m.cv1;
+    t.cv2 += m.cv2;
+    t.cv3 += m.cv3;
+    t.cv4 += m.cv4;
   }
   return t;
 }
 
-const SUMMARY_HEAD = ['總覽', '合計Imp', '合計Click', '合計金額', '合計CTR', '合計CPC', '合計CV', '合計MCV', '合計MCV2', '合計CVR', '合計MCVR', '合計MCV2R'];
-const SUMMARY_SUB = ['', '總曝光', '點擊數', '總費用', '點擊率', '單次點擊成本', '(轉換數)', '加入購物車', '(自定義)', '(CV轉換率)', '(MCV轉換率)', '(MCV2轉換率)'];
+// 泛用桶無固定語意，桶欄與率欄子標籤留空
+const SUMMARY_HEAD = ['總覽', '合計Imp', '合計Click', '合計金額', '合計CTR', '合計CPC', '合計cv1', '合計cv2', '合計cv3', '合計cv4', '合計cv1率', '合計cv2率', '合計cv3率', '合計cv4率'];
+const SUMMARY_SUB = ['', '總曝光', '點擊數', '總費用', '點擊率', '單次點擊成本', '', '', '', '', '', '', '', ''];
 
 /** 日/週共用的總覽工作表（雙列表頭 + 資料列 + 合計列） */
 function writeSummarySheet(
@@ -114,16 +118,16 @@ function writeSummarySheet(
   writeMetricRow(ws, row, '合計', total);
 
   // 樣式：表頭兩列 + 合計列灰底粗體，資料列一般
-  for (let c = 2; c <= 13; c++) {
+  for (let c = 2; c <= 15; c++) {
     headStyle(ws.getCell(3, c));
     headStyle(ws.getCell(4, c));
     headStyle(ws.getCell(row, c));
   }
-  for (let r = 5; r < row; r++) for (let c = 2; c <= 13; c++) bodyStyle(ws.getCell(r, c));
+  for (let r = 5; r < row; r++) for (let c = 2; c <= 15; c++) bodyStyle(ws.getCell(r, c));
   // 合計列數字格式被 headStyle 蓋不掉（numFmt 獨立），保留
-  outline(ws, 3, 2, row, 13);
+  outline(ws, 3, 2, row, 15);
 
-  for (let c = 2; c <= 13; c++) ws.getColumn(c).width = 14;
+  for (let c = 2; c <= 15; c++) ws.getColumn(c).width = 14;
   for (let r = 3; r <= row; r++) ws.getRow(r).height = 40;
 }
 
@@ -189,12 +193,14 @@ export async function buildXlsx(
       [a.spend, FMT_INT],
       [a.imp ? a.click / a.imp : 0, FMT_CTR],
       [a.click ? a.spend / a.click : 0, FMT_CPC],
-      [a.cv, FMT_INT],
-      [a.mcv, FMT_INT],
-      [a.mcv2, FMT_INT],
-      [a.click ? a.cv / a.click : 0, FMT_CVR],
-      [a.click ? a.mcv / a.click : 0, FMT_CVR],
-      [a.click ? a.mcv2 / a.click : 0, FMT_CVR],
+      [a.cv1, FMT_INT],
+      [a.cv2, FMT_INT],
+      [a.cv3, FMT_INT],
+      [a.cv4, FMT_INT],
+      [a.click ? a.cv1 / a.click : 0, FMT_CVR],
+      [a.click ? a.cv2 / a.click : 0, FMT_CVR],
+      [a.click ? a.cv3 / a.click : 0, FMT_CVR],
+      [a.click ? a.cv4 / a.click : 0, FMT_CVR],
     ];
     vals.forEach(([v, fmt], i) => {
       const cell = s3.getCell(row, 4 + i);
@@ -212,25 +218,27 @@ export async function buildXlsx(
     [assetTotal.spend, FMT_INT],
     [assetTotal.imp ? assetTotal.click / assetTotal.imp : 0, FMT_CTR],
     [assetTotal.click ? assetTotal.spend / assetTotal.click : 0, FMT_CPC],
-    [assetTotal.cv, FMT_INT],
-    [assetTotal.mcv, FMT_INT],
-    [assetTotal.mcv2, FMT_INT],
-    [assetTotal.click ? assetTotal.cv / assetTotal.click : 0, FMT_CVR],
-    [assetTotal.click ? assetTotal.mcv / assetTotal.click : 0, FMT_CVR],
-    [assetTotal.click ? assetTotal.mcv2 / assetTotal.click : 0, FMT_CVR],
+    [assetTotal.cv1, FMT_INT],
+    [assetTotal.cv2, FMT_INT],
+    [assetTotal.cv3, FMT_INT],
+    [assetTotal.cv4, FMT_INT],
+    [assetTotal.click ? assetTotal.cv1 / assetTotal.click : 0, FMT_CVR],
+    [assetTotal.click ? assetTotal.cv2 / assetTotal.click : 0, FMT_CVR],
+    [assetTotal.click ? assetTotal.cv3 / assetTotal.click : 0, FMT_CVR],
+    [assetTotal.click ? assetTotal.cv4 / assetTotal.click : 0, FMT_CVR],
   ];
   totVals.forEach(([v, fmt], i) => {
     const cell = s3.getCell(row, 4 + i);
     cell.value = v;
     if (fmt) cell.numFmt = fmt;
   });
-  for (let c = 2; c <= 14; c++) {
+  for (let c = 2; c <= 16; c++) {
     headStyle(s3.getCell(3, c));
     headStyle(s3.getCell(row, c));
   }
-  for (let r = 4; r < row; r++) for (let c = 2; c <= 14; c++) bodyStyle(s3.getCell(r, c));
-  outline(s3, 3, 2, row, 14);
-  for (let c = 4; c <= 14; c++) s3.getColumn(c).width = 14;
+  for (let r = 4; r < row; r++) for (let c = 2; c <= 16; c++) bodyStyle(s3.getCell(r, c));
+  outline(s3, 3, 2, row, 16);
+  for (let c = 4; c <= 16; c++) s3.getColumn(c).width = 14;
   s3.getRow(row).height = 40;
 
   // ---------- Sheet 4：受眾分析 ----------
@@ -244,13 +252,13 @@ export async function buildXlsx(
     writeMetricRow(s4, r4++, name, m);
   }
   writeMetricRow(s4, r4, '合計', sumAgg([...result.audiences.values()]));
-  for (let c = 2; c <= 13; c++) {
+  for (let c = 2; c <= 15; c++) {
     headStyle(s4.getCell(3, c));
     headStyle(s4.getCell(r4, c));
   }
-  for (let r = 4; r < r4; r++) for (let c = 2; c <= 13; c++) bodyStyle(s4.getCell(r, c));
-  outline(s4, 3, 2, r4, 13);
-  for (let c = 2; c <= 13; c++) s4.getColumn(c).width = 14;
+  for (let r = 4; r < r4; r++) for (let c = 2; c <= 15; c++) bodyStyle(s4.getCell(r, c));
+  outline(s4, 3, 2, r4, 15);
+  for (let c = 2; c <= 15; c++) s4.getColumn(c).width = 14;
   for (let r = 3; r <= r4; r++) s4.getRow(r).height = 40;
 
   // ---------- Sheet 5：裝置分析（裝置列 × 標準指標欄） ----------
@@ -268,7 +276,7 @@ export async function buildXlsx(
   const s5 = wb.addWorksheet('Raw_Data');
   const RAW_HEADERS = [
     'platform', 'date', 'account_name', 'campaignid', 'campaign_name', 'groupname', 'assetname',
-    'AdAssets', 'ad_title', 'ad_image', 'imp', 'click', 'spending', 'cv', 'mcv',
+    'AdAssets', 'ad_title', 'ad_image', 'imp', 'click', 'spending', 'cv1', 'cv2', 'cv3', 'cv4',
     'CompleteCheckout', 'AddToCart', 'ViewContent', 'Checkout', 'Bookmark', 'Search', 'CompleteRegistration',
     'cv_view_content', 'cv_add_to_cart', 'cv_app_install', 'cv_complete_registration',
     'cv_add_paymentInfo', 'cv_start_checkout', 'cv_search', 'cv_add_to_wishlist',
@@ -281,10 +289,10 @@ export async function buildXlsx(
     return s.replace(/-/g, '/');
   };
   for (const v of result.dRaw) {
-    const [cv, mcv] = calcConversions(v, buckets);
+    const [cv1, cv2, cv3, cv4] = calcConversions(v, buckets);
     s5.addRow([
       'D', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', '', v.campaign_name ?? '', '', v.ad_name ?? '',
-      '', v.ad_title ?? '', v.ad_image ?? '', v.imp ?? 0, v.click ?? 0, v.charge ?? 0, cv, mcv,
+      '', v.ad_title ?? '', v.ad_image ?? '', v.imp ?? 0, v.click ?? 0, v.charge ?? 0, cv1, cv2, cv3, cv4,
       0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
       v.cv_view_content ?? 0, v.cv_add_to_cart ?? 0, v.cv_app_install ?? 0, v.cv_complete_registration ?? 0,
       v.cv_add_paymentInfo ?? 0, v.cv_start_checkout ?? 0, v.cv_search ?? 0, v.cv_add_to_wishlist ?? 0,
@@ -292,10 +300,10 @@ export async function buildXlsx(
     ]);
   }
   for (const v of result.rRaw) {
-    const [cv, mcv] = calcConversions(v, buckets);
+    const [cv1, cv2, cv3, cv4] = calcConversions(v, buckets);
     s5.addRow([
       'R', fmtRawDate(v.Date), v.brandname, v.campaignid, v.cpg_name, v.groupname, v.assetname,
-      v.AdAssets, v.assettitle, v.assetimage, v.Impressions, v.Clicks, v.Spend, cv, mcv,
+      v.AdAssets, v.assettitle, v.assetimage, v.Impressions, v.Clicks, v.Spend, cv1, cv2, cv3, cv4,
       v.CompleteCheckout, v.AddToCart, v.ViewContent, v.Checkout, v.Bookmark, v.Search, v.CompleteRegistration,
       0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
       0, 0, 0, // MGID 專屬轉換欄補 0
@@ -304,30 +312,30 @@ export async function buildXlsx(
   // MGID 列（platform='M'）：teaser_title→assetname/ad_title、teaser_image→ad_image；
   // D/R 專屬事件欄補 0，尾三欄填 conv_interest/decision/buy（Raw 無損）。
   for (const v of result.mRaw) {
-    const [cv, mcv] = calcConversions(v, buckets);
+    const [cv1, cv2, cv3, cv4] = calcConversions(v, buckets);
     s5.addRow([
       'M', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', v.campaign_id ?? '', v.campaign_name ?? '', '', v.teaser_title ?? '',
-      '', v.teaser_title ?? '', v.teaser_image ?? '', v.imp ?? 0, v.click ?? 0, v.spend ?? 0, cv, mcv,
+      '', v.teaser_title ?? '', v.teaser_image ?? '', v.imp ?? 0, v.click ?? 0, v.spend ?? 0, cv1, cv2, cv3, cv4,
       0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
       0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
       v.conv_interest ?? 0, v.conv_decision ?? 0, v.conv_buy ?? 0, // MGID 三階轉換
     ]);
   }
 
-  // ---------- Sheet 7：raw_data_device（裝置層原始寬列；每列＝平台×日期×campaign，4 裝置桶各 6 指標） ----------
+  // ---------- Sheet 7：raw_data_device（裝置層原始寬列；每列＝平台×日期×campaign，4 裝置桶各 7 指標） ----------
   // device 是 campaign 層級資料（Raw_Data 是 ad 層級），故另開一頁。D 列只填 PC/Mobile（沿用裝置分析口徑）、
-  // R 列補滿四桶；cv/mcv/mcv2 已在 report.ts 依拖拉分桶換算好（與裝置分析一致）。無框線樣式照 Raw_Data。
+  // R 列補滿四桶；cv1~cv4 已在 report.ts 依拖拉分桶換算好（與裝置分析一致）。無框線樣式照 Raw_Data。
   const s6 = wb.addWorksheet('raw_data_device');
   const DEV_COLS: [string, string][] = [['PC', 'pc'], ['Mobile', 'mobile'], ['Tablet', 'tablet'], ['Others', 'others']];
-  const DEV_METRICS = ['imp', 'click', 'spend', 'cv', 'mcv', 'mcv2'] as const;
+  const DEV_METRICS = ['imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4'] as const;
   const devHeaders = ['platform', 'date', 'account_name', 'campaign_id', 'campaign_name'];
   for (const [, p] of DEV_COLS) for (const m of DEV_METRICS) devHeaders.push(`${p}_${m}`);
   s6.addRow(devHeaders);
   for (const r of result.deviceRaw) {
     const rowVals: any[] = [r.platform, fmtRawDate(String(r.date ?? '')), r.account_name, r.campaign_id, r.campaign_name];
     for (const [label] of DEV_COLS) {
-      const m = r.devices[label] ?? { imp: 0, click: 0, spend: 0, cv: 0, mcv: 0, mcv2: 0 };
-      rowVals.push(m.imp, m.click, m.spend, m.cv, m.mcv, m.mcv2);
+      const m = r.devices[label] ?? { imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 };
+      rowVals.push(m.imp, m.click, m.spend, m.cv1, m.cv2, m.cv3, m.cv4);
     }
     s6.addRow(rowVals);
   }
