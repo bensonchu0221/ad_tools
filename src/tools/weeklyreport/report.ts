@@ -62,33 +62,37 @@ export function parseLooseDate(v: any): number | null {
   return null;
 }
 
-/** 照舊 PHP：對列上所有欄位比對三桶，回傳累加後的 [cv, mcv, mcv2]（base 為列上既有 cv/mcv/mcv2） */
+/** 對列上所有欄位比對四桶，回傳累加後的 [cv1, cv2, cv3, cv4]。
+ *  隱含 base 照舊映射（保與舊 CV/MCV/MCV2 等值）：cv1←row.cv、cv2←row.mcv、cv3←row.mcv2；cv4 純拖拉無 base。 */
 function calcConversions(
   row: Record<string, any>,
   buckets: WeeklyReportInput['buckets']
-): [number, number, number] {
-  let cv = num(row.cv);
-  let mcv = num(row.mcv);
-  let mcv2 = num(row.mcv2);
+): [number, number, number, number] {
+  let cv1 = num(row.cv);
+  let cv2 = num(row.mcv);
+  let cv3 = num(row.mcv2);
+  let cv4 = 0;
   for (const [k, v] of Object.entries(row)) {
-    if (buckets.cv.includes(k)) cv += num(v);
-    if (buckets.mcv.includes(k)) mcv += num(v);
-    if (buckets.mcv2.includes(k)) mcv2 += num(v);
+    if (buckets.cv1.includes(k)) cv1 += num(v);
+    if (buckets.cv2.includes(k)) cv2 += num(v);
+    if (buckets.cv3.includes(k)) cv3 += num(v);
+    if (buckets.cv4.includes(k)) cv4 += num(v);
   }
-  return [cv, mcv, mcv2];
+  return [cv1, cv2, cv3, cv4];
 }
 
 function emptyAgg(): MetricAgg {
-  return { imp: 0, click: 0, spend: 0, cv: 0, mcv: 0, mcv2: 0 };
+  return { imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 };
 }
 
-function addTo(agg: MetricAgg, imp: number, click: number, spend: number, cv: number, mcv: number, mcv2: number) {
+function addTo(agg: MetricAgg, imp: number, click: number, spend: number, cv1: number, cv2: number, cv3: number, cv4: number) {
   agg.imp += imp;
   agg.click += click;
   agg.spend += spend;
-  agg.cv += cv;
-  agg.mcv += mcv;
-  agg.mcv2 += mcv2;
+  agg.cv1 += cv1;
+  agg.cv2 += cv2;
+  agg.cv3 += cv3;
+  agg.cv4 += cv4;
 }
 
 // 裝置分析的固定桶與排序。D 端只填得了 PC/Mobile（campaign 層 platform_cv=1
@@ -120,23 +124,26 @@ function emptyDeviceMap(): Record<string, MetricAgg> {
 
 /**
  * 從 D campaign 層裝置回應列算「單一裝置」的 6 指標（口徑與 calcConversions 一致）：
- * cv/mcv 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
- * mcv2 無 API 基底純分桶；base 取 {prefix}_imp/click/charge。
+ * cv1/cv2 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
+ * cv3/cv4 無 API 基底純分桶；base 取 {prefix}_imp/click/charge。
  */
 function dDeviceMetric(row: any, prefix: string, buckets: WeeklyReportInput['buckets']): MetricAgg {
-  let cv = num(row[`${prefix}_cv`]);
-  let mcv = num(row[`${prefix}_mcv`]);
-  let mcv2 = 0;
-  for (const e of buckets.cv) cv += num(row[`${prefix}_${e}`]);
-  for (const e of buckets.mcv) mcv += num(row[`${prefix}_${e}`]);
-  for (const e of buckets.mcv2) mcv2 += num(row[`${prefix}_${e}`]);
+  let cv1 = num(row[`${prefix}_cv`]);
+  let cv2 = num(row[`${prefix}_mcv`]);
+  let cv3 = 0;
+  let cv4 = 0;
+  for (const e of buckets.cv1) cv1 += num(row[`${prefix}_${e}`]);
+  for (const e of buckets.cv2) cv2 += num(row[`${prefix}_${e}`]);
+  for (const e of buckets.cv3) cv3 += num(row[`${prefix}_${e}`]);
+  for (const e of buckets.cv4) cv4 += num(row[`${prefix}_${e}`]);
   return {
     imp: num(row[`${prefix}_imp`]),
     click: num(row[`${prefix}_click`]),
     spend: num(row[`${prefix}_charge`]),
-    cv,
-    mcv,
-    mcv2,
+    cv1,
+    cv2,
+    cv3,
+    cv4,
   };
 }
 
@@ -144,14 +151,14 @@ function dDeviceMetric(row: any, prefix: string, buckets: WeeklyReportInput['buc
 function mergeDeviceAgg(into: Map<string, MetricAgg>, from: Map<string, MetricAgg>) {
   for (const [label, m] of from) {
     const t = into.get(label);
-    if (t) addTo(t, m.imp, m.click, m.spend, m.cv, m.mcv, m.mcv2);
+    if (t) addTo(t, m.imp, m.click, m.spend, m.cv1, m.cv2, m.cv3, m.cv4);
   }
 }
 
 /**
  * 把 campaign 層裝置回應列依裝置聚合。轉換口徑與 calcConversions 一致：
- * 各裝置 cv/mcv 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
- * mcv2 無 API 基底，純分桶。base 指標取 {prefix}_imp/click/charge。
+ * 各裝置 cv1/cv2 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
+ * cv3/cv4 無 API 基底，純分桶。base 指標取 {prefix}_imp/click/charge。
  * 只處理 PC/Mobile（D_DEVICES）：API 對 Tablet/Xbox 不回 base 指標，見 D_DEVICES 註解。
  */
 function aggregateDevices(
@@ -162,7 +169,7 @@ function aggregateDevices(
   for (const row of deviceRows) {
     for (const { prefix, label } of D_DEVICES) {
       const m = dDeviceMetric(row, prefix, buckets);
-      addTo(agg.get(label)!, m.imp, m.click, m.spend, m.cv, m.mcv, m.mcv2);
+      addTo(agg.get(label)!, m.imp, m.click, m.spend, m.cv1, m.cv2, m.cv3, m.cv4);
     }
   }
   return agg;
@@ -200,7 +207,7 @@ function buildDDeviceRaw(
 /**
  * MGID 裝置列（day×deviceType，device 已正規化 PC/Mobile/Tablet/Others）→
  * ①裝置分析聚合 deviceAgg ②raw_data_device 寬列（每日一列、campaign 留空、平台 M）。
- * 轉換口徑與 calcConversions 一致：conv_interest/decision/buy 依拖拉桶換算成 cv/mcv/mcv2。
+ * 轉換口徑與 calcConversions 一致：conv_interest/decision/buy 依拖拉桶換算成 cv1~cv4。
  */
 export function buildMgidDevice(
   devRows: MgidDeviceRow[],
@@ -210,18 +217,18 @@ export function buildMgidDevice(
   const deviceAgg = emptyDeviceAgg();
   const rawMap = new Map<string, DeviceRawRow>(); // key = date（每日聚一列）
   for (const r of devRows) {
-    const [cv, mcv, mcv2] = calcConversions(
+    const [cv1, cv2, cv3, cv4] = calcConversions(
       { conv_interest: r.conv_interest, conv_decision: r.conv_decision, conv_buy: r.conv_buy },
       buckets
     );
     const bucket = r.device; // 已是 PC/Mobile/Tablet/Others
-    addTo(deviceAgg.get(bucket)!, r.imp, r.click, r.spend, cv, mcv, mcv2);
+    addTo(deviceAgg.get(bucket)!, r.imp, r.click, r.spend, cv1, cv2, cv3, cv4);
     let row = rawMap.get(r.date);
     if (!row) {
       row = { platform: 'M', date: r.date, account_name: accountName, campaign_id: '', campaign_name: '', devices: emptyDeviceMap() };
       rawMap.set(r.date, row);
     }
-    addTo(row.devices[bucket], r.imp, r.click, r.spend, cv, mcv, mcv2);
+    addTo(row.devices[bucket], r.imp, r.click, r.spend, cv1, cv2, cv3, cv4);
   }
   return { deviceAgg, raw: [...rawMap.values()] };
 }
@@ -380,13 +387,13 @@ async function fetchRDevice(
     for (const item of rows) {
       const ev: Record<string, any> = {};
       for (const [behavior, name] of Object.entries(R_BEHAVIOR_MAP)) ev[name] = num(item[behavior]);
-      const [cv, mcv, mcv2] = calcConversions(ev, buckets);
+      const [cv1, cv2, cv3, cv4] = calcConversions(ev, buckets);
       const bucket = rDeviceBucket(item.device_type);
       const imp = num(item.impression);
       const click = num(item.click);
       const spend = num(item.payment_revenue);
       // ① 裝置分析聚合
-      addTo(deviceAgg.get(bucket)!, imp, click, spend, cv, mcv, mcv2);
+      addTo(deviceAgg.get(bucket)!, imp, click, spend, cv1, cv2, cv3, cv4);
       // ② raw 寬列：(day,cpg_id) 一列，device_type 樞紐到對應桶（同桶多列累加，如 code 1/4 都歸 Mobile/Others）
       const day = String(item.day ?? '');
       const cid = String(item.cpg_id ?? '');
@@ -403,7 +410,7 @@ async function fetchRDevice(
         };
         rawMap.set(key, r);
       }
-      addTo(r.devices[bucket], imp, click, spend, cv, mcv, mcv2);
+      addTo(r.devices[bucket], imp, click, spend, cv1, cv2, cv3, cv4);
     }
   } catch {
     /* R 裝置維度抓取失敗：保留零值聚合與空 raw，不影響主報表 */
@@ -626,21 +633,21 @@ export async function buildReport(
     const compactKey = compactDate(d);
     for (const row of dRaw) {
       if (row.date !== dashKey) continue;
-      const [cv, mcv, mcv2] = calcConversions(row, buckets);
+      const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
       if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
-      addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.charge), cv, mcv, mcv2);
+      addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.charge), cv1, cv2, cv3, cv4);
     }
     for (const row of rRaw) {
       if (row.Date !== compactKey) continue;
-      const [cv, mcv, mcv2] = calcConversions(row, buckets);
+      const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
       if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
-      addTo(daily.get(compactKey)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
+      addTo(daily.get(compactKey)!, row.Impressions, row.Clicks, row.Spend, cv1, cv2, cv3, cv4);
     }
     for (const row of mRaw) {
       if (row.date !== dashKey) continue; // M 用 dash 格式（同 D）
-      const [cv, mcv, mcv2] = calcConversions(row, buckets);
+      const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
       if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
-      addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.spend), cv, mcv, mcv2);
+      addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
     }
   }
   const sortedDaily = new Map([...daily.entries()].sort(([a], [b]) => a.localeCompare(b)));
@@ -651,7 +658,7 @@ export async function buildReport(
   for (const [date, group] of dateMapping) {
     const day = sortedDaily.get(date);
     if (!day || !weekly[group]) continue;
-    addTo(weekly[group], day.imp, day.click, day.spend, day.cv, day.mcv, day.mcv2);
+    addTo(weekly[group], day.imp, day.click, day.spend, day.cv1, day.cv2, day.cv3, day.cv4);
   }
 
   // ---- Section 3：素材分析（以「圖片 × 文案」為鍵聚合，spend 降序）----
@@ -670,27 +677,28 @@ export async function buildReport(
     imp: number,
     click: number,
     spend: number,
-    cv: number,
-    mcv: number,
-    mcv2: number
+    cv1: number,
+    cv2: number,
+    cv3: number,
+    cv4: number
   ) => {
     const key = `${imageKeys.get(imageUrl) ?? 'noimg'} ${title}`;
     if (!assetMap.has(key)) {
       assetMap.set(key, { asset_title: title, asset_image: imageUrl, ...emptyAgg() });
     }
-    addTo(assetMap.get(key)!, imp, click, spend, cv, mcv, mcv2);
+    addTo(assetMap.get(key)!, imp, click, spend, cv1, cv2, cv3, cv4);
   };
   for (const row of dRaw) {
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
-    addAsset(row.ad_image ?? '', row.ad_title ?? '', num(row.imp), num(row.click), num(row.charge), cv, mcv, mcv2);
+    const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
+    addAsset(row.ad_image ?? '', row.ad_title ?? '', num(row.imp), num(row.click), num(row.charge), cv1, cv2, cv3, cv4);
   }
   for (const row of rRaw) {
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
-    addAsset(row.assetimage, row.assettitle, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
+    const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
+    addAsset(row.assetimage, row.assettitle, row.Impressions, row.Clicks, row.Spend, cv1, cv2, cv3, cv4);
   }
   for (const row of mRaw) {
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
-    addAsset(row.teaser_image ?? '', row.teaser_title ?? '', num(row.imp), num(row.click), num(row.spend), cv, mcv, mcv2);
+    const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
+    addAsset(row.teaser_image ?? '', row.teaser_title ?? '', num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
   }
   const assets = [...assetMap.values()].sort((a, b) => b.spend - a.spend);
 
@@ -698,21 +706,21 @@ export async function buildReport(
   const audiences = new Map<string, MetricAgg>();
   for (const row of dRaw) {
     const key = row.campaign_name ?? '';
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
+    const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
-    addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.charge), cv, mcv, mcv2);
+    addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.charge), cv1, cv2, cv3, cv4);
   }
   for (const row of rRaw) {
     const key = row.groupname;
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
+    const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
-    addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv, mcv, mcv2);
+    addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv1, cv2, cv3, cv4);
   }
   for (const row of mRaw) {
     const key = row.campaign_name ?? '';
-    const [cv, mcv, mcv2] = calcConversions(row, buckets);
+    const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
-    addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.spend), cv, mcv, mcv2);
+    addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
   }
 
   return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };

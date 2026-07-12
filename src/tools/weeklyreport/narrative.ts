@@ -63,7 +63,8 @@ const zhDevice = (k: string) => DEVICE_ZH[k] ?? k;
 export function summarizeReport(result: ReportResult, input: WeeklyReportInput): SnapshotSummary {
   // 總量：加總 daily（已 D+R 合併的每日彙總）
   let imp = 0, click = 0, spend = 0, cv = 0;
-  for (const m of result.daily.values()) { imp += m.imp; click += m.click; spend += m.spend; cv += m.cv; }
+  // cv1＝主要轉換桶；SnapshotSummary.cv 欄名不動，文案邏輯零改
+  for (const m of result.daily.values()) { imp += m.imp; click += m.click; spend += m.spend; cv += m.cv1; }
   const ctr = imp > 0 ? click / imp : 0;
 
   // 轉換事件明細：掃 D/R 原始列，依 EVENT_LABELS 累加（中文名相同者合併）

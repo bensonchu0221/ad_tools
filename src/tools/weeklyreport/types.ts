@@ -8,7 +8,7 @@ export interface WeeklyReportInput {
   dAccountId: string; // D 帳號 account_id（穩定鍵；空字串 = 不抓 D）
   dAccountName: string; // D 帳號名（僅顯示/警告訊息用）
   rUserIds: string[]; // rixbee account ids（空陣列 = 不抓 R）
-  buckets: { cv: string[]; mcv: string[]; mcv2: string[] }; // 拖拉分桶：事件欄位名陣列
+  buckets: { cv1: string[]; cv2: string[]; cv3: string[]; cv4: string[] }; // 拖拉分桶：事件欄位名陣列（cv1~cv3 隱含 base 映射 row.cv/mcv/mcv2，cv4 純拖拉）
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD
   weekStart: number; // 週起始日 1(一)~7(日)
@@ -119,14 +119,15 @@ export interface DRow {
   [k: string]: any; // cv_* 事件欄位
 }
 
-/** 共用聚合桶（日/週/受眾） */
+/** 共用聚合桶（日/週/受眾）。cv1~cv4＝拖拉分桶結果（cv1~cv3 含隱含 base，見 calcConversions） */
 export interface MetricAgg {
   imp: number;
   click: number;
   spend: number;
-  cv: number;
-  mcv: number;
-  mcv2: number;
+  cv1: number;
+  cv2: number;
+  cv3: number;
+  cv4: number;
 }
 
 /** 素材聚合（多縮圖欄位） */
