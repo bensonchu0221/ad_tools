@@ -14,7 +14,7 @@ const STYLE = `
   .dnd-zone{display:flex;flex-wrap:wrap;gap:8px;border-radius:6px;padding:12px;min-height:52px;transition:background .15s}
   .pool{border:1px solid var(--line);background:#F1F2F4}
   .dnd-zone.over{border-color:var(--ink);background:#F8FAFC}
-  .buckets{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
+  .buckets{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}
   @media(max-width:560px){.buckets{grid-template-columns:1fr}}
   .bk-label{font-family:var(--mono);font-size:11.5px;font-weight:600;letter-spacing:.08em;margin-bottom:6px}
   .bucket{border:1px solid var(--line);background:#F8FAFC;min-height:72px;align-content:flex-start}
@@ -70,13 +70,14 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
 
         <div class="field">
           <div class="flabel"><span class="nm">轉換事件對應</span></div>
-          <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進下方的 CV / MCV / MCV2 框（或點一下事件循環切換位置）。沒分配的事件不計入轉換。</p>
+          <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總，或點一下事件循環切換位置）。沒分配的事件不計入轉換。</p>
           <div class="pool-label">事件池</div>
           <div id="eventPool" class="dnd-zone pool" data-bucket="pool">${dChips}${rChips}${mChips}</div>
           <div class="buckets">
-            <div><div class="bk-label">CV</div><div class="dnd-zone bucket" data-bucket="cv"></div></div>
-            <div><div class="bk-label">MCV</div><div class="dnd-zone bucket" data-bucket="mcv"></div></div>
-            <div><div class="bk-label">MCV2</div><div class="dnd-zone bucket" data-bucket="mcv2"></div></div>
+            <div><div class="bk-label">cv1</div><div class="dnd-zone bucket" data-bucket="cv1"></div></div>
+            <div><div class="bk-label">cv2</div><div class="dnd-zone bucket" data-bucket="cv2"></div></div>
+            <div><div class="bk-label">cv3</div><div class="dnd-zone bucket" data-bucket="cv3"></div></div>
+            <div><div class="bk-label">cv4</div><div class="dnd-zone bucket" data-bucket="cv4"></div></div>
           </div>
         </div>
 
@@ -196,10 +197,10 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     });
   }
 
-  // ---------- 拖拉分桶（點擊備援：池→CV→MCV→MCV2→池 循環） ----------
+  // ---------- 拖拉分桶（點擊備援：池→cv1→cv2→cv3→cv4→池 循環） ----------
   var dragging = null;
   var zones = Array.prototype.slice.call(document.querySelectorAll('.dnd-zone'));
-  var order = ['pool', 'cv', 'mcv', 'mcv2'];
+  var order = ['pool', 'cv1', 'cv2', 'cv3', 'cv4'];
 
   document.querySelectorAll('[data-event]').forEach(function (chipEl) {
     chipEl.addEventListener('dragstart', function () { dragging = chipEl; chipEl.classList.add('dragging'); });
@@ -247,7 +248,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
 
     var body = new URLSearchParams({
       account: account, accountName: accountName, rAid: rAid, mgidClientIds: mgidClientIds,
-      bucketsJson: JSON.stringify({ cv: bucketValues('cv'), mcv: bucketValues('mcv'), mcv2: bucketValues('mcv2') }),
+      bucketsJson: JSON.stringify({ cv1: bucketValues('cv1'), cv2: bucketValues('cv2'), cv3: bucketValues('cv3'), cv4: bucketValues('cv4') }),
       startDate: startDate, endDate: endDate, weekStart: document.getElementById('weekStart').value,
     });
 

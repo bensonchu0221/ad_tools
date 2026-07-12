@@ -68,12 +68,13 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     try {
       const parsed = JSON.parse(b.bucketsJson || '{}');
       buckets = {
-        cv: Array.isArray(parsed.cv) ? parsed.cv : [],
-        mcv: Array.isArray(parsed.mcv) ? parsed.mcv : [],
-        mcv2: Array.isArray(parsed.mcv2) ? parsed.mcv2 : [],
+        cv1: Array.isArray(parsed.cv1) ? parsed.cv1 : [],
+        cv2: Array.isArray(parsed.cv2) ? parsed.cv2 : [],
+        cv3: Array.isArray(parsed.cv3) ? parsed.cv3 : [],
+        cv4: Array.isArray(parsed.cv4) ? parsed.cv4 : [],
       };
     } catch {
-      return reply.send({ ok: false, error: 'CV/MCV/MCV2 分桶資料格式錯誤' });
+      return reply.send({ ok: false, error: 'cv1~cv4 分桶資料格式錯誤' });
     }
 
     const startDate = b.startDate ?? '';
