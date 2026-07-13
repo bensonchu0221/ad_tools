@@ -6,8 +6,8 @@ import Fastify from 'fastify';
 import multipart from '@fastify/multipart';
 import formbody from '@fastify/formbody';
 import fastifyStatic from '@fastify/static';
-import { registerAuth } from './core/auth.js';
-import { renderSlotBoard } from './core/slotboard.js';
+import { registerAuth, currentUser } from './core/auth.js';
+import { renderSlotBoard, validateOverlay } from './core/slotboard.js';
 import { registerAdpreview, BASE_PATH as ADPREVIEW } from './tools/adpreview/route.js';
 import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyreport/route.js';
 import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.js';
@@ -15,7 +15,7 @@ import { registerTokens } from './tools/tokens/route.js';
 import { registerAdstreamLab } from './tools/adstream-lab/route.js'; // 視覺重新設計實驗頁，先不上首頁選單，僅供直接網址訪問
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
-import { dbDiagnostics } from './core/store.js';
+import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
 
 // 工具註冊表：新增 tool 2/3 時在這裡加一筆即可
 interface Tool {
@@ -55,8 +55,24 @@ await app.register(fastifyStatic, {
 await registerAuth(app); // Google 登入保護（未設定 OAuth env 時自動停用）
 
 // 選單首頁：Ad Slot Board 版位牆（自訂字體/CSS，渲染於 core/slotboard.ts）
-app.get('/', async (_req, reply) => {
-  reply.type('text/html').send(renderSlotBoard(TOOLS));
+// 快捷區依登入者取個人覆蓋層合併渲染；本機未啟用 OAuth 時 email 為 null，用 '@local' 當 key
+app.get('/', async (req, reply) => {
+  const email = currentUser(req) ?? '@local';
+  const overlay = await getQuickLinks(email);
+  reply.type('text/html').send(renderSlotBoard(TOOLS, overlay));
+});
+
+// 首頁快捷自訂：存回整份覆蓋層（依登入 email，不信任 body 帶的 email）
+app.put('/home/quick-links', async (req, reply) => {
+  const email = currentUser(req) ?? '@local';
+  const v = validateOverlay(req.body);
+  if (!v.ok) return reply.code(400).send({ error: v.error });
+  try {
+    await saveQuickLinks(email, v.overlay);
+  } catch (e: any) {
+    return reply.code(500).send({ error: String(e?.message ?? e) });
+  }
+  reply.send({ ok: true });
 });
 
 app.get('/health', async (_req, reply) => reply.code(200).send('ok'));

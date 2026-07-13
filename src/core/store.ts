@@ -865,3 +865,82 @@ export async function dbDiagnostics() {
   for (const r of rows as any[]) counts[r.source] = r.n;
   return { ok: true, counts, ...syncStatus() };
 }
+
+// ---------- 首頁快捷自訂（home_quick_links；本工具自管、每人一份、key=email） ----------
+// 內建 7 個快捷仍寫死在 slotboard.ts 當「活的預設清單」；這裡只存每人的「覆蓋層」。
+
+/** 個人新增的快捷（url 一律 http/https、開新分頁） */
+export interface PersonalLink {
+  id: string; // 'u:<亂數>'
+  name: string; // 標題（必填）
+  meta: string; // 附標（可空）
+  url: string; // 連結（http/https）
+}
+/** 每人一份的覆蓋層：排序、隱藏的內建、個人新增 */
+export interface QuickLinkOverlay {
+  order: string[]; // 排序後 id（內建與個人混排）
+  hidden: string[]; // 被隱藏的內建 id
+  added: PersonalLink[];
+}
+
+const EMPTY_OVERLAY: QuickLinkOverlay = { order: [], hidden: [], added: [] };
+
+// 讀出時保證形狀（防壞資料炸首頁）；驗證（url 格式/上限）由 slotboard.validateOverlay 在寫入端負責
+function normalizeOverlay(o: any): QuickLinkOverlay {
+  const strs = (a: any) => (Array.isArray(a) ? a.filter((x) => typeof x === 'string') : []);
+  const added: PersonalLink[] = Array.isArray(o?.added)
+    ? o.added
+        .filter((x: any) => x && typeof x.id === 'string')
+        .map((x: any) => ({
+          id: String(x.id),
+          name: String(x.name ?? ''),
+          meta: String(x.meta ?? ''),
+          url: String(x.url ?? ''),
+        }))
+    : [];
+  return { order: strs(o?.order), hidden: strs(o?.hidden), added };
+}
+
+let quickLinksSchemaReady = false;
+async function ensureQuickLinksSchema(p: mysql.Pool): Promise<void> {
+  if (quickLinksSchemaReady) return;
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS home_quick_links (
+      email VARCHAR(255) NOT NULL PRIMARY KEY,
+      overlay TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  quickLinksSchemaReady = true;
+}
+
+/** 取某使用者的快捷覆蓋層；查無/DB 不可用/JSON 壞 → 回空覆蓋（＝只看到純內建）。 */
+export async function getQuickLinks(email: string): Promise<QuickLinkOverlay> {
+  const p = getPool();
+  if (!p) return EMPTY_OVERLAY;
+  try {
+    await ensureQuickLinksSchema(p);
+    const [rows] = await p.query(
+      `SELECT overlay FROM home_quick_links WHERE email = ? LIMIT 1`,
+      [email]
+    );
+    const raw = (rows as any[])[0]?.overlay;
+    if (!raw) return EMPTY_OVERLAY;
+    return normalizeOverlay(JSON.parse(raw));
+  } catch {
+    return EMPTY_OVERLAY; // 壞資料不阻擋首頁
+  }
+}
+
+/** upsert 某使用者的快捷覆蓋層（整份原子覆蓋）。 */
+export async function saveQuickLinks(email: string, overlay: QuickLinkOverlay): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 不可用');
+  await ensureQuickLinksSchema(p);
+  const json = JSON.stringify(normalizeOverlay(overlay));
+  await p.query(
+    `INSERT INTO home_quick_links (email, overlay) VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE overlay = VALUES(overlay)`,
+    [email, json]
+  );
+}
