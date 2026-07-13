@@ -122,8 +122,9 @@ export const R_EVENT_POOL = [
   'cv_view_content', 'cv_complete_checkout', 'cv_checkout', 'cv_bookmark',
   'cv_add_to_cart', 'cv_search', 'cv_complete_registration',
 ];
-// MGID 事件池：固定三階漏斗（非語意事件）。使用者自行拖進 cv1~4；桶內加總用次數欄。
-export const M_EVENT_POOL = ['conv_interest', 'conv_decision', 'conv_buy'];
+// MGID 事件池：固定三階漏斗（value 不可動，對映 MRow 欄名）。UI 顯示用 MGID 後台名稱
+// Main goal/goal1/goal2（見 route.ts CV_M_LABELS），顯示順序主→次對齊週報。使用者自行拖進 cv1~4。
+export const M_EVENT_POOL = ['conv_buy', 'conv_decision', 'conv_interest'];
 
 /**
  * 算某桶內「D 事件」在一列上的加總。fieldPrefix 供裝置表帶 pc_/mobile_ 前綴

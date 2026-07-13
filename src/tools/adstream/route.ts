@@ -54,8 +54,8 @@ const esc = (s: string) =>
 
 // 廣告凝視者特有 CSS（通用元件在 sbui.ts）：已選帳號 chip、Sheet 連結 + 測試按鈕並排、設定名稱兩欄、訊息截斷
 const STYLE = `
-  /* MGID 平台徽章色（D=ink、R=slate、M=橘紅 accent 以資區別） */
-  .src-m{background:var(--accent)}
+  /* MGID 平台徽章色（D=ink、R=slate、M=靛紫 #5B54D6；與週報／MGID token 管理一致，見 sbui.ts） */
+  .src-m{background:#5B54D6}
   /* CV 拖拉桶（Slot Board：mono chip pill、格線桶、橘紅 accent hover）
      cv1~4 各做成獨立「slot 卡」呼應本站版位牆語言；事件池與桶用同一套格線/顏色變數，無新配色 */
   .cv-pool-label{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.12em;
@@ -379,7 +379,7 @@ export async function registerAdstream(app: FastifyInstance) {
 
       <div class="section-label" style="margin:18px 0 16px">CV 整合桶 · integrated / device 共用</div>
       <div class="field">
-        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總）。整合表 D 列只算 D 事件、R 列只算 R 事件、M 列只算 MGID 事件；沒拖進桶的不計。MGID 是固定三階漏斗 interest/decision/buy。</p>
+        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總）。整合表 D 列只算 D 事件、R 列只算 R 事件、M 列只算 MGID 事件；沒拖進桶的不計。MGID 是固定三階漏斗 Main goal／goal1／goal2。</p>
         <div class="cv-pool-label">事件池</div>
         <div id="cvPool" class="cv-zone pool" data-bucket="pool"></div>
         <div class="cv-buckets">
@@ -412,6 +412,8 @@ export async function registerAdstream(app: FastifyInstance) {
   var CV_D_EVENTS = ${JSON.stringify(D_EVENT_POOL)};
   var CV_R_EVENTS = ${JSON.stringify(R_EVENT_POOL)};
   var CV_M_EVENTS = ${JSON.stringify(M_EVENT_POOL)};
+  // MGID chip 顯示名（與週報／MGID 廣告主後台一致）；data-event 仍存 value（conv_*），僅顯示層改
+  var CV_M_LABELS = { conv_buy: 'Main goal', conv_decision: 'goal1', conv_interest: 'goal2' };
   var cvBucketsInit = {}; // 編輯時填入既有桶
 
   // ---------- 浮動 Toast（GSAP 進出場；fixed 右下，捲動不消失） ----------
@@ -574,7 +576,7 @@ export async function registerAdstream(app: FastifyInstance) {
     var el = document.createElement('div');
     el.className = 'cv-chip'; el.setAttribute('draggable', 'true');
     el.setAttribute('data-src', src); el.setAttribute('data-event', event);
-    el.textContent = event;
+    el.textContent = (src === 'M' && CV_M_LABELS[event]) ? CV_M_LABELS[event] : event;
     var s = document.createElement('span');
     s.className = 'src src-' + src.toLowerCase();
     s.textContent = src;
