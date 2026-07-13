@@ -20,7 +20,7 @@ const esc = (s: string) => s.replace(/&/g, '&amp;');
 const QUICK_LINKS = [
   { name: 'D Token', meta: 'Discovery 帳號管理', href: '/tools/tokens#d', internal: true },
   { name: 'MGID Token', meta: 'MGID 帳號管理', href: '/tools/tokens#mgid', internal: true },
-  { name: 'R 大量上傳 (Broadciel)', meta: 'r_bulk_upload', href: 'https://cmp.pacnexus.net/cmp' },
+  { name: 'CMP', meta: 'R 大量上傳', href: 'https://cmp.pacnexus.net/cmp' },
   { name: 'Budget Hunter', meta: '神盾追速', href: 'https://cmp.pacnexus.net/bh' },
   { name: 'Timeoff', meta: '請假系統', href: 'https://timeoff.pacnexus.net/' },
   { name: 'Lunchbox', meta: '訂餐系統', href: 'https://lunchbox.pacnexus.net/' },

@@ -63,14 +63,14 @@ export function parseLooseDate(v: any): number | null {
 }
 
 /** 對列上所有欄位比對四桶，回傳累加後的 [cv1, cv2, cv3, cv4]。
- *  隱含 base 照舊映射（保與舊 CV/MCV/MCV2 等值）：cv1←row.cv、cv2←row.mcv、cv3←row.mcv2；cv4 純拖拉無 base。 */
+ *  四桶皆純拖拉、無隱含 base：D 的 cv/mcv/mcv2 已改為事件池 chip，使用者拖進哪桶才算（value 即欄位名）。 */
 function calcConversions(
   row: Record<string, any>,
   buckets: WeeklyReportInput['buckets']
 ): [number, number, number, number] {
-  let cv1 = num(row.cv);
-  let cv2 = num(row.mcv);
-  let cv3 = num(row.mcv2);
+  let cv1 = 0;
+  let cv2 = 0;
+  let cv3 = 0;
   let cv4 = 0;
   for (const [k, v] of Object.entries(row)) {
     if (buckets.cv1.includes(k)) cv1 += num(v);
@@ -124,12 +124,12 @@ function emptyDeviceMap(): Record<string, MetricAgg> {
 
 /**
  * 從 D campaign 層裝置回應列算「單一裝置」的 6 指標（口徑與 calcConversions 一致）：
- * cv1/cv2 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
- * cv3/cv4 無 API 基底純分桶；base 取 {prefix}_imp/click/charge。
+ * 四桶皆純分桶、無隱含 base（cv/mcv/mcv2 若拖進桶則對映 {prefix}_cv/{prefix}_mcv/{prefix}_mcv2，
+ * 其中裝置回應無 {prefix}_mcv2 → 算 0）；base 取 {prefix}_imp/click/charge。
  */
 function dDeviceMetric(row: any, prefix: string, buckets: WeeklyReportInput['buckets']): MetricAgg {
-  let cv1 = num(row[`${prefix}_cv`]);
-  let cv2 = num(row[`${prefix}_mcv`]);
+  let cv1 = 0;
+  let cv2 = 0;
   let cv3 = 0;
   let cv4 = 0;
   for (const e of buckets.cv1) cv1 += num(row[`${prefix}_${e}`]);
@@ -726,5 +726,5 @@ export async function buildReport(
   return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };
 }
 
-/** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用） */
-export { calcConversions };
+/** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用）；dDeviceMetric 供純函式驗證 */
+export { calcConversions, dDeviceMetric };

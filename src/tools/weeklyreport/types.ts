@@ -8,7 +8,7 @@ export interface WeeklyReportInput {
   dAccountId: string; // D 帳號 account_id（穩定鍵；空字串 = 不抓 D）
   dAccountName: string; // D 帳號名（僅顯示/警告訊息用）
   rUserIds: string[]; // rixbee account ids（空陣列 = 不抓 R）
-  buckets: { cv1: string[]; cv2: string[]; cv3: string[]; cv4: string[] }; // 拖拉分桶：事件欄位名陣列（cv1~cv3 隱含 base 映射 row.cv/mcv/mcv2，cv4 純拖拉）
+  buckets: { cv1: string[]; cv2: string[]; cv3: string[]; cv4: string[] }; // 拖拉分桶：事件欄位名陣列（四桶皆純拖拉、無隱含 base；D 的 cv/mcv/mcv2 已改為事件池可拖拉 chip）
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD
   weekStart: number; // 週起始日 1(一)~7(日)
@@ -31,6 +31,11 @@ export const R_EVENTS = [
 ] as const;
 
 export const D_EVENTS = [
+  // D 平台彙總轉換數（歷史慣稱 CV/MCV/MCV2）。2026-07-13 由 calcConversions 寫死的隱含 base
+  // 改成事件池可拖拉 chip，使用者自選要算進哪個桶（不拖＝不計入）。value 即 D 列上的欄位名。
+  { value: 'cv', label: 'cv' },
+  { value: 'mcv', label: 'mcv' },
+  { value: 'mcv2', label: 'mcv2' },
   { value: 'cv_view_content', label: '查看內容' },
   { value: 'cv_add_to_cart', label: '加入購物車' },
   { value: 'cv_app_install', label: '安裝' },
@@ -119,7 +124,7 @@ export interface DRow {
   [k: string]: any; // cv_* 事件欄位
 }
 
-/** 共用聚合桶（日/週/受眾）。cv1~cv4＝拖拉分桶結果（cv1~cv3 含隱含 base，見 calcConversions） */
+/** 共用聚合桶（日/週/受眾）。cv1~cv4＝拖拉分桶結果（四桶皆純拖拉、無隱含 base，見 calcConversions） */
 export interface MetricAgg {
   imp: number;
   click: number;
