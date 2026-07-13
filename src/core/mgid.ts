@@ -195,6 +195,49 @@ async function fetchStatWindow(
   return rows;
 }
 
+/** campaigns-stat：campaign 層聚合統計（無 day/teaser 維度，一次回整段區間一筆/campaign）。
+ * 與 statistics-reports 不同：**不會排除零點擊 campaign**（實證 poc/verify_mgid_zero_click_campaign.mts），
+ * 用來補回被 statistics-reports 整個排除的「區間內 0 click campaign」的曝光。 */
+async function fetchCampaignsStat(
+  client: MgidClient, sd: string, ed: string
+): Promise<Record<string, any>> {
+  const j = await get(
+    `${BASE}/goodhits/clients/${client.apiClientId}/campaigns-stat?dateInterval=interval&startDate=${sd}&endDate=${ed}`,
+    client.token
+  );
+  const m = j?.['campaigns-stat'];
+  return m && typeof m === 'object' ? m : {};
+}
+
+/** 純函式（POC 可測）：把 campaigns-stat 單日結果中、屬於 targetIds（statistics-reports 整段缺席的
+ * campaign）且當日有量（imp/click/spend 任一 >0）者，補成欄位形狀對齊 statistics-reports 的 pseudo-raw 列。
+ * teaserId 留空（campaigns-stat 無 teaser 維度，同裝置表 campaign 留空的取捨）；
+ * campaigns-stat 無 interest 轉換欄與 adRequests → 補 0。 */
+export function zeroClickSupplementRaw(
+  day: string, dayStat: Record<string, any>, targetIds: Set<string>
+): any[] {
+  const out: any[] = [];
+  for (const [cid, s] of Object.entries(dayStat)) {
+    if (!targetIds.has(String(cid))) continue;
+    const imps = Number(s?.imps) || 0;
+    const clicks = Number(s?.clicks) || 0;
+    const spent = Number(s?.spent) || 0;
+    if (imps <= 0 && clicks <= 0 && spent <= 0) continue; // 當日無量不補
+    out.push({
+      day, campaignId: cid, teaserId: '',
+      adRequests: 0, impressions: imps, clicks, spent, cpc: 0, cpm: 0, ctr: 0,
+      conversionsInterest: 0,
+      conversionsDecision: Number(s?.decision) || 0,
+      conversionsBuy: Number(s?.buying) || 0,
+      conversionsRateInterest: 0, conversionsRateDecision: 0, conversionsRateBuy: 0,
+      conversionsCostInterest: 0,
+      conversionsCostDecision: Number(s?.decisionCost) || 0,
+      conversionsCostBuy: Number(s?.buyingCost) || 0,
+    });
+  }
+  return out;
+}
+
 /** 單筆補打 teaser：/teasers 清單端點只回「當前清單」子集，較舊但仍存在的 teaser 查不到。
  * 統計報表卻以歷史上跑過的所有 teaser 為維度 → 對這些 teaserId 逐一 GET 單筆端點回填 title/url/image。
  * 真的查無（如已刪除，回 404）就回 null、維持空白，不中斷。 */
@@ -224,7 +267,27 @@ export async function fetchMgidReport(
   // 先把各視窗原始列收齊，才能一次找出「/teasers 清單查無」的 teaserId 補打回填（每帳號通常僅數筆）。
   const allRaw: any[] = [];
   for (const w of reportWindows(startDate, endDate)) {
-    allRaw.push(...await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS]));
+    const winRaw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS]);
+    allRaw.push(...winRaw);
+    // ⚠️ statistics-reports 會「整個排除區間內 0 click 的 campaign」（連 imp 都不回；後台 UI 看得到，
+    // 實證 poc/verify_mgid_zero_click_campaign.mts）。用 campaigns-stat（不排除零點擊）範圍前檢：
+    // 找出有量卻整段缺席的 campaign，有缺才逐日補打、生成 teaser 欄留空的補列（無缺＝只多 1 支輕量 API）。
+    const rangeStat = await fetchCampaignsStat(client, w.sd, w.ed);
+    const seen = new Set(winRaw.map((r) => String(r.campaignId ?? '')));
+    const missingIds = new Set(
+      Object.entries(rangeStat)
+        .filter(([id, s]: [string, any]) =>
+          !seen.has(id) && ((Number(s?.imps) || 0) > 0 || (Number(s?.clicks) || 0) > 0 || (Number(s?.spent) || 0) > 0))
+        .map(([id]) => id)
+    );
+    if (missingIds.size) {
+      for (let d = w.sd; d <= w.ed; d = addDays(d, 1)) {
+        // 單日視窗直接重用範圍前檢結果，免重打
+        const dayStat = w.sd === w.ed ? rangeStat : await fetchCampaignsStat(client, d, d);
+        allRaw.push(...zeroClickSupplementRaw(d, dayStat, missingIds));
+        if (w.sd !== w.ed) await sleep(300); // 逐日間節流（廣告主 API 併發 6+ 會 429）
+      }
+    }
   }
   const missing = [...new Set(allRaw.map((r) => String(r.teaserId ?? '')).filter(Boolean))].filter((t) => !teaserMeta[t]);
   for (const tid of missing) { // 序列補打（廣告主 API 併發 6+ 會 429）
