@@ -18,9 +18,11 @@ const BULK_COLS = [
   'date', 'imp', 'click', 'ctr', 'cpc', 'cpm', 'charge',
   'cv', 'cvr', 'mcv', 'campaign_id', 'campaign_name', 'ad_id',
 ] as const;
-// cv_* 細分轉換事件（11 欄，per-ad 實測全部）。bulk 端點不含，唯有 per-ad date_reporting 才有，
-// 故 base 13 欄用 bulk、這 11 欄另打 per-ad 取得後以 date+campaign_id+ad_id 接回（見 fetchCvDetailMap）。
+// per-ad 轉換欄（12 欄）：mcv2（第二次轉換 base，D 三個 base 轉換 cv/mcv/mcv2 之一；bulk 只回 cv/mcv、mcv2 唯有 per-ad 才有）
+// ＋ cv_* 細分轉換事件 11 欄（per-ad 實測全部）。bulk 端點都不含，故 base 13 欄用 bulk、
+// 這 12 欄另打 per-ad date_reporting 取得後以 date+campaign_id+ad_id 接回（見 fetchCvDetailMap）。
 const CV_COLS = [
+  'mcv2',
   'cv_view_content', 'cv_add_to_cart', 'cv_app_install', 'cv_complete_registration',
   'cv_add_paymentInfo', 'cv_start_checkout', 'cv_search', 'cv_add_to_wishlist',
   'cv_purchase', 'cv_lead', 'cv_other',
@@ -114,7 +116,7 @@ export const CV_BUCKET_KEYS = ['cv1', 'cv2', 'cv3', 'cv4'] as const;
 
 // 拖拉事件池（來源固定；UI chip 用同一份）——D 是使用者指定子集（不含 cv_purchase/lead/other）
 export const D_EVENT_POOL = [
-  'cv', 'mcv', 'cv_view_content', 'cv_add_to_cart', 'cv_app_install',
+  'cv', 'mcv', 'mcv2', 'cv_view_content', 'cv_add_to_cart', 'cv_app_install',
   'cv_complete_registration', 'cv_add_paymentInfo', 'cv_start_checkout',
   'cv_search', 'cv_add_to_wishlist',
 ];
@@ -348,7 +350,7 @@ async function fetchDRows(
         meta?.title ?? '',
         ...CV_COLS.map((c) => detail[c] ?? 0),
       ]);
-      // integrated 投影用的 enriched 列：桶事件欄位（cv/mcv/cv_*）+ 對映欄一應俱全
+      // integrated 投影用的 enriched 列：桶事件欄位（cv/mcv + CV_COLS 的 mcv2/cv_*）+ 對映欄一應俱全
       dSource.push({
         account_name: accountName,
         date: r.date, campaign_id: r.campaign_id, campaign_name: r.campaign_name,
