@@ -148,6 +148,11 @@ const STYLE = `
   .quick-head .qh-label{font-family:var(--mono);font-size:11.5px;font-weight:500;letter-spacing:.18em;
     text-transform:uppercase;color:var(--mut);white-space:nowrap}
   .quick-head .qh-line{flex:1;height:1px;background:var(--line)}
+  /* 編輯＝文字按鈕，外觀同 qh-label（mono/大寫/字距/淡色），可點擊、hover 轉 accent */
+  .quick-head .qh-edit{font-family:var(--mono);font-size:11.5px;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--mut);white-space:nowrap;background:none;border:none;
+    padding:0;cursor:pointer;transition:color .15s}
+  .quick-head .qh-edit:hover{color:var(--accent)}
   /* 編輯器 */
   .qe-list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
   .qe-card{display:flex;align-items:center;gap:12px;background:var(--slot);border:1px solid var(--line);
@@ -300,7 +305,7 @@ export function renderSlotBoard(tools: SlotTool[], overlay: QuickLinkOverlay): s
     <div class="quick-head">
       <span class="qh-label">快捷 · quick access</span>
       <span class="qh-line"></span>
-      <button id="qedit" class="btn-line">編輯</button>
+      <button id="qedit" class="qh-edit">編輯</button>
     </div>
     <div class="ext" id="quick-static">${quickItems.map(quickCard).join('')}
     </div>
