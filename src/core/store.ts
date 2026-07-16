@@ -337,7 +337,10 @@ export interface BulkConfigRow {
   mgidClientIds: string[]; // 多個 MGID api_client_id（對應 mgid_tokens.api_client_id）；可空＝不抓 M
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；抓到此日（含）後停止同步。null=不限、持續每日 T-1
-  lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過
+  lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過（deprecated：改用下面三平台游標，Task 6 移除）
+  lastSyncedD: string | null; // D 平台游標 YYYY-MM-DD；null=未跑過（平台級容錯：三平台各自推進）
+  lastSyncedR: string | null;
+  lastSyncedM: string | null;
   lastRunAt: string | null;
   lastRunStatus: string | null; // success / error / running
   lastRunMessage: string | null;
@@ -413,6 +416,18 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
   if (!(await hasCol('cv_buckets'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN cv_buckets TEXT NULL`);
   }
+  // 三平台各自游標（平台級容錯）：加欄當下用舊共用游標 last_synced_date 一次性回填；
+  // 舊欄之後不再讀寫、保留當 rollback（比照 account_names 慣例）
+  if (!(await hasCol('last_synced_d'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN last_synced_d DATE NULL`);
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN last_synced_r DATE NULL`);
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN last_synced_m DATE NULL`);
+    await p.query(
+      `UPDATE adstream_configs
+       SET last_synced_d = last_synced_date, last_synced_r = last_synced_date, last_synced_m = last_synced_date
+       WHERE last_synced_date IS NOT NULL`
+    );
+  }
   // 舊 account_names 欄保留當 rollback，但放寬可空（不再寫入）；只在仍為 NOT NULL 時改一次
   const [legacyCol] = await p.query(
     `SELECT is_nullable FROM information_schema.columns
@@ -430,6 +445,9 @@ const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_i
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
   DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
+  DATE_FORMAT(last_synced_d, '%Y-%m-%d') AS last_synced_d,
+  DATE_FORMAT(last_synced_r, '%Y-%m-%d') AS last_synced_r,
+  DATE_FORMAT(last_synced_m, '%Y-%m-%d') AS last_synced_m,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
   last_run_status, last_run_message, created_by, cv_buckets,
   DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
@@ -456,6 +474,9 @@ function mapBulkRow(r: any): BulkConfigRow {
     backfillStartDate: r.backfill_start_date,
     endDate: r.end_date ?? null,
     lastSyncedDate: r.last_synced_date,
+    lastSyncedD: r.last_synced_d,
+    lastSyncedR: r.last_synced_r,
+    lastSyncedM: r.last_synced_m,
     lastRunAt: r.last_run_at,
     lastRunStatus: r.last_run_status,
     lastRunMessage: r.last_run_message,
@@ -552,19 +573,24 @@ export async function deleteBulkConfig(id: number): Promise<boolean> {
   return (res as any).affectedRows > 0;
 }
 
-/** 記錄一次執行結果；syncedDate 有給時一併更新 last_synced_date（同步進度的權威來源）。 */
+/** 記錄一次執行結果；syncedDates 有給哪個平台就更新哪個平台的游標（各平台獨立推進）。 */
 export async function markBulkRun(
   id: number,
-  run: { status: 'success' | 'error' | 'running'; message?: string; syncedDate?: string | null }
+  run: {
+    status: 'success' | 'error' | 'partial' | 'running';
+    message?: string;
+    syncedDates?: { d?: string; r?: string; m?: string };
+  }
 ): Promise<void> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const sets = ['last_run_at = NOW()', 'last_run_status = ?', 'last_run_message = ?'];
   const params: any[] = [run.status, run.message ?? null];
-  if (run.syncedDate) {
-    sets.push('last_synced_date = ?');
-    params.push(run.syncedDate);
+  const colByKey = { d: 'last_synced_d', r: 'last_synced_r', m: 'last_synced_m' } as const;
+  for (const k of ['d', 'r', 'm'] as const) {
+    const v = run.syncedDates?.[k];
+    if (v) { sets.push(`${colByKey[k]} = ?`); params.push(v); }
   }
   params.push(id);
   await p.query(`UPDATE adstream_configs SET ${sets.join(', ')} WHERE id = ?`, params);

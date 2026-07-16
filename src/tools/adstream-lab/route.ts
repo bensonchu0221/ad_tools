@@ -342,7 +342,7 @@ async function executeAndRecord(
       parts.push(`R ${res.rRowCount} 列（${rTypeLabel[res.rStat.userType] ?? res.rStat.userType}）`);
     }
     const msg = `同步 ${res.startDate}~${res.endDate}：${parts.join('；') || '無資料'}`;
-    await markBulkRun(config.id, { status: 'success', message: msg, syncedDate: res.endDate });
+    await markBulkRun(config.id, { status: 'success', message: msg, syncedDates: { d: res.endDate ?? undefined, r: res.endDate ?? undefined, m: res.endDate ?? undefined } });
     return msg;
   } catch (e: any) {
     const msg = String(e?.message ?? e);
@@ -365,7 +365,7 @@ async function rerunAndRecord(
       const cur = config.lastSyncedDate;
       syncedDate = !cur || res.targetDate > cur ? res.targetDate : cur;
     }
-    await markBulkRun(config.id, { status: 'success', message: msg, syncedDate });
+    await markBulkRun(config.id, { status: 'success', message: msg, syncedDates: syncedDate ? { d: syncedDate, r: syncedDate, m: syncedDate } : undefined });
     return msg;
   } catch (e: any) {
     const m = String(e?.message ?? e);
