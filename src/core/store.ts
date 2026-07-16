@@ -337,8 +337,7 @@ export interface BulkConfigRow {
   mgidClientIds: string[]; // 多個 MGID api_client_id（對應 mgid_tokens.api_client_id）；可空＝不抓 M
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；抓到此日（含）後停止同步。null=不限、持續每日 T-1
-  lastSyncedDate: string | null; // YYYY-MM-DD；null=未跑過（deprecated：改用下面三平台游標，Task 6 移除）
-  lastSyncedD: string | null; // D 平台游標 YYYY-MM-DD；null=未跑過（平台級容錯：三平台各自推進）
+  lastSyncedD: string | null; // D 平台游標 YYYY-MM-DD；null=未跑過（平台級容錯：三平台各自推進；舊共用欄 last_synced_date 保留 DB 不讀寫）
   lastSyncedR: string | null;
   lastSyncedM: string | null;
   lastRunAt: string | null;
@@ -444,7 +443,6 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
 const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids,
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
-  DATE_FORMAT(last_synced_date, '%Y-%m-%d') AS last_synced_date,
   DATE_FORMAT(last_synced_d, '%Y-%m-%d') AS last_synced_d,
   DATE_FORMAT(last_synced_r, '%Y-%m-%d') AS last_synced_r,
   DATE_FORMAT(last_synced_m, '%Y-%m-%d') AS last_synced_m,
@@ -473,7 +471,6 @@ function mapBulkRow(r: any): BulkConfigRow {
     mgidClientIds: parseJsonArray(r.mgid_client_ids),
     backfillStartDate: r.backfill_start_date,
     endDate: r.end_date ?? null,
-    lastSyncedDate: r.last_synced_date,
     lastSyncedD: r.last_synced_d,
     lastSyncedR: r.last_synced_r,
     lastSyncedM: r.last_synced_m,
