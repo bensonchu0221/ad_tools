@@ -9,7 +9,7 @@ import {
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { currentUser } from '../../core/auth.js';
-import { runConfig, rerunDay, RAW_TAB, R_RAW_TAB, M_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RerunScope } from './run.js';
+import { runConfig, rerunDay, syncedLabel, RAW_TAB, R_RAW_TAB, M_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RerunScope, type PlatformOutcome, type RerunSourceOutcome } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
@@ -155,67 +155,102 @@ const STYLE = `
   @media(max-width:600px){.toast-dock{right:14px;left:14px;bottom:14px;width:auto}}
 `;
 
-/** 執行一次並把結果寫回 DB（手動執行與 cron 共用）。回傳人類可讀摘要。 */
+/** 執行一次並把結果寫回 DB（手動執行與 cron 共用）。回傳人類可讀摘要。
+ *  平台級容錯：逐平台組訊息與游標；全失敗→error（throw）、部分失敗→partial（不 throw，訊息帶失敗原因）。 */
 async function executeAndRecord(
   config: BulkConfigRow,
   onPhase: (p: string) => void = () => {}
 ): Promise<string> {
+  let recorded = false; // status 已寫 DB 後才 throw 時，catch 不要再覆寫一次
   try {
     const res = await runConfig(config, onPhase);
-    if (res.skipped) {
-      // 區分「正常無新資料」與「已達終止日停止」，讓清單訊息一眼看懂為何沒抓
-      const reachedEnd = config.endDate && config.lastSyncedDate && config.lastSyncedDate >= config.endDate;
+    const rTypeLabel: Record<string, string> = { agency: '台客', direct: '4A', super: 'Super' };
+    const entries: { tag: string; o: PlatformOutcome }[] = [
+      { tag: 'D', o: res.d }, { tag: 'R', o: res.r }, { tag: 'MGID', o: res.m },
+    ].filter((e) => e.o.configured);
+
+    // 全部已設定平台視窗皆空＝整體已最新（區分「正常無新資料」與「已達終止日停止」）
+    if (entries.every((e) => e.o.status === 'skipped')) {
+      const cursors = [
+        config.accountIds.length ? config.lastSyncedD : undefined,
+        config.rUserIds.length ? config.lastSyncedR : undefined,
+        config.mgidClientIds.length ? config.lastSyncedM : undefined,
+      ].filter((c) => c !== undefined);
+      const reachedEnd = config.endDate && cursors.length && cursors.every((c) => c && c >= config.endDate!);
       const msg = reachedEnd
-        ? `已達終止日 ${config.endDate}，停止同步（已同步到 ${config.lastSyncedDate}）`
-        : `已是最新（無新資料，已同步到 ${config.lastSyncedDate ?? '—'}）`;
+        ? `已達終止日 ${config.endDate}，停止同步（已同步到 ${syncedLabel(config)}）`
+        : `已是最新（無新資料，已同步到 ${syncedLabel(config)}）`;
       await markBulkRun(config.id, { status: 'success', message: msg });
       return msg;
     }
-    const rTypeLabel: Record<string, string> = { agency: '台客', direct: '4A', super: 'Super' };
+
     const parts: string[] = [];
-    if (res.accountStats.length) {
-      parts.push(`D ${res.dRowCount} 列（${res.accountStats.map((s) => `${s.account}:${s.rows}`).join('、')}）`);
+    for (const { tag, o } of entries) {
+      if (o.status === 'skipped') { parts.push(`${tag} 已是最新`); continue; }
+      if (o.status === 'error') { parts.push(`${tag} 失敗：${o.error}`); continue; }
+      const win = o.window ? `${o.window.startDate}~${o.window.endDate} ` : '';
+      let detail = '';
+      if (tag === 'D' && o.accountStats?.length) detail = `（${o.accountStats.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
+      if (tag === 'R') detail = o.rUserType ? `（${rTypeLabel[o.rUserType] ?? o.rUserType}）` : '';
+      if (tag === 'MGID' && o.mStat?.length) detail = `（${o.mStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
+      parts.push(`${tag} ${win}${o.rawRows} 列${detail}${o.warning ? `⚠ ${o.warning}` : ''}`);
     }
-    if (res.rStat) {
-      parts.push(`R ${res.rRowCount} 列（${rTypeLabel[res.rStat.userType] ?? res.rStat.userType}）`);
-    }
-    if (res.mStat.length) {
-      parts.push(`MGID ${res.mRowCount} 列（${res.mStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`);
-    }
-    // 整合表／裝置表列數也帶出來：跳過本機驗證直接上線時，操作者靠這個一眼看出兩張新分頁有沒有真的寫入
-    parts.push(`整合 ${res.integratedRowCount} 列`);
-    parts.push(`裝置 ${res.deviceRowCount} 列`);
-    const msg = `同步 ${res.startDate}~${res.endDate}：${parts.join('；') || '無資料'}`;
-    await markBulkRun(config.id, { status: 'success', message: msg, syncedDates: { d: res.endDate ?? undefined, r: res.endDate ?? undefined, m: res.endDate ?? undefined } });
+    // 整合表／裝置表列數也帶出來：操作者靠這個一眼看出兩張整合分頁有沒有真的寫入
+    const okOnes = entries.filter((e) => e.o.status === 'ok');
+    parts.push(`整合 ${okOnes.reduce((s, e) => s + e.o.integratedRows, 0)} 列`);
+    parts.push(`裝置 ${okOnes.reduce((s, e) => s + e.o.deviceRows, 0)} 列`);
+
+    const anyError = entries.some((e) => e.o.status === 'error');
+    const status = anyError ? (okOnes.length ? 'partial' as const : 'error' as const) : 'success' as const;
+    const msg = `同步：${parts.join('；')}`;
+    await markBulkRun(config.id, {
+      status, message: msg,
+      syncedDates: { d: res.d.syncedDate, r: res.r.syncedDate, m: res.m.syncedDate },
+    });
+    recorded = true;
+    if (status === 'error') throw new Error(msg); // 全失敗才讓 job 顯示錯誤；partial 回摘要
     return msg;
   } catch (e: any) {
-    const msg = String(e?.message ?? e);
-    await markBulkRun(config.id, { status: 'error', message: msg });
+    if (!recorded) {
+      await markBulkRun(config.id, { status: 'error', message: String(e?.message ?? e) });
+    }
     throw e;
   }
 }
 
-/** 重抓昨天並寫回 DB。涵蓋全部來源才把游標對齊到 max(現游標, 昨天)；否則只記 last_run 不動游標。 */
+/** 重抓昨天並寫回 DB。成功來源各自把游標對齊到 max(現游標, 昨天)、不倒退；失敗來源不動游標。 */
 async function rerunAndRecord(
   config: BulkConfigRow, scope: RerunScope, onPhase: (p: string) => void = () => {}
 ): Promise<string> {
+  let recorded = false;
   try {
     const res = await rerunDay(config, scope, onPhase);
-    const parts: string[] = [];
-    if (res.dRows || res.dDeleted) parts.push(`D 刪 ${res.dDeleted}／寫 ${res.dRows}`);
-    if (res.rRows || res.rDeleted) parts.push(`R 刪 ${res.rDeleted}／寫 ${res.rRows}`);
-    if (res.mRows || res.mDeleted) parts.push(`MGID 刪 ${res.mDeleted}／寫 ${res.mRows}`);
+    const all: { tag: string; key: 'd' | 'r' | 'm'; o: RerunSourceOutcome; cur: string | null }[] = [
+      { tag: 'D', key: 'd', o: res.d, cur: config.lastSyncedD },
+      { tag: 'R', key: 'r', o: res.r, cur: config.lastSyncedR },
+      { tag: 'MGID', key: 'm', o: res.m, cur: config.lastSyncedM },
+    ];
+    const entries = all.filter((e) => e.o.attempted);
+    const parts = entries.map((e) =>
+      e.o.error ? `${e.tag} 失敗：${e.o.error}` : `${e.tag} 刪 ${e.o.deleted}／寫 ${e.o.rows}`
+    );
     const msg = `重抓 ${res.targetDate}：${parts.join('；') || '無資料'}`;
-    let syncedDate: string | undefined;
-    if (res.coversAllSources) {
-      const cur = config.lastSyncedDate;
-      syncedDate = !cur || res.targetDate > cur ? res.targetDate : cur;
+    const syncedDates: { d?: string; r?: string; m?: string } = {};
+    for (const e of entries) {
+      if (e.o.error) continue;
+      syncedDates[e.key] = !e.cur || res.targetDate > e.cur ? res.targetDate : e.cur;
     }
-    await markBulkRun(config.id, { status: 'success', message: msg, syncedDates: syncedDate ? { d: syncedDate, r: syncedDate, m: syncedDate } : undefined });
+    const anyError = entries.some((e) => !!e.o.error);
+    const anyOk = entries.some((e) => !e.o.error);
+    const status = anyError ? (anyOk ? 'partial' as const : 'error' as const) : 'success' as const;
+    await markBulkRun(config.id, { status, message: msg, syncedDates });
+    recorded = true;
+    if (status === 'error') throw new Error(msg);
     return msg;
   } catch (e: any) {
-    const m = String(e?.message ?? e);
-    await markBulkRun(config.id, { status: 'error', message: m });
+    if (!recorded) {
+      await markBulkRun(config.id, { status: 'error', message: String(e?.message ?? e) });
+    }
     throw e;
   }
 }
@@ -250,6 +285,7 @@ export async function registerAdstream(app: FastifyInstance) {
     const rows = configs.map((c) => {
       const statusBadge =
         c.lastRunStatus === 'success' ? '<span class="st st-done">成功</span>'
+        : c.lastRunStatus === 'partial' ? '<span class="st st-part">部分成功</span>'
         : c.lastRunStatus === 'error' ? '<span class="st st-fail">失敗</span>'
         : c.lastRunStatus === 'running' ? '<span class="st st-run">執行中</span>'
         : '<span class="st st-queued">未執行</span>';
@@ -285,7 +321,7 @@ export async function registerAdstream(app: FastifyInstance) {
         <td class="muted"><a href="${esc(c.sheetUrl)}" target="_blank" style="color:var(--accent)">開啟 ↗</a></td>
         <td class="muted">${c.backfillStartDate}</td>
         <td class="muted">${c.endDate ?? '<span style="color:var(--mut)">不限</span>'}</td>
-        <td class="muted">${c.lastSyncedDate ?? '—'}</td>
+        <td class="muted">${esc(syncedLabel(c))}</td>
         <td class="muted">${statusBadge}<br>${c.lastRunAt ?? '—'}</td>
         <td class="muted"><div class="msgline" title="${esc(c.lastRunMessage ?? '')}">${esc(c.lastRunMessage ?? '')}</div></td>
         <td><div class="acts">

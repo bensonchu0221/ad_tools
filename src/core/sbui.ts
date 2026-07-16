@@ -116,6 +116,7 @@ const SB_CSS = `
   .st-run{color:var(--accent);border-color:var(--accent)}
   .st-done{color:var(--ok);border-color:var(--ok)}
   .st-fail{color:var(--err);border-color:var(--err)}
+  .st-part{color:#B45309;border-color:#B45309} /* 部分成功（平台級容錯：一部分平台失敗） */
   .btn-dl{font-family:var(--mono);font-size:12px;color:var(--ok);text-decoration:none;
     border:1px solid var(--ok);border-radius:5px;padding:4px 10px}
   .btn-dl:hover{background:var(--ok);color:#fff}
