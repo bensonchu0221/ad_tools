@@ -1,7 +1,9 @@
-// AdStream（tool#3）核心：把多個 D 帳號 + R(Rixbee) 帳號的 bulk 原始報表 append 到同一個
-// Google Sheet 的兩個分頁（D→d_bulk_raw_data、R→r_bulk_raw_data）。
-// 增量規則：每次抓「上次同步日隔天 → 昨天(T-1)」。沒有上次同步日就從設定的回補起始日開始，
-// 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋（D/R 共用同一個進度游標）。
+// AdStream（tool#3）核心：把多個 D 帳號 + R(Rixbee) + MGID 帳號的 bulk 原始報表 append 到同一個
+// Google Sheet 的分頁（D→d_bulk_raw_data、R→r_bulk_raw_data、M→m_bulk_raw_data）。
+// 增量規則：每平台各自抓「該平台上次同步日隔天 → 昨天(T-1)」。沒有上次同步日就從設定的回補起始日開始，
+// 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋。
+// 平台級容錯：D/R/M 三平台各自游標（last_synced_d/r/m）、各自執行單元——單平台失敗只影響自己
+// （該平台這次不寫、游標不推），其餘平台照常；平台內維持原子性（任一帳號失敗＝整個平台失敗）。
 import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports, getCampaignDeviceReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidReportRow } from '../../core/mgid.js';
@@ -41,9 +43,10 @@ export const INTEGRATED_HEADER = [
   'imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4',
 ];
 
-// device_summary 分頁（聚合型，每同步日 4 列：PC/Mobile/Tablet/Others；跨帳號加總、cv1~4 用同一組桶）
+// device_summary 分頁（聚合型，每同步日「每平台」各 4 列：PC/Mobile/Tablet/Others；跨帳號加總、cv1~4 用同一組桶）
+// 平台級容錯後帶 platform 欄、不再跨平台加總——各平台各寫各的列，BI 端自行 sum。
 export const DEVICE_TAB = 'device_summary';
-export const DEVICE_HEADER = ['synced_at', 'date', 'device', 'imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4'];
+export const DEVICE_HEADER = ['platform', 'synced_at', 'date', 'device', 'imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4'];
 
 // 裝置桶與口徑（沿用 weeklyreport report.ts）：D 只有 pc_/mobile_ 有 base 指標；R device_type 代碼對照
 const DEVICE_ORDER = ['PC', 'Mobile', 'Tablet', 'Others'] as const;
@@ -262,44 +265,57 @@ async function fetchAdMetaMap(
   return map;
 }
 
+export type ProbeOutcome = { kind: 'data' | 'empty' } | { kind: 'error'; message: string };
+
 /**
- * 自動偵測 R 帳號類型（搬自週報 detectRUserType）：台客/4A 各打極小 probe（必帶 day 維度，
- * 否則無維度彙總「查無也回一列全 0」會誤判）；兩者皆有＝混型 → Super；都沒有再試 Super；三者皆無 throw。
+ * 自動偵測 R 帳號類型（三態版，搬自週報再改）：台客/4A 各打極小 probe（必帶 day 維度，
+ * 否則無維度彙總「查無也回一列全 0」會誤判）；兩者皆有＝混型 → Super；都沒有再試 Super。
+ * probe 回「有資料/乾淨無資料/錯誤」三態：
+ * - 三型皆乾淨無資料 → 回 null（零投放，呼叫端當 0 列、游標照推——R 尚未開跑屬正常）
+ * - 無任何型有資料且有 probe 錯誤 → throw（token 壞/API 掛不可靜默當 0，走平台失敗路徑）
+ * probeOverride 供 poc 注入假 probe。
  */
-async function detectRUserType(userIds: string[], startDate: string, endDate: string): Promise<UserType> {
-  const probe = async (userType: UserType) => {
+export async function detectRUserType(
+  userIds: string[], startDate: string, endDate: string,
+  probeOverride?: (userType: UserType) => Promise<ProbeOutcome>
+): Promise<UserType | null> {
+  const probe = probeOverride ?? (async (userType: UserType): Promise<ProbeOutcome> => {
     try {
       const rows = await fetchReport({
         userType, userIds, startDate, endDate, dimensions: ['day'], metrics: [], maxRows: 1,
       });
-      return rows.length > 0;
-    } catch {
-      return false;
+      return { kind: rows.length > 0 ? 'data' : 'empty' };
+    } catch (e: any) {
+      return { kind: 'error', message: String(e?.message ?? e) };
     }
-  };
-  const [hasAgency, hasDirect] = await Promise.all([probe('agency'), probe('direct')]);
-  if (hasAgency && hasDirect) return 'super';
-  if (hasAgency) return 'agency';
-  if (hasDirect) return 'direct';
-  if (await probe('super')) return 'super';
-  throw new Error(
-    `Rixbee Account ID（${userIds.join(', ')}）在台客/4A/Super 三種類型下都查無資料，請確認 ID 與日期範圍。`
-  );
+  });
+  const [agency, direct] = await Promise.all([probe('agency'), probe('direct')]);
+  if (agency.kind === 'data' && direct.kind === 'data') return 'super';
+  if (agency.kind === 'data') return 'agency';
+  if (direct.kind === 'data') return 'direct';
+  const superP = await probe('super');
+  if (superP.kind === 'data') return 'super';
+  const errs = [agency, direct, superP].filter((p): p is { kind: 'error'; message: string } => p.kind === 'error');
+  if (errs.length) {
+    throw new Error(`Rixbee Account ID（${userIds.join(', ')}）偵測失敗（無法確認是零投放還是 API/token 問題）：${errs[0].message}`);
+  }
+  return null;
 }
 
-export interface RunResult {
-  skipped: boolean; // 區間為空（已是最新）
-  startDate: string | null;
-  endDate: string | null;
-  dRowCount: number;
-  rRowCount: number;
-  mRowCount: number; // MGID 分頁寫入列數
-  integratedRowCount: number; // integrated 分頁寫入列數（觀測用，讓操作者看得到新分頁確實寫入）
-  deviceRowCount: number; // device_summary 分頁寫入列數
-  accountStats: { account: string; rows: number }[]; // D 各帳號
-  rStat?: { userType: UserType; rows: number }; // R（有設定才有）
-  mStat: { account: string; rows: number }[]; // MGID 各帳號
+/** 單一平台這次執行的結果（平台級容錯：呼叫端依此各自推游標、組訊息）。 */
+export interface PlatformOutcome {
+  configured: boolean; // 設定裡有沒有這個平台
+  status: 'ok' | 'skipped' | 'error'; // skipped＝視窗為空（已最新）
+  window?: { startDate: string; endDate: string };
+  rawRows: number; integratedRows: number; deviceRows: number;
+  syncedDate?: string; // ok 時＝視窗迄日，呼叫端寫游標
+  warning?: string; // 如 R 查無資料（零投放）
+  error?: string;
+  accountStats?: { account: string; rows: number }[]; // D 各帳號
+  rUserType?: UserType | null; // R（null＝零投放）
+  mStat?: { account: string; rows: number }[]; // MGID 各帳號
 }
+export interface RunResult { d: PlatformOutcome; r: PlatformOutcome; m: PlatformOutcome; }
 
 /** 昨天（Asia/Taipei T-1）YYYY-MM-DD */
 export function twYesterday(): string {
@@ -308,14 +324,8 @@ export function twYesterday(): string {
 
 // 'both'＝重抓所有已設定來源（D/R/M 皆抓，沿用舊字面值＝相容）；'d'/'r'/'m'＝只重抓單一來源
 export type RerunScope = 'both' | 'd' | 'r' | 'm';
-export interface RerunResult {
-  targetDate: string;
-  scopeUsed: RerunScope;
-  dDeleted: number; dRows: number;
-  rDeleted: number; rRows: number;
-  mDeleted: number; mRows: number;
-  coversAllSources: boolean;
-}
+export interface RerunSourceOutcome { attempted: boolean; deleted: number; rows: number; error?: string }
+export interface RerunResult { targetDate: string; d: RerunSourceOutcome; r: RerunSourceOutcome; m: RerunSourceOutcome; }
 
 /** 抓該設定所有 D 帳號在 [sd,ed] 的 bulk + adMeta(headline/url) + cv 細分，組成 sheet 列。供 runConfig/rerunDay 共用。 */
 async function fetchDRows(
@@ -366,21 +376,25 @@ async function fetchDRows(
   return { dRows, dSource, accountStats };
 }
 
-/** 抓該設定所有 R 帳號在 [startDate,endDate] 的全欄位報表，組成 sheet 列。供 runConfig/rerunDay 共用。 */
+/** 抓該設定所有 R 帳號在 [startDate,endDate] 的全欄位報表，組成 sheet 列。供 runConfig/rerunDay 共用。
+ *  userType=null＝三型皆乾淨查無資料（零投放）：回 0 列＋warning，呼叫端視為成功、游標照推。 */
 async function fetchRRows(
   config: BulkConfigRow, startDate: string, endDate: string,
   syncedAt: string, onPhase: (p: string) => void
-): Promise<{ rRows: (string | number)[][]; rSource: any[]; rStat?: { userType: UserType; rows: number } }> {
+): Promise<{ rRows: (string | number)[][]; rSource: any[]; userType: UserType | null; warning?: string }> {
   const rRows: (string | number)[][] = [];
-  if (!config.rUserIds.length) return { rRows, rSource: [] };
+  if (!config.rUserIds.length) return { rRows, rSource: [], userType: null };
   onPhase('偵測 R 帳號類型…');
   const userType = await detectRUserType(config.rUserIds, startDate, endDate);
+  if (userType === null) {
+    return { rRows, rSource: [], userType: null, warning: 'R 查無資料（三種帳號類型皆無；若 R 尚未開始投放屬正常）' };
+  }
   onPhase(`抓取 R（${R_TYPE_LABEL[userType]}，${config.rUserIds.join(',')}，${startDate}~${endDate}）…`);
   const raw = await fetchReport({
     userType, userIds: config.rUserIds, startDate, endDate, dimensions: R_DIMENSIONS, metrics: [],
   });
   for (const r of raw) rRows.push([syncedAt, ...R_COLS.map((c) => r[c] ?? '')]);
-  return { rRows, rSource: raw, rStat: { userType, rows: raw.length } };
+  return { rRows, rSource: raw, userType };
 }
 
 /** 依 config.mgidClientIds 取各 MGID 帳號的 client（api_client_id + token + 名字）；缺 token 直接拋錯。 */
@@ -470,12 +484,12 @@ type DevAgg = { imp: number; click: number; spend: number; cv1: number; cv2: num
 const emptyDevAgg = (): DevAgg => ({ imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 });
 
 /**
- * 聚合裝置列：把 D campaign 層裝置回應（pc_/mobile_ 前綴）與 R device_type 列，
- * 依 (date, device) 累加 base(imp/click/spend) 與 cv1~4（同一組桶），輸出「日期×裝置」列。
- * 跨帳號加總（呼叫端把多帳號 dRows 併在一起傳入）。純函式，供 poc 驗。
+ * 聚合裝置列（單平台版）：每天固定輸出 4 列（PC/Mobile/Tablet/Others）、帶 platform 欄。
+ * 平台級容錯後各平台各寫各的列、不再跨平台加總——BI 端自行 sum。純函式，供 poc 驗。
+ * rows 依 platform 各自的原始形狀：D=campaign 層 pc_/mobile_ 寬列、R=day×device_type、M=已正規化 device。
  */
 export function buildDeviceRows(
-  deviceInputs: { dRows: any[]; rRows: any[]; mRows?: any[] }, syncedAt: string, cvBuckets: CvBuckets
+  platform: 'D' | 'R' | 'M', rows: any[], syncedAt: string, cvBuckets: CvBuckets
 ): (string | number)[][] {
   const map = new Map<string, DevAgg>(); // key = date|device
   const get = (date: string, device: string): DevAgg => {
@@ -484,66 +498,65 @@ export function buildDeviceRows(
     if (!a) { a = emptyDevAgg(); map.set(k, a); }
     return a;
   };
-  // D：每列含 pc_/mobile_ 前綴欄；只累加 PC/Mobile（其餘裝置 D 無 base 指標）
-  for (const row of deviceInputs.dRows) {
-    const date = toYmdDash(row.date);
-    for (const { prefix, label } of D_DEVICE_PREFIX) {
-      const a = get(date, label);
-      a.imp += Number(row[`${prefix}_imp`]) || 0;
-      a.click += Number(row[`${prefix}_click`]) || 0;
-      a.spend += Number(row[`${prefix}_charge`]) || 0;
-      a.cv1 += sumBucketD(row, cvBuckets.cv1, `${prefix}_`);
-      a.cv2 += sumBucketD(row, cvBuckets.cv2, `${prefix}_`);
-      a.cv3 += sumBucketD(row, cvBuckets.cv3, `${prefix}_`);
-      a.cv4 += sumBucketD(row, cvBuckets.cv4, `${prefix}_`);
+  if (platform === 'D') {
+    // D：每列含 pc_/mobile_ 前綴欄；只累加 PC/Mobile（其餘裝置 D 無 base 指標）
+    for (const row of rows) {
+      const date = toYmdDash(row.date);
+      for (const { prefix, label } of D_DEVICE_PREFIX) {
+        const a = get(date, label);
+        a.imp += Number(row[`${prefix}_imp`]) || 0;
+        a.click += Number(row[`${prefix}_click`]) || 0;
+        a.spend += Number(row[`${prefix}_charge`]) || 0;
+        a.cv1 += sumBucketD(row, cvBuckets.cv1, `${prefix}_`);
+        a.cv2 += sumBucketD(row, cvBuckets.cv2, `${prefix}_`);
+        a.cv3 += sumBucketD(row, cvBuckets.cv3, `${prefix}_`);
+        a.cv4 += sumBucketD(row, cvBuckets.cv4, `${prefix}_`);
+      }
     }
-  }
-  // R：device_type 樞紐到裝置桶
-  for (const r of deviceInputs.rRows) {
-    const date = toYmdDash(r.day);
-    const a = get(date, rDeviceBucket(r.device_type));
-    a.imp += Number(r.impression) || 0;
-    a.click += Number(r.click) || 0;
-    a.spend += Number(r.payment_revenue) || 0;
-    a.cv1 += sumBucketR(r, cvBuckets.cv1);
-    a.cv2 += sumBucketR(r, cvBuckets.cv2);
-    a.cv3 += sumBucketR(r, cvBuckets.cv3);
-    a.cv4 += sumBucketR(r, cvBuckets.cv4);
-  }
-  // M(MGID)：MgidDeviceRow 已把 deviceType 正規化成 PC/Mobile/Tablet/Others；conv_* 走 M 桶
-  for (const m of deviceInputs.mRows ?? []) {
-    const date = toYmdDash(m.date);
-    const a = get(date, m.device);
-    a.imp += Number(m.imp) || 0;
-    a.click += Number(m.click) || 0;
-    a.spend += Number(m.spend) || 0;
-    a.cv1 += sumBucketM(m, cvBuckets.cv1);
-    a.cv2 += sumBucketM(m, cvBuckets.cv2);
-    a.cv3 += sumBucketM(m, cvBuckets.cv3);
-    a.cv4 += sumBucketM(m, cvBuckets.cv4);
+  } else if (platform === 'R') {
+    // R：device_type 樞紐到裝置桶
+    for (const r of rows) {
+      const date = toYmdDash(r.day);
+      const a = get(date, rDeviceBucket(r.device_type));
+      a.imp += Number(r.impression) || 0;
+      a.click += Number(r.click) || 0;
+      a.spend += Number(r.payment_revenue) || 0;
+      a.cv1 += sumBucketR(r, cvBuckets.cv1);
+      a.cv2 += sumBucketR(r, cvBuckets.cv2);
+      a.cv3 += sumBucketR(r, cvBuckets.cv3);
+      a.cv4 += sumBucketR(r, cvBuckets.cv4);
+    }
+  } else {
+    // M(MGID)：MgidDeviceRow 已把 deviceType 正規化成 PC/Mobile/Tablet/Others；conv_* 走 M 桶
+    for (const m of rows) {
+      const date = toYmdDash(m.date);
+      const a = get(date, m.device);
+      a.imp += Number(m.imp) || 0;
+      a.click += Number(m.click) || 0;
+      a.spend += Number(m.spend) || 0;
+      a.cv1 += sumBucketM(m, cvBuckets.cv1);
+      a.cv2 += sumBucketM(m, cvBuckets.cv2);
+      a.cv3 += sumBucketM(m, cvBuckets.cv3);
+      a.cv4 += sumBucketM(m, cvBuckets.cv4);
+    }
   }
   // 輸出：日期升序、裝置固定序 PC/Mobile/Tablet/Others；空桶(全 0)仍輸出以維持每日 4 列一致
   const dates = [...new Set([...map.keys()].map((k) => k.split('|')[0]))].sort();
-  const rows: (string | number)[][] = [];
+  const out: (string | number)[][] = [];
   for (const date of dates) {
     for (const device of DEVICE_ORDER) {
       const a = map.get(`${date}|${device}`) ?? emptyDevAgg();
-      rows.push([syncedAt, date, device, a.imp, a.click, a.spend, a.cv1, a.cv2, a.cv3, a.cv4]);
+      out.push([platform, syncedAt, date, device, a.imp, a.click, a.spend, a.cv1, a.cv2, a.cv3, a.cv4]);
     }
   }
-  return rows;
+  return out;
 }
 
-/**
- * 抓該設定所有 D 帳號的 campaign 層裝置報表（platform_cv=1）＋ R 的 device_type 維度，
- * 併成 buildDeviceRows 的輸入後聚合成 device_summary 列。⚠️ 這是現行沒抓的額外裝置維度 API。
- * 任一段失敗往外拋，由 runConfig 原子性接住（四張都不寫、游標不推進）。
- */
-async function fetchDeviceRows(
-  config: BulkConfigRow, sd: string, ed: string, startDate: string, endDate: string,
-  syncedAt: string, cvBuckets: CvBuckets, onPhase: (p: string) => void
-): Promise<(string | number)[][]> {
-  const dDeviceRows: any[] = [];
+/** D 裝置維度：campaign 層 platform_cv=1（pc_/mobile_ 寬列）。 */
+async function fetchDDeviceRows(
+  config: BulkConfigRow, sd: string, ed: string, onPhase: (p: string) => void
+): Promise<any[]> {
+  const out: any[] = [];
   for (const accountId of config.accountIds) {
     onPhase(`抓取 D 帳號 ${accountId} 裝置維度（platform_cv）…`);
     const token = await getDAccountTokenById(accountId);
@@ -551,98 +564,166 @@ async function fetchDeviceRows(
     const accessToken = await getAccessToken(token);
     const campaigns = await getCampaigns(accessToken);
     const campaignIds = campaigns.map((c: any) => String(c.mongo_id)).filter(Boolean);
-    const rows = await getCampaignDeviceReports(accessToken, campaignIds, sd, ed);
-    dDeviceRows.push(...rows);
+    out.push(...(await getCampaignDeviceReports(accessToken, campaignIds, sd, ed)));
   }
-  const rDeviceRows: any[] = [];
-  if (config.rUserIds.length) {
-    onPhase('抓取 R 裝置維度（device_type）…');
-    const userType = await detectRUserType(config.rUserIds, startDate, endDate);
-    const raw = await fetchReport({
-      userType, userIds: config.rUserIds, startDate, endDate,
-      dimensions: ['day', 'device_type'], metrics: [],
-    });
-    rDeviceRows.push(...raw);
+  return out;
+}
+
+/** R 裝置維度：day×device_type。userType 由 R 單元的 detectRUserType 傳入（每次執行只偵測一次）。 */
+async function fetchRDeviceRows(
+  config: BulkConfigRow, startDate: string, endDate: string, userType: UserType, onPhase: (p: string) => void
+): Promise<any[]> {
+  onPhase('抓取 R 裝置維度（device_type）…');
+  return fetchReport({
+    userType, userIds: config.rUserIds, startDate, endDate,
+    dimensions: ['day', 'device_type'], metrics: [],
+  });
+}
+
+/** MGID 裝置維度：deviceType（core/mgid.ts 已正規化成 PC/Mobile/Tablet/Others）。 */
+async function fetchMDeviceRows(
+  config: BulkConfigRow, startDate: string, endDate: string, onPhase: (p: string) => void
+): Promise<any[]> {
+  const out: any[] = [];
+  const clients = await resolveMgidClients(config.mgidClientIds);
+  for (const client of clients) {
+    onPhase(`抓取 MGID 帳號 ${client.clientName} 裝置維度（deviceType）…`);
+    out.push(...(await fetchMgidDeviceReport(client, startDate, endDate)));
   }
-  // MGID：deviceType 維度（已在 core/mgid.ts 正規化成 PC/Mobile/Tablet/Others）
-  const mDeviceRows: any[] = [];
-  if (config.mgidClientIds.length) {
-    const clients = await resolveMgidClients(config.mgidClientIds);
-    for (const client of clients) {
-      onPhase(`抓取 MGID 帳號 ${client.clientName} 裝置維度（deviceType）…`);
-      mDeviceRows.push(...(await fetchMgidDeviceReport(client, startDate, endDate)));
-    }
-  }
-  return buildDeviceRows({ dRows: dDeviceRows, rRows: rDeviceRows, mRows: mDeviceRows }, syncedAt, cvBuckets);
+  return out;
+}
+
+/** 單一平台的增量視窗：[游標+1（無則回補起始日）, min(T-1, 終止日)]；起 > 迄＝已最新回 null。 */
+export function platformWindow(
+  lastSynced: string | null, backfill: string, endCfg: string | null
+): { startDate: string; endDate: string } | null {
+  let endDate = addDays(twToday(), -1); // 昨天 T-1
+  if (endCfg && endDate > endCfg) endDate = endCfg;
+  const startDate = lastSynced ? addDays(lastSynced, 1) : backfill;
+  return startDate > endDate ? null : { startDate, endDate };
+}
+
+/** runConfig/rerunDay 的可注入相依（poc 用假抓取器/假寫入驗容錯；線上一律用預設實作）。 */
+export interface RunDeps {
+  fetchDRows: typeof fetchDRows;
+  fetchRRows: typeof fetchRRows;
+  fetchMgidRows: typeof fetchMgidRows;
+  fetchDDeviceRows: typeof fetchDDeviceRows;
+  fetchRDeviceRows: typeof fetchRDeviceRows;
+  fetchMDeviceRows: typeof fetchMDeviceRows;
+  appendRows: typeof appendRows;
+  deleteRowsByDate: typeof deleteRowsByDate;
+}
+const REAL_DEPS: RunDeps = {
+  fetchDRows, fetchRRows, fetchMgidRows,
+  fetchDDeviceRows, fetchRDeviceRows, fetchMDeviceRows,
+  appendRows, deleteRowsByDate,
+};
+
+const notConfigured = (): PlatformOutcome =>
+  ({ configured: false, status: 'skipped', rawRows: 0, integratedRows: 0, deviceRows: 0 });
+const skippedOutcome = (): PlatformOutcome =>
+  ({ configured: true, status: 'skipped', rawRows: 0, integratedRows: 0, deviceRows: 0 });
+
+/** 清單「已同步到」顯示：單平台＝單值；多平台＝「D x／R y／M z」（未跑過顯示 —）。 */
+export function syncedLabel(config: BulkConfigRow): string {
+  const parts: { tag: string; v: string | null }[] = [];
+  if (config.accountIds.length) parts.push({ tag: 'D', v: config.lastSyncedD });
+  if (config.rUserIds.length) parts.push({ tag: 'R', v: config.lastSyncedR });
+  if (config.mgidClientIds.length) parts.push({ tag: 'M', v: config.lastSyncedM });
+  if (!parts.length) return '—';
+  if (parts.length === 1) return parts[0].v ?? '—';
+  return parts.map((p) => `${p.tag} ${p.v ?? '—'}`).join('／');
 }
 
 /**
- * 執行一次同步。onPhase 用來回報進度（手動執行頁輪詢用）。
- * 原子性：D/R 任一段抓取失敗就整批拋錯——不寫 sheet、呼叫端也不推進 last_synced_date，下次原樣重抓。
- * 回傳結果；呼叫端負責 markBulkRun 寫 DB（含 syncedDate=endDate）。
+ * 執行一次同步（平台級容錯版）。onPhase 用來回報進度（手動執行頁輪詢用）。
+ * D/R/M 三個平台單元各自「算視窗→抓→寫自己的分頁」，單一平台失敗只記在自己的 outcome
+ * （呼叫端不推該平台游標、下次原樣重抓），其餘平台照常。
+ * 平台內維持原子性：該平台任一帳號/任一段抓取失敗＝整個平台這次不寫。
+ * 寫入順序 raw → integrated → device；寫到一半掛（Sheets API 故障）該平台游標不推，
+ * 下次重抓已寫分頁會重複 append——與改造前風險相同，刻意不在本次處理。
  */
 export async function runConfig(
   config: BulkConfigRow,
-  onPhase: (p: string) => void = () => {}
+  onPhase: (p: string) => void = () => {},
+  depsIn?: Partial<RunDeps>
 ): Promise<RunResult> {
-  // 終止日封頂：抓到設定的終止日（含）後就不再往後抓，避免排程無止盡空跑浪費資源。
-  // null＝不限，維持原本每日抓到 T-1 的行為。
-  let endDate = addDays(twToday(), -1); // 昨天 T-1
-  if (config.endDate && endDate > config.endDate) endDate = config.endDate;
-  const startDate = config.lastSyncedDate ? addDays(config.lastSyncedDate, 1) : config.backfillStartDate;
-
-  // 區間為空：已同步到上限（昨天或終止日），無事可做——在打任何 API 前早停
-  if (startDate > endDate) {
-    return { skipped: true, startDate: null, endDate, dRowCount: 0, rRowCount: 0, mRowCount: 0, integratedRowCount: 0, deviceRowCount: 0, accountStats: [], mStat: [] };
-  }
-
-  const sd = compact(startDate);
-  const ed = compact(endDate);
+  const deps: RunDeps = { ...REAL_DEPS, ...depsIn };
+  const cvBuckets = config.cvBuckets ?? EMPTY_CV_BUCKETS;
   const syncedAt = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   }).format(new Date()); // YYYY-MM-DD HH:mm:ss
 
-  // ---- 先全部抓取（D + R + M），全成功才寫，維持原子性 ----
-  const { dRows, dSource, accountStats } = await fetchDRows(config, sd, ed, startDate, endDate, syncedAt, onPhase);
-  const { rRows, rSource, rStat } = await fetchRRows(config, startDate, endDate, syncedAt, onPhase);
-  const { mRows, mSource, mStat } = await fetchMgidRows(config, startDate, endDate, syncedAt, onPhase);
-  const cvBuckets = config.cvBuckets ?? EMPTY_CV_BUCKETS;
-  const integratedRows = buildIntegratedRows(dSource, rSource, syncedAt, cvBuckets, mSource);
-  const deviceRows = await fetchDeviceRows(config, sd, ed, startDate, endDate, syncedAt, cvBuckets, onPhase);
+  const fail = (win: { startDate: string; endDate: string }, e: any): PlatformOutcome =>
+    ({ configured: true, status: 'error', window: win, rawRows: 0, integratedRows: 0, deviceRows: 0, error: String(e?.message ?? e) });
 
-  // ---- 全抓成功後才寫入（各自分頁） ----
-  if (dRows.length) {
-    onPhase(`寫入 D 分頁 ${RAW_TAB}（${dRows.length} 列）…`);
-    await appendRows(config.sheetId, RAW_TAB, SHEET_HEADER, dRows);
-  }
-  if (rRows.length) {
-    onPhase(`寫入 R 分頁 ${R_RAW_TAB}（${rRows.length} 列）…`);
-    await appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows);
-  }
-  if (mRows.length) {
-    onPhase(`寫入 MGID 分頁 ${M_RAW_TAB}（${mRows.length} 列）…`);
-    await appendRows(config.sheetId, M_RAW_TAB, M_SHEET_HEADER, mRows);
-  }
-  if (integratedRows.length) {
-    onPhase(`寫入整合分頁 ${INTEGRATED_TAB}（${integratedRows.length} 列）…`);
-    await appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integratedRows);
-  }
-  if (deviceRows.length) {
-    onPhase(`寫入裝置分頁 ${DEVICE_TAB}（${deviceRows.length} 列）…`);
-    await appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, deviceRows);
-  }
+  const runD = async (): Promise<PlatformOutcome> => {
+    if (!config.accountIds.length) return notConfigured();
+    const win = platformWindow(config.lastSyncedD, config.backfillStartDate, config.endDate);
+    if (!win) return skippedOutcome();
+    const sd = compact(win.startDate), ed = compact(win.endDate);
+    try {
+      const { dRows, dSource, accountStats } = await deps.fetchDRows(config, sd, ed, win.startDate, win.endDate, syncedAt, onPhase);
+      const devInput = await deps.fetchDDeviceRows(config, sd, ed, onPhase);
+      const integrated = buildIntegratedRows(dSource, [], syncedAt, cvBuckets, []);
+      const device = buildDeviceRows('D', devInput, syncedAt, cvBuckets);
+      if (dRows.length) { onPhase(`寫入 D 分頁 ${RAW_TAB}（${dRows.length} 列）…`); await deps.appendRows(config.sheetId, RAW_TAB, SHEET_HEADER, dRows); }
+      if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
+      if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
+      return { configured: true, status: 'ok', window: win, rawRows: dRows.length, integratedRows: integrated.length, deviceRows: device.length, syncedDate: win.endDate, accountStats };
+    } catch (e) { return fail(win, e); }
+  };
 
-  return { skipped: false, startDate, endDate, dRowCount: dRows.length, rRowCount: rRows.length, mRowCount: mRows.length, integratedRowCount: integratedRows.length, deviceRowCount: deviceRows.length, accountStats, rStat, mStat };
+  const runR = async (): Promise<PlatformOutcome> => {
+    if (!config.rUserIds.length) return notConfigured();
+    const win = platformWindow(config.lastSyncedR, config.backfillStartDate, config.endDate);
+    if (!win) return skippedOutcome();
+    try {
+      const { rRows, rSource, userType, warning } = await deps.fetchRRows(config, win.startDate, win.endDate, syncedAt, onPhase);
+      // userType=null＝三型皆查無資料（零投放）：0 列視為成功、游標照推，warning 帶到訊息欄
+      const devInput = userType ? await deps.fetchRDeviceRows(config, win.startDate, win.endDate, userType, onPhase) : [];
+      const integrated = buildIntegratedRows([], rSource, syncedAt, cvBuckets, []);
+      const device = buildDeviceRows('R', devInput, syncedAt, cvBuckets);
+      if (rRows.length) { onPhase(`寫入 R 分頁 ${R_RAW_TAB}（${rRows.length} 列）…`); await deps.appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows); }
+      if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
+      if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
+      return { configured: true, status: 'ok', window: win, rawRows: rRows.length, integratedRows: integrated.length, deviceRows: device.length, syncedDate: win.endDate, warning, rUserType: userType };
+    } catch (e) { return fail(win, e); }
+  };
+
+  const runM = async (): Promise<PlatformOutcome> => {
+    if (!config.mgidClientIds.length) return notConfigured();
+    const win = platformWindow(config.lastSyncedM, config.backfillStartDate, config.endDate);
+    if (!win) return skippedOutcome();
+    try {
+      const { mRows, mSource, mStat } = await deps.fetchMgidRows(config, win.startDate, win.endDate, syncedAt, onPhase);
+      const devInput = await deps.fetchMDeviceRows(config, win.startDate, win.endDate, onPhase);
+      const integrated = buildIntegratedRows([], [], syncedAt, cvBuckets, mSource);
+      const device = buildDeviceRows('M', devInput, syncedAt, cvBuckets);
+      if (mRows.length) { onPhase(`寫入 MGID 分頁 ${M_RAW_TAB}（${mRows.length} 列）…`); await deps.appendRows(config.sheetId, M_RAW_TAB, M_SHEET_HEADER, mRows); }
+      if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
+      if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
+      return { configured: true, status: 'ok', window: win, rawRows: mRows.length, integratedRows: integrated.length, deviceRows: device.length, syncedDate: win.endDate, mStat };
+    } catch (e) { return fail(win, e); }
+  };
+
+  // 序列執行（同現行；D 端 per-ad 限流最兇，避免與 R/M 併發互撞）
+  return { d: await runD(), r: await runR(), m: await runM() };
 }
 
 /**
- * 重抓「昨天(T-1)」：先抓成功 → 才刪 sheet 昨天列 → 立刻 append（鐵律，抓失敗不碰 sheet）。
- * scope 受 config 實際有無該來源夾限。coversAllSources 供呼叫端決定是否對齊游標。
+ * 重抓「昨天(T-1)」（平台級容錯版）：每個來源各自「先抓成功 → 才刪該來源昨天列 → 立刻寫回」，
+ * 單一來源失敗只記在自己的 outcome，其餘來源照常。integrated/device 按 date+platform 精準刪，
+ * 不再誤刪未重抓來源的列（消掉舊「只有涵蓋全來源才動 integrated」取捨）。
+ * 游標對齊由呼叫端做：成功來源各自 lastSynced_X = max(現值, targetDate)。
  */
 export async function rerunDay(
-  config: BulkConfigRow, scope: RerunScope, onPhase: (p: string) => void = () => {}
+  config: BulkConfigRow, scope: RerunScope, onPhase: (p: string) => void = () => {},
+  depsIn?: Partial<RunDeps>
 ): Promise<RerunResult> {
+  const deps: RunDeps = { ...REAL_DEPS, ...depsIn };
   const hasD = config.accountIds.length > 0;
   const hasR = config.rUserIds.length > 0;
   const hasM = config.mgidClientIds.length > 0;
@@ -653,67 +734,51 @@ export async function rerunDay(
 
   const targetDate = twYesterday();
   const sd = compact(targetDate);
-  const ed = sd;
   const syncedAt = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   }).format(new Date());
   const cvBuckets = config.cvBuckets ?? EMPTY_CV_BUCKETS;
+  const none: RerunSourceOutcome = { attempted: false, deleted: 0, rows: 0 };
 
-  // 1) 先全抓成功（記憶體），任一失敗往外拋、不碰 sheet
-  let dRows: (string | number)[][] = [];
-  let rRows: (string | number)[][] = [];
-  let mRows: (string | number)[][] = [];
-  let dSource: any[] = [];
-  let rSource: any[] = [];
-  let mSource: any[] = [];
-  if (doD) ({ dRows, dSource } = await fetchDRows(config, sd, ed, targetDate, targetDate, syncedAt, onPhase));
-  if (doR) ({ rRows, rSource } = await fetchRRows(config, targetDate, targetDate, syncedAt, onPhase));
-  if (doM) ({ mRows, mSource } = await fetchMgidRows(config, targetDate, targetDate, syncedAt, onPhase));
-  // integrated：用本次抓到的 D/R/M source 投影（只含被重抓來源的列）
-  const integratedRows = buildIntegratedRows(dSource, rSource, syncedAt, cvBuckets, mSource);
-  // device：只在有重抓來源時抓（fetchDeviceRows 內部依 config 有無 D/R/M 決定抓哪邊；此處用一個臨時 config 夾限 scope）
-  const deviceCfg: BulkConfigRow = {
-    ...config,
-    accountIds: doD ? config.accountIds : [],
-    rUserIds: doR ? config.rUserIds : [],
-    mgidClientIds: doM ? config.mgidClientIds : [],
+  // 單一來源：抓成功才動 sheet；刪 raw（date）→ 刪 integrated/device（date+platform）→ 寫回
+  const runOne = async (
+    platform: 'D' | 'R' | 'M',
+    fetchAll: () => Promise<{ raw: (string | number)[][]; integrated: (string | number)[][]; device: (string | number)[][] }>,
+    rawTab: string, rawHeader: string[], rawDateCol: number
+  ): Promise<RerunSourceOutcome> => {
+    try {
+      const { raw, integrated, device } = await fetchAll();
+      onPhase(`清除 ${platform} 相關分頁 ${targetDate} 舊資料…`);
+      const deleted = await deps.deleteRowsByDate(config.sheetId, rawTab, rawDateCol, targetDate);
+      await deps.deleteRowsByDate(config.sheetId, INTEGRATED_TAB, 2, targetDate, { colIndex: 0, value: platform });
+      await deps.deleteRowsByDate(config.sheetId, DEVICE_TAB, 2, targetDate, { colIndex: 0, value: platform });
+      if (raw.length) await deps.appendRows(config.sheetId, rawTab, rawHeader, raw);
+      if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
+      if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
+      return { attempted: true, deleted, rows: raw.length };
+    } catch (e: any) {
+      return { attempted: true, deleted: 0, rows: 0, error: String(e?.message ?? e) };
+    }
   };
-  const deviceRows = (deviceCfg.accountIds.length || deviceCfg.rUserIds.length || deviceCfg.mgidClientIds.length)
-    ? await fetchDeviceRows(deviceCfg, sd, ed, targetDate, targetDate, syncedAt, cvBuckets, onPhase)
-    : [];
 
-  // 2) 抓成功才動 sheet：刪昨天 → 立刻寫回
-  let dDeleted = 0, rDeleted = 0, mDeleted = 0;
-  if (doD) {
-    onPhase(`清除 D 分頁 ${targetDate} 舊資料…`);
-    dDeleted = await deleteRowsByDate(config.sheetId, RAW_TAB, 2, targetDate);
-    onPhase(`寫回 D ${dRows.length} 列…`);
-    if (dRows.length) await appendRows(config.sheetId, RAW_TAB, SHEET_HEADER, dRows);
-  }
-  if (doR) {
-    onPhase(`清除 R 分頁 ${targetDate} 舊資料…`);
-    rDeleted = await deleteRowsByDate(config.sheetId, R_RAW_TAB, 1, targetDate);
-    onPhase(`寫回 R ${rRows.length} 列…`);
-    if (rRows.length) await appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows);
-  }
-  if (doM) {
-    onPhase(`清除 MGID 分頁 ${targetDate} 舊資料…`);
-    mDeleted = await deleteRowsByDate(config.sheetId, M_RAW_TAB, 2, targetDate); // date 在 col index 2（account_name,synced_at,date…）
-    onPhase(`寫回 MGID ${mRows.length} 列…`);
-    if (mRows.length) await appendRows(config.sheetId, M_RAW_TAB, M_SHEET_HEADER, mRows);
-  }
-  // integrated：date 在 col index 2（platform,synced_at,date…）。只刪「本次重抓來源」的列：
-  // 先刪整天再寫回，會誤刪未重抓來源的列，故用平台欄過濾——此處簡化：只有涵蓋來源才動 integrated。
-  onPhase(`清除整合分頁 ${targetDate} 舊資料…`);
-  await deleteRowsByDate(config.sheetId, INTEGRATED_TAB, 2, targetDate);
-  if (integratedRows.length) await appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integratedRows);
-  // device：date 在 col index 1（synced_at,date…）
-  onPhase(`清除裝置分頁 ${targetDate} 舊資料…`);
-  await deleteRowsByDate(config.sheetId, DEVICE_TAB, 1, targetDate);
-  if (deviceRows.length) await appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, deviceRows);
+  const dOut = !doD ? none : await runOne('D', async () => {
+    const { dRows, dSource } = await deps.fetchDRows(config, sd, sd, targetDate, targetDate, syncedAt, onPhase);
+    const devInput = await deps.fetchDDeviceRows(config, sd, sd, onPhase);
+    return { raw: dRows, integrated: buildIntegratedRows(dSource, [], syncedAt, cvBuckets, []), device: buildDeviceRows('D', devInput, syncedAt, cvBuckets) };
+  }, RAW_TAB, SHEET_HEADER, 2);
 
-  const coversAllSources = (!hasD || doD) && (!hasR || doR) && (!hasM || doM);
-  const scopeUsed: RerunScope = (doD && doR) || (doD && doM) || (doR && doM) ? 'both' : doD ? 'd' : doR ? 'r' : 'm';
-  return { targetDate, scopeUsed, dDeleted, dRows: dRows.length, rDeleted, rRows: rRows.length, mDeleted, mRows: mRows.length, coversAllSources };
+  const rOut = !doR ? none : await runOne('R', async () => {
+    const { rRows, rSource, userType } = await deps.fetchRRows(config, targetDate, targetDate, syncedAt, onPhase);
+    const devInput = userType ? await deps.fetchRDeviceRows(config, targetDate, targetDate, userType, onPhase) : [];
+    return { raw: rRows, integrated: buildIntegratedRows([], rSource, syncedAt, cvBuckets, []), device: buildDeviceRows('R', devInput, syncedAt, cvBuckets) };
+  }, R_RAW_TAB, R_SHEET_HEADER, 1);
+
+  const mOut = !doM ? none : await runOne('M', async () => {
+    const { mRows, mSource } = await deps.fetchMgidRows(config, targetDate, targetDate, syncedAt, onPhase);
+    const devInput = await deps.fetchMDeviceRows(config, targetDate, targetDate, onPhase);
+    return { raw: mRows, integrated: buildIntegratedRows([], [], syncedAt, cvBuckets, mSource), device: buildDeviceRows('M', devInput, syncedAt, cvBuckets) };
+  }, M_RAW_TAB, M_SHEET_HEADER, 2);
+
+  return { targetDate, d: dOut, r: rOut, m: mOut };
 }
