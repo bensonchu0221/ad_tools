@@ -131,10 +131,13 @@ const normDate = (d: any) => String(d ?? '').replace(/[-/]/g, '');
 
 /**
  * 刪除指定分頁中「日期欄 == targetDate」的所有資料列（header 第 1 列永不刪）。
+ * filter 有給時再加一個欄位等值條件（如 platform 欄 == 'D'），供 integrated/device
+ * 按 date+platform 精準刪、不誤傷其他平台的列。
  * 由大 index 往小刪，避免位移。回傳實際刪除列數；分頁不存在或無符合列回 0。
  */
 export async function deleteRowsByDate(
-  spreadsheetId: string, tab: string, dateColIndex: number, targetDate: string
+  spreadsheetId: string, tab: string, dateColIndex: number, targetDate: string,
+  filter?: { colIndex: number; value: string }
 ): Promise<number> {
   const sheets = getSheets();
   const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties' });
@@ -143,15 +146,23 @@ export async function deleteRowsByDate(
   const sheetId = sheet.properties.sheetId!;
 
   const colA1 = String.fromCharCode(65 + dateColIndex); // 0→A,1→B,2→C（欄數<26足夠）
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId, range: `${tab}!${colA1}:${colA1}`, majorDimension: 'COLUMNS',
+  const ranges = [`${tab}!${colA1}:${colA1}`];
+  if (filter) {
+    const fColA1 = String.fromCharCode(65 + filter.colIndex);
+    ranges.push(`${tab}!${fColA1}:${fColA1}`);
+  }
+  const res = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId, ranges, majorDimension: 'COLUMNS',
   });
-  const colValues = res.data.values?.[0] ?? [];
+  const colValues = res.data.valueRanges?.[0]?.values?.[0] ?? [];
+  const fValues = res.data.valueRanges?.[1]?.values?.[0] ?? [];
   const want = normDate(targetDate);
 
   const targets: number[] = []; // 0-based row index；跳過 header(0)
   for (let i = 1; i < colValues.length; i++) {
-    if (normDate(colValues[i]) === want) targets.push(i);
+    if (normDate(colValues[i]) !== want) continue;
+    if (filter && String(fValues[i] ?? '') !== filter.value) continue;
+    targets.push(i);
   }
   if (!targets.length) return 0;
   targets.sort((a, b) => b - a); // 由大到小
