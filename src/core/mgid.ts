@@ -161,11 +161,70 @@ async function fetchCampaignNameMap(client: MgidClient): Promise<Record<string, 
   return fetchListPaged(client, 'campaigns', (c) => c?.name ?? '');
 }
 
-/** 取 client 的 teaserId→{title,url,image} 對照（分頁把全部撈齊）；title 對齊 D 的 headline、image 進素材分析。 */
-async function fetchTeaserMetaMap(
-  client: MgidClient
-): Promise<Record<string, { title: string; url: string; image: string }>> {
-  return fetchListPaged(client, 'teasers', (t) => ({ title: t?.title ?? '', url: t?.url ?? '', image: t?.imageLink ?? '' }));
+/**
+ * 取 client 的 teaser 索引（分頁把全部撈齊）：
+ *   meta       = teaserId→{title,url,image}（title 對齊 D 的 headline、image 進素材分析）
+ *   byCampaign = campaignId→teaserId[]（零點擊補列時，要用它列出某 campaign 的所有 teaser 去打 teaser-stat）
+ * teaser 物件本來就帶 campaignId，兩份 map 一次撈齊、零額外 API。
+ */
+async function fetchTeaserIndex(client: MgidClient): Promise<{
+  meta: Record<string, { title: string; url: string; image: string }>;
+  byCampaign: Record<string, string[]>;
+}> {
+  const raw = await fetchListPaged(client, 'teasers', (t) => ({
+    title: t?.title ?? '', url: t?.url ?? '', image: t?.imageLink ?? '', campaignId: String(t?.campaignId ?? ''),
+  }));
+  const meta: Record<string, { title: string; url: string; image: string }> = {};
+  const byCampaign: Record<string, string[]> = {};
+  for (const [tid, v] of Object.entries(raw)) {
+    meta[tid] = { title: v.title, url: v.url, image: v.image };
+    if (v.campaignId) (byCampaign[v.campaignId] ||= []).push(tid);
+  }
+  return { meta, byCampaign };
+}
+
+/** 取單支 teaser 在 [sd,ed] 的每日統計（teaser-stat）。回 {日期:{shows,clicks,spent,cpc,ctr,interest,decision,buy,...}}；
+ * 無資料時 API 回空陣列 []，統一成 {}。**此端點不排除零點擊 teaser**（實證 poc/probe_mgid_teaserstat.mts），
+ * 是唯一能把「零點擊 campaign」的曝光還原到 teaser 層的來源。 */
+async function fetchTeaserStat(
+  client: MgidClient, teaserId: string, sd: string, ed: string
+): Promise<Record<string, any>> {
+  const j = await get(
+    `${BASE}/goodhits/clients/${client.apiClientId}/teaser-stat/${teaserId}?dateInterval=interval&startDate=${sd}&endDate=${ed}`,
+    client.token
+  );
+  const m = j?.['teaser-stat'];
+  return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+}
+
+/** 零點擊 campaign 的 teaser 級救回：對該 campaign 的每支 teaser 序列打 teaser-stat（併發 6+ 會 429），
+ * 把每日 shows>0 攤成「欄位形狀對齊 statistics-reports raw 列」的 pseudo-raw 列（供主迴圈映射＋補 teaser meta）。
+ * 與 zeroClickSupplementRaw（campaign 級、teaser 留空）不同：這裡帶真實 teaserId 與 teaser 級數字。 */
+async function fetchZeroClickTeaserRaw(
+  client: MgidClient, campaignId: string, teaserIds: string[], sd: string, ed: string
+): Promise<any[]> {
+  const out: any[] = [];
+  for (const tid of teaserIds) {
+    const stat = await fetchTeaserStat(client, tid, sd, ed);
+    for (const [day, d] of Object.entries<any>(stat)) {
+      const shows = Number(d?.shows) || 0;
+      if (shows <= 0) continue; // 當日無曝光的 teaser 不補
+      out.push({
+        day: normDay(day), campaignId, teaserId: tid,
+        adRequests: 0, impressions: shows, clicks: Number(d?.clicks) || 0,
+        spent: Number(d?.spent) || 0, cpc: Number(d?.cpc) || 0, cpm: 0, ctr: Number(d?.ctr) || 0,
+        conversionsInterest: Number(d?.interest) || 0,
+        conversionsDecision: Number(d?.decision) || 0,
+        conversionsBuy: Number(d?.buy) || 0,
+        conversionsRateInterest: 0, conversionsRateDecision: 0, conversionsRateBuy: 0,
+        conversionsCostInterest: Number(d?.interestCost) || 0,
+        conversionsCostDecision: Number(d?.decisionCost) || 0,
+        conversionsCostBuy: Number(d?.buyCost) || 0,
+      });
+    }
+    await sleep(150); // 序列節流（廣告主 API 併發 6+ 會 429）
+  }
+  return out;
 }
 
 /** 抓單一視窗、單一維度組的 statistics-reports 全部列（offset 分頁）。 */
@@ -209,9 +268,14 @@ async function fetchCampaignsStat(
   return m && typeof m === 'object' ? m : {};
 }
 
+// 零點擊 campaign 退回 campaign 級補列（teaser-stat 也救不回，如素材為舊 teaser 不在 /teasers 清單）時，
+// teaser 明細 MGID API 給不出 → 於 teaser_title 標註原因（見主迴圈映射），不留純空白讓人誤判成漏抓。
+export const ZERO_CLICK_BLANK_NOTE = '零點擊補列：MGID API 未提供此 campaign 的 teaser 明細';
+
 /** 純函式（POC 可測）：把 campaigns-stat 單日結果中、屬於 targetIds（statistics-reports 整段缺席的
  * campaign）且當日有量（imp/click/spend 任一 >0）者，補成欄位形狀對齊 statistics-reports 的 pseudo-raw 列。
- * teaserId 留空（campaigns-stat 無 teaser 維度，同裝置表 campaign 留空的取捨）；
+ * teaserId 留空（campaigns-stat 無 teaser 維度）；`_zeroClickBlank` 旗標讓主迴圈把 teaser_title 標成註記。
+ * ⚠️ 此函式現在只當「teaser-stat 救不回」的保底；正常零點擊 campaign 走 fetchZeroClickTeaserRaw 取 teaser 級。
  * campaigns-stat 無 interest 轉換欄與 adRequests → 補 0。 */
 export function zeroClickSupplementRaw(
   day: string, dayStat: Record<string, any>, targetIds: Set<string>
@@ -224,7 +288,7 @@ export function zeroClickSupplementRaw(
     const spent = Number(s?.spent) || 0;
     if (imps <= 0 && clicks <= 0 && spent <= 0) continue; // 當日無量不補
     out.push({
-      day, campaignId: cid, teaserId: '',
+      day, campaignId: cid, teaserId: '', _zeroClickBlank: true,
       adRequests: 0, impressions: imps, clicks, spent, cpc: 0, cpm: 0, ctr: 0,
       conversionsInterest: 0,
       conversionsDecision: Number(s?.decision) || 0,
@@ -260,32 +324,39 @@ async function fetchTeaserById(
 export async function fetchMgidReport(
   client: MgidClient, startDate: string, endDate: string
 ): Promise<MgidReportRow[]> {
-  const [campName, teaserMeta] = await Promise.all([
+  const [campName, teaserIdx] = await Promise.all([
     fetchCampaignNameMap(client),
-    fetchTeaserMetaMap(client),
+    fetchTeaserIndex(client),
   ]);
+  const teaserMeta = teaserIdx.meta;
   // 先把各視窗原始列收齊，才能一次找出「/teasers 清單查無」的 teaserId 補打回填（每帳號通常僅數筆）。
   const allRaw: any[] = [];
   for (const w of reportWindows(startDate, endDate)) {
     const winRaw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS]);
     allRaw.push(...winRaw);
     // ⚠️ statistics-reports 會「整個排除區間內 0 click 的 campaign」（連 imp 都不回；後台 UI 看得到，
-    // 實證 poc/verify_mgid_zero_click_campaign.mts）。用 campaigns-stat（不排除零點擊）範圍前檢：
-    // 找出有量卻整段缺席的 campaign，有缺才逐日補打、生成 teaser 欄留空的補列（無缺＝只多 1 支輕量 API）。
+    // 實證 poc/verify_mgid_zero_click_campaign.mts）。用 campaigns-stat（不排除零點擊）範圍前檢找出缺席 campaign。
     const rangeStat = await fetchCampaignsStat(client, w.sd, w.ed);
     const seen = new Set(winRaw.map((r) => String(r.campaignId ?? '')));
-    const missingIds = new Set(
-      Object.entries(rangeStat)
-        .filter(([id, s]: [string, any]) =>
-          !seen.has(id) && ((Number(s?.imps) || 0) > 0 || (Number(s?.clicks) || 0) > 0 || (Number(s?.spent) || 0) > 0))
-        .map(([id]) => id)
-    );
-    if (missingIds.size) {
-      for (let d = w.sd; d <= w.ed; d = addDays(d, 1)) {
-        // 單日視窗直接重用範圍前檢結果，免重打
-        const dayStat = w.sd === w.ed ? rangeStat : await fetchCampaignsStat(client, d, d);
-        allRaw.push(...zeroClickSupplementRaw(d, dayStat, missingIds));
-        if (w.sd !== w.ed) await sleep(300); // 逐日間節流（廣告主 API 併發 6+ 會 429）
+    const missingIds = Object.entries(rangeStat)
+      .filter(([id, s]: [string, any]) =>
+        !seen.has(id) && ((Number(s?.imps) || 0) > 0 || (Number(s?.clicks) || 0) > 0 || (Number(s?.spent) || 0) > 0))
+      .map(([id]) => id);
+    // 每個缺席 campaign：優先用 teaser-stat（不排除零點擊 teaser）逐支救回「teaser 級」列——讓零點擊列也帶
+    // teaser_id/title/url 與 teaser 級數字，與正常列同構。teaser-stat 完整涵蓋該 campaign 曝光時才採用；
+    // 否則（素材為舊 teaser 不在 /teasers 清單等，救不回或不完整）退回 campaigns-stat 的 campaign 級補列（teaser 欄註記），保住全部曝光。
+    for (const cid of missingIds) {
+      const teaserRaw = await fetchZeroClickTeaserRaw(client, cid, teaserIdx.byCampaign[cid] ?? [], w.sd, w.ed);
+      const recoveredImp = teaserRaw.reduce((s, r) => s + (Number(r.impressions) || 0), 0);
+      const rangeImp = Number(rangeStat[cid]?.imps) || 0;
+      if (teaserRaw.length && recoveredImp >= rangeImp) {
+        allRaw.push(...teaserRaw); // teaser-stat 完整還原 → 用 teaser 級列
+      } else {
+        for (let d = w.sd; d <= w.ed; d = addDays(d, 1)) {
+          const dayStat = w.sd === w.ed ? rangeStat : await fetchCampaignsStat(client, d, d);
+          allRaw.push(...zeroClickSupplementRaw(d, dayStat, new Set([cid])));
+          if (w.sd !== w.ed) await sleep(300); // 逐日間節流（廣告主 API 併發 6+ 會 429）
+        }
       }
     }
   }
@@ -304,7 +375,8 @@ export async function fetchMgidReport(
       campaignId: cid,
       campaignName: campName[cid] ?? '',
       teaserId: tid,
-      teaserTitle: meta?.title ?? '',
+      // 保底 campaign 級補列（_zeroClickBlank）：teaser 無明細，teaser_title 放註記說明是 MGID API 限制，非漏抓
+      teaserTitle: r._zeroClickBlank ? ZERO_CLICK_BLANK_NOTE : (meta?.title ?? ''),
       teaserUrl: meta?.url ?? '',
       teaserImage: meta?.image ?? '',
       adRequests: Number(r.adRequests) || 0,
