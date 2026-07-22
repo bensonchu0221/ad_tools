@@ -140,8 +140,17 @@ Tablet/Others）套同規則、再由調整後 `deviceRaw` 重建 `deviceAgg`」
 6. **seed 由伺服器產生**、隨預覽回傳前端顯示；finalize 必須帶著預覽當下的 params+seed
    （避免「看到的」與「產出的」不同版）。每次預覽的參數存回 `weekly_jobs.adjust_json`
    供下次進頁預填。
+7. **原任務可重新抓取（不用重建任務）**：raw.json 逾 14 天被清、或使用者想用最新數據重跑時，
+   調整頁提供「重新抓取」——把**同一** `weekly_jobs` 列（`params_json` 已含完整 `input`）打回
+   `status=queued`，cron worker 沿用既有 adjust 分支重跑 fetch→覆寫 `weekly/{id}/raw.json`
+   →`awaiting_adjustment`。`adjust_json`（上次 CPC/CTR）保留＝重抓後直接預填。冪等（覆寫同物件）。
 
-## 11. 待 review 者確認的取捨
+## 11. 未來擴充（本次不做，先留位）
+
+- **報表 insight 下拉**：調整頁（或表單）加一個下拉，讓使用者選數種預設的報表 insight
+  類型。之後獨立設計，本次僅在此登記，不影響現有資料模型。
+
+## 12. 待 review 者確認的取捨
 
 1. 防呆採用（§3.1）— 已確認採用。
 2. 裝置一致性方向（§6）— 方向已定，實作退路已列，細節留計畫階段。
