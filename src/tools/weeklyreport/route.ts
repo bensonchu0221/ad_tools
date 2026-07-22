@@ -14,13 +14,19 @@ import {
   markWeeklyJobDone,
   markWeeklyJobFailed,
   markWeeklyJobAwaitingAdjustment,
+  saveWeeklyJobAdjustParams,
+  requeueWeeklyJob,
   getLatestSnapshot,
   saveWeeklySnapshot,
 } from '../../core/store.js';
 import { uploadWeeklyXlsx, uploadWeeklyRawJson, downloadWeekly } from '../../core/gcs.js';
 import { currentUser } from '../../core/auth.js';
-import { buildReport, fetchWeeklyRaw } from './report.js';
-import { serializeWeeklyRaw } from './serialize.js';
+import { buildReport, fetchWeeklyRaw, aggregateWeekly, collectImageUrls } from './report.js';
+import { serializeWeeklyRaw, deserializeWeeklyRaw } from './serialize.js';
+import { adjustWeeklyRaw, type AdjustParams } from './adjust.js';
+import { renderPreviewHtml } from './preview.js';
+import { downloadImages } from './imagehash.js';
+import { weeklyAdjustPage } from './adjustpage.js';
 import { buildXlsx } from './xlsx.js';
 import { summarizeReport, buildNarrative } from './narrative.js';
 import { weeklyFormPage } from './form.js';
@@ -149,6 +155,117 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       .header('Content-Disposition', `attachment; filename="${job.fileName}"`)
       .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
       .send(buffer);
+  });
+
+  // ---------- 隨機調整：確認頁 ----------
+  // 可進入條件：job 有 raw 暫存（awaiting_adjustment，或 done 後 14 天內再調整）＋擁有者/管理者
+  const loadAdjustableJob = async (req: any, reply: any) => {
+    const id = Number((req.params as any).id);
+    const job = await getWeeklyJob(id);
+    if (!job || !job.rawGcsObject) {
+      reply.code(404).send('任務不存在或無原始資料（可能已逾 14 天被清除，請重新產生）');
+      return null;
+    }
+    const viewer = currentUser(req);
+    if (!isAdmin(viewer) && job.createdBy !== viewer) {
+      reply.code(403).send('無權限操作此任務');
+      return null;
+    }
+    return job;
+  };
+
+  /** 解析並驗證調整參數（CTR 單位＝百分比）；seed 未帶時伺服器產生 */
+  const parseAdjustParams = (body: any): AdjustParams | string => {
+    const n = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
+    const p = { cpcLo: n(body?.cpcLo), cpcUp: n(body?.cpcUp), ctrLo: n(body?.ctrLo), ctrUp: n(body?.ctrUp) };
+    if (!(p.cpcLo > 0) || !(p.cpcUp > 0) || !(p.ctrLo > 0) || !(p.ctrUp > 0)) return 'CPC/CTR 四欄皆必填且需大於 0';
+    if (p.cpcLo > p.cpcUp || p.ctrLo > p.ctrUp) return '下限不可大於上限';
+    if (p.ctrUp > 100) return 'CTR 單位是百分比，不可超過 100';
+    const seed = Number.isInteger(body?.seed) ? Number(body.seed) : Math.floor(Math.random() * 0x7fffffff);
+    return { ...p, seed };
+  };
+
+  /** 讀回 GCS raw 並還原（lifecycle 已清 → 給明確訊息） */
+  const loadRaw = async (job: { rawGcsObject: string | null }) => {
+    try {
+      const buf = await downloadWeekly(job.rawGcsObject!);
+      return deserializeWeeklyRaw(buf.toString('utf8'));
+    } catch (e: any) {
+      throw new Error(`原始資料讀取失敗（可能已逾 ${RETENTION_DAYS} 天被自動清除），請按上方「重新抓取」用原任務重跑：${e?.message ?? e}`);
+    }
+  };
+
+  app.get(`${BASE_PATH}/adjust/:id`, async (req, reply) => {
+    const job = await loadAdjustableJob(req, reply);
+    if (!job) return;
+    let prefill: Partial<AdjustParams> | null = null;
+    try { prefill = job.adjustJson ? JSON.parse(job.adjustJson) : null; } catch { prefill = null; }
+    reply.type('text/html').send(
+      weeklyAdjustPage({ jobId: job.id, label: job.label, basePath: BASE_PATH, prefill, status: job.status })
+    );
+  });
+
+  // ---------- 隨機調整：生成預覽（同步純函式，不打 API） ----------
+  app.post(`${BASE_PATH}/adjust/:id/preview`, async (req, reply) => {
+    const job = await loadAdjustableJob(req, reply);
+    if (!job) return;
+    const params = parseAdjustParams(req.body);
+    if (typeof params === 'string') return reply.send({ ok: false, error: params });
+    try {
+      const { input, raw } = await loadRaw(job);
+      const adjusted = adjustWeeklyRaw(raw, input.buckets, params);
+      const result = aggregateWeekly(adjusted, input);
+      await saveWeeklyJobAdjustParams(job.id, JSON.stringify(params)); // 供下次進頁預填/重現
+      reply.send({ ok: true, seed: params.seed, html: renderPreviewHtml(result, input.buckets) });
+    } catch (e: any) {
+      reply.send({ ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  // ---------- 隨機調整：定稿產出（重抓縮圖 → xlsx → GCS → done；可重複產出覆寫同物件） ----------
+  app.post(`${BASE_PATH}/adjust/:id/finalize`, async (req, reply) => {
+    const job = await loadAdjustableJob(req, reply);
+    if (!job) return;
+    const params = parseAdjustParams(req.body);
+    if (typeof params === 'string') return reply.send({ ok: false, error: params });
+    if (!Number.isInteger((req.body as any)?.seed)) return reply.send({ ok: false, error: '缺少 seed，請先生成預覽' });
+    try {
+      const { input, raw } = await loadRaw(job);
+      const adjusted = adjustWeeklyRaw(raw, input.buckets, params);
+      // 最終 xlsx 需要縮圖 buffer（預覽用 URL 即可、raw 暫存不含 buffer）→ 此時重抓
+      adjusted.images = await downloadImages(collectImageUrls(adjusted.dRaw, adjusted.rRaw, adjusted.mRaw));
+      const result = aggregateWeekly(adjusted, input);
+
+      // 文案：用調整後數字、不帶前期比較、不存快照（假數字不可污染 weekly_snapshots，spec §10.2）
+      let narrative = '';
+      try {
+        narrative = buildNarrative(summarizeReport(result, input), null);
+      } catch (e: any) {
+        app.log.error(e, 'weekly adjust narrative failed');
+      }
+
+      const buffer = await buildXlsx(result, input.buckets, narrative);
+      const fileName = `weekly_${input.startDate.replace(/-/g, '')}_${input.endDate.replace(/-/g, '')}.xlsx`;
+      const gcsObject = await uploadWeeklyXlsx(job.id, fileName, buffer);
+      await saveWeeklyJobAdjustParams(job.id, JSON.stringify(params));
+      await markWeeklyJobDone(job.id, { gcsObject, fileName, warnings: raw.warnings });
+      reply.send({ ok: true, fileName });
+    } catch (e: any) {
+      reply.send({ ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  // ---------- 隨機調整：原任務重新抓取（不用重建任務） ----------
+  // raw.json 逾 14 天被清、或想用最新數據 → 打回 queued，cron worker 沿用 params_json 重跑抓取。
+  app.post(`${BASE_PATH}/adjust/:id/refetch`, async (req, reply) => {
+    const job = await loadAdjustableJob(req, reply);
+    if (!job) return;
+    // 佇列中/執行中不重複打回（避免與 worker 搶）；awaiting_adjustment 或 done 才可重抓
+    if (job.status === 'queued' || job.status === 'running') {
+      return reply.send({ ok: false, error: '任務正在佇列或執行中，請稍候' });
+    }
+    await requeueWeeklyJob(job.id);
+    reply.send({ ok: true });
   });
 
   // ---------- cron worker：認領一份 → 產出 → 存 GCS（Cloud Scheduler 用，需 DIAG_KEY） ----------
