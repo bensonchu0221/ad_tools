@@ -45,6 +45,7 @@ popin 內部工具集（取代舊 dctool）。
 - 產出走 job 輪詢（TTL 10 分＋10 分 watchdog），不同步回傳；Cloud Run 開 session-affinity（job 在 instance 記憶體）
 - **日期上限 31 天**（per-ad date_reporting 端點單次上限 31 天 inclusive、32 天起靜默回 0；31 天時各抓取路徑皆單一視窗免切段。放寬過 31 天須先補 per-ad/device 切段，且大帳號 92 天光 D 端 per-ad 就 >12 分撞 600s timeout，要併批次佇列）；D 列日期 `Y-m-d`、R 列 `Ymd`、daily 鍵 `Ymd`（移植時別搞混）
 - 驗證腳本：`poc/verify_weekly_d.mts`（D 管線+逐日對數）、`poc/verify_campaign_filter.mts`（過濾規則安全性實證）、`poc/verify_image_hash.mts`（感知雜湊分群；`REAL=1` 加跑真實素材，會連舊 DB 讀 token）
+- **隨機調整模式（2026-07-22 新增選項，不影響原真實報表）**：表單勾「隨機調整」→ cron worker **只抓原始 raw、序列化存 GCS `weekly/{jobId}/raw.json`（14 天 lifecycle）**、狀態停在 `awaiting_adjustment`（不直接產 xlsx）。使用者進調整頁（`adjustpage.ts`，路由 `/adjust/:id`＋`/preview`＋`/finalize`＋`/refetch`）填 **CPC/CTR 各一組下限~上限（CTR 單位%）** → `adjust.ts adjustWeeklyRaw`（**mulberry32 可 seed 重現**）逐列/逐裝置桶反推：**spend 錨定不動、`click=MAX(1,ROUND(spend/CPC),該列cv最大值)`、`imp=MAX(click,ROUND(click/(CTR/100)+noise))`、cv1~cv4 保真**；**防呆 imp≥click≥cv**、**spend≤0 單元完全不動（不捏造 1 click）**。7 張表全用調整後重算（`report.ts` 已拆 `fetchWeeklyRaw`＋`aggregateWeekly` 兩段、調整夾中間；裝置聚合由調整後 `deviceRaw` 經 `deviceAggFromRaw` 重建，等值性見 spec §10.3）。預覽（`preview.ts` 7 表 HTML、Raw 兩表上限 500 列）與最終 xlsx 共用 `rawrows.ts` 列建構＝逐格一致。**重抽＝換 seed 重算（不打 API、秒回）**；滿意才 finalize（重抓縮圖→xlsx→GCS→done），**不寫 weekly_snapshots**（假數字不污染環比，narrative 用調整後數字但 prev=null）。**原任務可「重新抓取」**（`requeueWeeklyJob` 打回 queued、沿用 params_json 重跑、保留 adjust_json 預填），raw 逾期免重建任務。**只存 raw+參數(cpc/ctr/seed)、不存調整後結果**（seed 可完整重現）。驗證：`poc/verify_weekly_adjust.mts`（反推/防呆/零花費/可重現）、`verify_weekly_split_equiv.mts`（拆段等值+序列化 round-trip）、`verify_weekly_preview.mts`（xlsx/預覽逐格一致）。設計/計畫見 `docs/superpowers/{specs,plans}/2026-07-22-weekly-report-random-adjustment*`
 
 ## AdStream / 廣告凝視者核心（tool#3）
 - 目的：把多個 **D 帳戶 + R(Rixbee) 帳戶** 的 bulk 原始報表定期 append 到使用者指定 Google Sheet 的**兩個固定分頁**：D→**`d_bulk_raw_data`**、R→**`r_bulk_raw_data`**。一筆設定可同時含 D 與 R（擇一即可），共用同一個進度游標與同一份 Sheet。
@@ -84,6 +85,7 @@ popin 內部工具集（取代舊 dctool）。
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 待辦
+- **週報隨機調整模式（2026-07-22）本機全綠、線上端到端待驗**：離線 8 支迴歸全過（`verify_weekly_adjust`/`split_equiv`/`preview` 及既有 5 支未回歸）＋自包含頁面視覺檢視（CPC/CTR 落在區間、裝置 Tablet/Others 零花費維持 0、Raw 寬表橫向捲動）；DB 冒煙過（awaiting_adjustment/adjust_json/requeue）。**線上待驗**：①表單勾「隨機調整」跑一個小帳號短區間 → cron 觸發後佇列顯示「待調整」；②進調整頁填 CPC/CTR 生成預覽 → 7 表數字合理、Raw spend 與抓取一致；③「重抽」數字變、同參數同 seed 重現；④「產出」下載 xlsx 與預覽逐格一致、`weekly_snapshots` 無新列；⑤「再調整」覆寫同檔；⑥「重新抓取」回佇列重跑、adjust_json 預填保留；⑦刪 GCS `weekly/{id}/raw.json` 模擬逾期 → 預覽報「請按重新抓取」。⚠️ bucket lifecycle 需確認有「weekly/ 前綴 14 天」規則涵蓋 raw.json
 - **AdStream MGID 串接（2026-07-10）本機資料層已驗（真 API 抓取＋欄位對齊＋cv/imp 守恆全過），線上端到端待驗**：①在設定加 MGID 帳號＋把 conv_interest/decision/buy 拖進 cv 桶 → 跑一次確認 `m_bulk_raw_data` 有 24 欄、`integrated` 出現 platform=M 列、`device_summary` MGID 裝置有併入；②清單「訊息」欄會顯示「MGID N 列（帳號:列數）」，`MGID 0 列`＝帳號無資料或 token 問題；③重抓昨天多來源下拉新增「只重抓 MGID」。注意 4A 兩帳號(默沙東/黑松)近期 0 投放屬正常
 - 選單裡 r_bulk_upload 連結是 placeholder
 - 週報資料層已本機全鏈路對數驗證（D+R，2026-06-13）；剩使用者線上 UI 重跑一次最終確認＋與後台對數
