@@ -1,7 +1,7 @@
 // 週報 Excel 產出：5 個工作表，版型/樣式忠實照搬舊 rd_weekly_report.php（PhpSpreadsheet → ExcelJS）
 import ExcelJS from 'exceljs';
 import type { ReportResult, MetricAgg, WeeklyReportInput } from './types.js';
-import { calcConversions } from './report.js';
+import { RAW_HEADERS, DEV_HEADERS, dRawRowArray, rRawRowArray, mRawRowArray, deviceRawRowArray } from './rawrows.js';
 
 const FONT = { name: 'Microsoft JhengHei', size: 12 } as const;
 const HEAD_FONT = { name: 'Microsoft JhengHei', size: 13, bold: true } as const;
@@ -77,7 +77,7 @@ function writeMetricRow(ws: ExcelJS.Worksheet, row: number, label: string, m: Me
   });
 }
 
-function sumAgg(list: MetricAgg[]): MetricAgg {
+export function sumAgg(list: MetricAgg[]): MetricAgg {
   const t = { imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 };
   for (const m of list) {
     t.imp += m.imp;
@@ -273,72 +273,19 @@ export async function buildXlsx(
 
   // ---------- Sheet 6：Raw_Data（D/R 合併原始列，欄位照舊 30 欄；無框線樣式照舊） ----------
   onPhase?.('產生 Excel 中…');
+  // Raw 列建構抽到 rawrows.ts（xlsx 與 HTML 預覽共用同一份 builder＝逐格一致）
   const s5 = wb.addWorksheet('Raw_Data');
-  const RAW_HEADERS = [
-    'platform', 'date', 'account_name', 'campaignid', 'campaign_name', 'groupname', 'assetname',
-    'AdAssets', 'ad_title', 'ad_image', 'imp', 'click', 'spending', 'cv1', 'cv2', 'cv3', 'cv4',
-    'CompleteCheckout', 'AddToCart', 'ViewContent', 'Checkout', 'Bookmark', 'Search', 'CompleteRegistration',
-    'cv_view_content', 'cv_add_to_cart', 'cv_app_install', 'cv_complete_registration',
-    'cv_add_paymentInfo', 'cv_start_checkout', 'cv_search', 'cv_add_to_wishlist',
-    'conv_interest', 'conv_decision', 'conv_buy',
-  ];
   s5.addRow(RAW_HEADERS);
-
-  const fmtRawDate = (s: string) => {
-    if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}/${s.slice(4, 6)}/${s.slice(6, 8)}`;
-    return s.replace(/-/g, '/');
-  };
-  for (const v of result.dRaw) {
-    const [cv1, cv2, cv3, cv4] = calcConversions(v, buckets);
-    s5.addRow([
-      'D', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', '', v.campaign_name ?? '', '', v.ad_name ?? '',
-      '', v.ad_title ?? '', v.ad_image ?? '', v.imp ?? 0, v.click ?? 0, v.charge ?? 0, cv1, cv2, cv3, cv4,
-      0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
-      v.cv_view_content ?? 0, v.cv_add_to_cart ?? 0, v.cv_app_install ?? 0, v.cv_complete_registration ?? 0,
-      v.cv_add_paymentInfo ?? 0, v.cv_start_checkout ?? 0, v.cv_search ?? 0, v.cv_add_to_wishlist ?? 0,
-      0, 0, 0, // MGID 專屬轉換欄補 0
-    ]);
-  }
-  for (const v of result.rRaw) {
-    const [cv1, cv2, cv3, cv4] = calcConversions(v, buckets);
-    s5.addRow([
-      'R', fmtRawDate(v.Date), v.brandname, v.campaignid, v.cpg_name, v.groupname, v.assetname,
-      v.AdAssets, v.assettitle, v.assetimage, v.Impressions, v.Clicks, v.Spend, cv1, cv2, cv3, cv4,
-      v.CompleteCheckout, v.AddToCart, v.ViewContent, v.Checkout, v.Bookmark, v.Search, v.CompleteRegistration,
-      0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
-      0, 0, 0, // MGID 專屬轉換欄補 0
-    ]);
-  }
-  // MGID 列（platform='M'）：teaser_title→assetname/ad_title、teaser_image→ad_image；
-  // D/R 專屬事件欄補 0，尾三欄填 conv_interest/decision/buy（Raw 無損）。
-  for (const v of result.mRaw) {
-    const [cv1, cv2, cv3, cv4] = calcConversions(v, buckets);
-    s5.addRow([
-      'M', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', v.campaign_id ?? '', v.campaign_name ?? '', '', v.teaser_title ?? '',
-      '', v.teaser_title ?? '', v.teaser_image ?? '', v.imp ?? 0, v.click ?? 0, v.spend ?? 0, cv1, cv2, cv3, cv4,
-      0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
-      0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
-      v.conv_interest ?? 0, v.conv_decision ?? 0, v.conv_buy ?? 0, // MGID 三階轉換
-    ]);
-  }
+  for (const v of result.dRaw) s5.addRow(dRawRowArray(v, buckets));
+  for (const v of result.rRaw) s5.addRow(rRawRowArray(v, buckets));
+  for (const v of result.mRaw) s5.addRow(mRawRowArray(v, buckets));
 
   // ---------- Sheet 7：raw_data_device（裝置層原始寬列；每列＝平台×日期×campaign，4 裝置桶各 7 指標） ----------
   // device 是 campaign 層級資料（Raw_Data 是 ad 層級），故另開一頁。D 列只填 PC/Mobile（沿用裝置分析口徑）、
   // R 列補滿四桶；cv1~cv4 已在 report.ts 依拖拉分桶換算好（與裝置分析一致）。無框線樣式照 Raw_Data。
   const s6 = wb.addWorksheet('raw_data_device');
-  const DEV_COLS: [string, string][] = [['PC', 'pc'], ['Mobile', 'mobile'], ['Tablet', 'tablet'], ['Others', 'others']];
-  const DEV_METRICS = ['imp', 'click', 'spend', 'cv1', 'cv2', 'cv3', 'cv4'] as const;
-  const devHeaders = ['platform', 'date', 'account_name', 'campaign_id', 'campaign_name'];
-  for (const [, p] of DEV_COLS) for (const m of DEV_METRICS) devHeaders.push(`${p}_${m}`);
-  s6.addRow(devHeaders);
-  for (const r of result.deviceRaw) {
-    const rowVals: any[] = [r.platform, fmtRawDate(String(r.date ?? '')), r.account_name, r.campaign_id, r.campaign_name];
-    for (const [label] of DEV_COLS) {
-      const m = r.devices[label] ?? { imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0, cv3: 0, cv4: 0 };
-      rowVals.push(m.imp, m.click, m.spend, m.cv1, m.cv2, m.cv3, m.cv4);
-    }
-    s6.addRow(rowVals);
-  }
+  s6.addRow(DEV_HEADERS);
+  for (const r of result.deviceRaw) s6.addRow(deviceRawRowArray(r));
 
   // ---------- Sheet：文案（自動產生的客戶文案；AM 潤飾後複製使用） ----------
   const sNarr = wb.addWorksheet('文案');
