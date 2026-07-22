@@ -99,6 +99,14 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         </div>
 
         <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="adjustMode" style="width:auto">
+            <span class="nm" style="font-family:var(--mono);font-size:12.5px;font-weight:600;letter-spacing:.04em">隨機調整模式</span>
+            <span class="hint">抓完數據先停在確認頁，填 CPC/CTR 範圍調整曝光/點擊後才產出</span>
+          </label>
+        </div>
+
+        <div class="field">
           <button type="submit" class="btn-go" id="genBtn">加入產生佇列</button>
           <div id="status" class="status"></div>
         </div>
@@ -250,6 +258,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
       account: account, accountName: accountName, rAid: rAid, mgidClientIds: mgidClientIds,
       bucketsJson: JSON.stringify({ cv1: bucketValues('cv1'), cv2: bucketValues('cv2'), cv3: bucketValues('cv3'), cv4: bucketValues('cv4') }),
       startDate: startDate, endDate: endDate, weekStart: document.getElementById('weekStart').value,
+      adjust: document.getElementById('adjustMode').checked ? '1' : '',
     });
 
     genBtn.disabled = true;
@@ -277,6 +286,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
   function statusCell(j) {
     if (j.status === 'queued') return '<span class="st st-queued">排隊中' + (j.queueAhead > 0 ? '（前面還有 ' + j.queueAhead + ' 份）' : '') + '</span>';
     if (j.status === 'running') return '<span class="st st-run"><span class="spin"></span>' + esc(j.phase || '產生中…') + '</span>';
+    if (j.status === 'awaiting_adjustment') return '<span class="st st-part">待調整</span>';
     if (j.status === 'done') return '<span class="st st-done">完成</span>';
     return '<span class="st st-fail" title="' + esc(j.error || '') + '">失敗</span>';
   }
@@ -284,9 +294,17 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     fetch('${basePath}/jobs').then(function (r) { return r.json(); }).then(function (jobs) {
       if (!jobs.length) { jobRows.innerHTML = '<tr><td colspan="4" class="center">尚無紀錄</td></tr>'; return; }
       jobRows.innerHTML = jobs.map(function (j) {
-        var dl = j.status === 'done'
-          ? '<a class="btn-dl" href="${basePath}/download/' + j.id + '">下載</a>'
-          : (j.status === 'failed' ? '<span class="muted">—</span>' : '<span class="muted">等待中</span>');
+        var dl;
+        if (j.status === 'awaiting_adjustment') {
+          dl = '<a class="btn-dl" href="${basePath}/adjust/' + j.id + '">調整</a>';
+        } else if (j.status === 'done') {
+          dl = '<a class="btn-dl" href="${basePath}/download/' + j.id + '">下載</a>'
+             + (j.canAdjust ? ' <a class="btn-dl" href="${basePath}/adjust/' + j.id + '">再調整</a>' : '');
+        } else if (j.status === 'failed') {
+          dl = '<span class="muted">—</span>';
+        } else {
+          dl = '<span class="muted">等待中</span>';
+        }
         return '<tr><td>' + esc(j.label) + '</td><td>' + statusCell(j) + '</td><td class="muted">' + esc(j.createdAt) + '</td><td class="ar">' + dl + '</td></tr>';
       }).join('');
     });
