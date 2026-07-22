@@ -14,6 +14,7 @@ export interface WeeklyReportInput {
   weekStart: number; // 週起始日 1(一)~7(日)
   expireMonths: number; // campaign 結束超過 N 個月不抓報表（1/3/6）
   mgidClientIds: string[]; // MGID api_client_id 陣列（空陣列 = 不抓 M）
+  adjust?: boolean; // 隨機調整模式：worker 只抓 raw 存 GCS、停在待調整，不直接產 xlsx
 }
 
 /**
@@ -169,4 +170,17 @@ export interface ReportResult {
   dRaw: DRow[];
   rRaw: RRow[];
   mRaw: MRow[]; // MGID 標準化列（Raw_Data 的 M 列來源）
+}
+
+/** 抓取階段的完整原始資料（fetchWeeklyRaw 產出；聚合與隨機調整的共同輸入）。
+ *  deviceAgg 抓取時已聚合（真實路徑直接沿用）；調整路徑會由調整後 deviceRaw 重建（等值性見 spec §10.3）。 */
+export interface WeeklyRawData {
+  dRaw: DRow[];
+  rRaw: RRow[];
+  mRaw: MRow[];
+  deviceAgg: Map<string, MetricAgg>;
+  deviceRaw: DeviceRawRow[];
+  warnings: string[];
+  images: ReportResult['images']; // 已下載素材圖（序列化時不存，最終產出時重抓）
+  imageKeys: Map<string, string>; // URL → 感知雜湊分群 identity key（序列化保存）
 }
