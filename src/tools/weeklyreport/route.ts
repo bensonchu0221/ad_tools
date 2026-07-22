@@ -13,12 +13,14 @@ import {
   markWeeklyJobPhase,
   markWeeklyJobDone,
   markWeeklyJobFailed,
+  markWeeklyJobAwaitingAdjustment,
   getLatestSnapshot,
   saveWeeklySnapshot,
 } from '../../core/store.js';
-import { uploadWeeklyXlsx, downloadWeekly } from '../../core/gcs.js';
+import { uploadWeeklyXlsx, uploadWeeklyRawJson, downloadWeekly } from '../../core/gcs.js';
 import { currentUser } from '../../core/auth.js';
-import { buildReport } from './report.js';
+import { buildReport, fetchWeeklyRaw } from './report.js';
+import { serializeWeeklyRaw } from './serialize.js';
 import { buildXlsx } from './xlsx.js';
 import { summarizeReport, buildNarrative } from './narrative.js';
 import { weeklyFormPage } from './form.js';
@@ -99,11 +101,12 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       // 賭「end_date 都可靠」風險不值得（end_date 過期但重啟投放的 campaign 設小會誤剪），故不再用最激進的 1
       expireMonths: 3,
       mgidClientIds,
+      adjust: b.adjust === '1', // 隨機調整模式：worker 只抓 raw、停在待調整
     };
 
     // label：帳號（D 名 / R ids / M ids）＋日期區間，清單顯示用
     const who = accountName || (input.rUserIds.length ? `R:${input.rUserIds.join(',')}` : '') || (mgidClientIds.length ? `M:${mgidClientIds.join(',')}` : '');
-    const label = `${who} ${startDate}~${endDate}`.trim();
+    const label = `${who} ${startDate}~${endDate}${b.adjust === '1' ? '（調整）' : ''}`.trim();
     const jobId = await enqueueWeeklyJob({
       label,
       paramsJson: JSON.stringify(input),
@@ -124,6 +127,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         phase: j.phase,
         error: j.error,
         queueAhead: j.queueAhead ?? 0,
+        canAdjust: !!j.rawGcsObject, // 有 raw 暫存（14 天內）＝可進調整頁（awaiting_adjustment 或 done 再調）
         createdAt: j.createdAt,
       }))
     );
@@ -162,6 +166,16 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         app.log.info({ jobId: job.id, phase }, 'weeklyreport progress');
         void markWeeklyJobPhase(job.id, phase);
       };
+
+      // 隨機調整模式：只抓原始 raw 存 GCS，停在待調整（使用者之後在確認頁預覽/產出，不重打 API）
+      if (input.adjust) {
+        const raw = await fetchWeeklyRaw(input, onPhase);
+        onPhase('上傳原始資料中…');
+        const rawGcsObject = await uploadWeeklyRawJson(job.id, serializeWeeklyRaw(input, raw));
+        await markWeeklyJobAwaitingAdjustment(job.id, { rawGcsObject, warnings: raw.warnings });
+        return reply.send({ ok: true, jobId: job.id, awaitingAdjustment: true });
+      }
+
       const result = await buildReport(input, onPhase);
 
       // 自動文案＋快照（附加價值，失敗不可拖垮報表）
