@@ -23,6 +23,7 @@ import {
   type DRow,
   type DeviceRawRow,
   type MRow,
+  type WeeklyRawData,
 } from './types.js';
 
 const R_TYPE_LABEL: Record<UserType, string> = { agency: '台客', direct: '4A', super: 'Super' };
@@ -579,11 +580,21 @@ async function fetchMData(
   return { rows, deviceAgg, deviceRaw };
 }
 
-/** 主流程：並行抓 R+D+M → 日/週/素材/受眾聚合 ＋ raw */
-export async function buildReport(
+/** 圖片 URL 收集（fetch 與 finalize 重抓共用；順序＝dRaw→rRaw→mRaw，與原 buildReport 一致） */
+export function collectImageUrls(dRaw: DRow[], rRaw: RRow[], mRaw: MRow[]): string[] {
+  return [
+    ...dRaw.map((r) => r.ad_image ?? ''),
+    ...rRaw.map((r) => r.assetimage),
+    ...mRaw.map((r) => r.teaser_image ?? ''),
+  ];
+}
+
+/** 階段①：並行抓 R+D+M ＋ 下載素材圖並分群 → 完整原始資料（不聚合）。
+ *  素材圖下載/分群提前到抓取階段，聚合（aggregateWeekly）就能是同步純函式、可被隨機調整重複套用。 */
+export async function fetchWeeklyRaw(
   input: WeeklyReportInput,
   onPhase?: (phase: string) => void
-): Promise<ReportResult> {
+): Promise<WeeklyRawData> {
   const warnings: string[] = [];
 
   onPhase?.('抓取 R / D 報表中…');
@@ -620,7 +631,15 @@ export async function buildReport(
     warnings.push('MGID 帳號在走期內查無報表資料');
   }
 
-  onPhase?.('整合計算中…');
+  onPhase?.('下載素材縮圖中…');
+  const images = await downloadImages(collectImageUrls(dRaw, rRaw, mRaw));
+  const imageKeys = await clusterImageUrls(images); // URL → identity key（空 URL 不在 map 內）
+  return { dRaw, rRaw, mRaw, deviceAgg, deviceRaw, warnings, images, imageKeys };
+}
+
+/** 階段②：聚合（同步純函式）。吃 fetchWeeklyRaw（或調整後）的 raw → 日/週/素材/受眾聚合。 */
+export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): ReportResult {
+  const { dRaw, rRaw, mRaw, warnings, images, imageKeys, deviceAgg, deviceRaw } = raw;
   const { buckets } = input;
   const start = new Date(`${input.startDate}T00:00:00`);
   const end = new Date(`${input.endDate}T00:00:00`);
@@ -662,14 +681,7 @@ export async function buildReport(
   }
 
   // ---- Section 3：素材分析（以「圖片 × 文案」為鍵聚合，spend 降序）----
-  // 同一張圖在 D/R 兩平台 URL 不同，先下載＋感知雜湊分群，再以（圖片群, title）配對聚合
-  onPhase?.('下載素材縮圖中…');
-  const images = await downloadImages([
-    ...dRaw.map((r) => r.ad_image ?? ''),
-    ...rRaw.map((r) => r.assetimage),
-    ...mRaw.map((r) => r.teaser_image ?? ''),
-  ]);
-  const imageKeys = await clusterImageUrls(images); // URL → identity key（空 URL 不在 map 內）
+  // 圖片下載＋感知雜湊分群已於 fetchWeeklyRaw 完成，這裡直接用 raw 帶入的 images/imageKeys 配對聚合
   const assetMap = new Map<string, AssetAgg>();
   const addAsset = (
     imageUrl: string,
@@ -724,6 +736,16 @@ export async function buildReport(
   }
 
   return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };
+}
+
+/** 主流程（對外簽名不變）：fetch → aggregate */
+export async function buildReport(
+  input: WeeklyReportInput,
+  onPhase?: (phase: string) => void
+): Promise<ReportResult> {
+  const raw = await fetchWeeklyRaw(input, onPhase);
+  onPhase?.('整合計算中…');
+  return aggregateWeekly(raw, input);
 }
 
 /** Raw_Data 工作表的轉換計算（與舊 helper 同邏輯，xlsx.ts 共用）；dDeviceMetric 供純函式驗證 */
