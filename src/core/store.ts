@@ -597,7 +597,7 @@ export async function markBulkRun(
 // 一次排多份週報：使用者送出即入列（queued），由 cron worker 序列執行（全域並發=1）。
 // 解 popin API 限流的關鍵是「同一時間只有一份在跑」，不是「間隔多久」——並發鎖（claimNextWeeklyJob）才是防線。
 
-export type WeeklyJobStatus = 'queued' | 'running' | 'done' | 'failed';
+export type WeeklyJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'awaiting_adjustment';
 
 export interface WeeklyJobRow {
   id: number;
@@ -607,6 +607,8 @@ export interface WeeklyJobRow {
   label: string; // 顯示用：帳號名＋日期區間
   gcsObject: string | null; // 完成後 GCS 物件路徑
   fileName: string | null; // 下載檔名
+  rawGcsObject: string | null; // 隨機調整模式：原始 raw JSON 的 GCS 物件路徑（有值＝可進調整頁）
+  adjustJson: string | null; // 最後一次調整參數 {cpcLo,cpcUp,ctrLo,ctrUp,seed}（調整頁預填/重現）
   phase: string | null; // 最後一次進度文字
   error: string | null;
   warnings: string[];
@@ -630,6 +632,8 @@ async function ensureWeeklyJobsSchema(p: mysql.Pool): Promise<void> {
       label VARCHAR(255) NOT NULL,
       gcs_object VARCHAR(512) NULL,
       file_name VARCHAR(255) NULL,
+      raw_gcs_object VARCHAR(512) NULL,
+      adjust_json TEXT NULL,
       phase VARCHAR(255) NULL,
       error TEXT NULL,
       warnings_json TEXT NULL,
@@ -639,11 +643,31 @@ async function ensureWeeklyJobsSchema(p: mysql.Pool): Promise<void> {
       INDEX idx_status (status)
     ) DEFAULT CHARSET=utf8mb4`
   );
+  // 隨機調整模式（2026-07-22）遷移：新狀態＋raw 暫存位置＋最後調整參數。
+  // MODIFY ENUM 具冪等性（每個 process 首次使用跑一次）；加欄用 information_schema 查重（同 adstream_configs）。
+  await p.query(
+    `ALTER TABLE weekly_jobs MODIFY status ENUM('queued','running','done','failed','awaiting_adjustment') NOT NULL DEFAULT 'queued'`
+  );
+  const dbName = process.env.DB_NAME ?? 'ad_tools';
+  const hasCol = async (col: string) => {
+    const [cols] = await p.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns
+       WHERE table_schema = ? AND table_name = 'weekly_jobs' AND column_name = ?`,
+      [dbName, col]
+    );
+    return ((cols as any[])[0]?.c ?? 0) > 0;
+  };
+  if (!(await hasCol('raw_gcs_object'))) {
+    await p.query(`ALTER TABLE weekly_jobs ADD COLUMN raw_gcs_object VARCHAR(512) NULL`);
+  }
+  if (!(await hasCol('adjust_json'))) {
+    await p.query(`ALTER TABLE weekly_jobs ADD COLUMN adjust_json TEXT NULL`);
+  }
   weeklyJobsSchemaReady = true;
 }
 
 const WEEKLY_SELECT = `SELECT id, status, created_by, params_json, label, gcs_object, file_name,
-  phase, error, warnings_json,
+  raw_gcs_object, adjust_json, phase, error, warnings_json,
   DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
   DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
   DATE_FORMAT(finished_at, '%Y-%m-%d %H:%i:%s') AS finished_at
@@ -658,6 +682,8 @@ function mapWeeklyJobRow(r: any): WeeklyJobRow {
     label: r.label,
     gcsObject: r.gcs_object ?? null,
     fileName: r.file_name ?? null,
+    rawGcsObject: r.raw_gcs_object ?? null,
+    adjustJson: r.adjust_json ?? null,
     phase: r.phase ?? null,
     error: r.error ?? null,
     warnings: parseJsonArray(r.warnings_json),
@@ -775,6 +801,38 @@ export async function markWeeklyJobFailed(id: number, error: string): Promise<vo
   await p.query(
     `UPDATE weekly_jobs SET status='failed', error=?, finished_at=NOW() WHERE id = ?`,
     [error, id]
+  );
+}
+
+/** 隨機調整模式：抓取完成、raw 已上 GCS → 停在待調整（使用者進確認頁填 CPC/CTR）。 */
+export async function markWeeklyJobAwaitingAdjustment(
+  id: number,
+  o: { rawGcsObject: string; warnings: string[] }
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE weekly_jobs SET status='awaiting_adjustment', raw_gcs_object=?, warnings_json=?,
+       phase='原始資料已就緒，請進入調整頁' WHERE id = ?`,
+    [o.rawGcsObject, JSON.stringify(o.warnings), id]
+  );
+}
+
+/** 記錄最後一次調整參數（每次預覽即存；調整頁預填與「滿意版」重現用）。 */
+export async function saveWeeklyJobAdjustParams(id: number, adjustJson: string): Promise<void> {
+  const p = getPool();
+  if (!p) return;
+  await p.query(`UPDATE weekly_jobs SET adjust_json = ? WHERE id = ?`, [adjustJson, id]);
+}
+
+/** 原任務重新抓取：打回 queued，cron worker 沿用 params_json 重跑 fetch→覆寫 raw.json。
+ *  保留 adjust_json（上次 CPC/CTR 預填）；清掉 error。僅供 adjust 任務用（route 端已守門）。 */
+export async function requeueWeeklyJob(id: number): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE weekly_jobs SET status='queued', phase='重新抓取排隊中…', error=NULL, started_at=NULL WHERE id = ?`,
+    [id]
   );
 }
 

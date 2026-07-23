@@ -29,6 +29,16 @@ export async function uploadWeeklyXlsx(
   return object;
 }
 
+/** 上傳隨機調整模式的原始 raw JSON（同 weekly/ 前綴＝共用 14 天 lifecycle 自動清）。 */
+export async function uploadWeeklyRawJson(jobId: number, json: string): Promise<string> {
+  const object = `${PREFIX}${jobId}/raw.json`;
+  await getStorage()
+    .bucket(BUCKET)
+    .file(object)
+    .save(json, { contentType: 'application/json', resumable: false });
+  return object;
+}
+
 /** 下載指定 GCS 物件內容（供下載 proxy 串回使用者）。 */
 export async function downloadWeekly(object: string): Promise<Buffer> {
   const [buf] = await getStorage().bucket(BUCKET).file(object).download();
