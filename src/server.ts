@@ -35,7 +35,7 @@ const ICON = {
 };
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
-  { name: 'D&R 週報', desc: '整合 Discovery + Rixbee 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'D&R WEEKLY', tag: 'EXCEL · 5 SHEETS' },
+  { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 7 SHEETS' },
   { name: 'Report Hub', desc: '多 D／R／MGID 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' }
   // 站外工具與快捷連結統一在 slotboard.ts 的 QUICK_LINKS 維護
 ];

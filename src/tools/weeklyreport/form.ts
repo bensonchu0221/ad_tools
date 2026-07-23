@@ -22,6 +22,9 @@ const STYLE = `
   @media(max-width:560px){.row2{grid-template-columns:1fr}}
   .daterange{display:flex;align-items:center;gap:8px}
   .daterange span{color:var(--mut)}
+  /* 佇列的「狀態」「下載」欄文字/按鈕不換行（狀態徽章、下載＋再調整維持同一行） */
+  .qtable td:nth-child(2){white-space:nowrap}
+  .qtable td.ar{white-space:nowrap}
 `;
 
 export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: number): string {
@@ -99,9 +102,9 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         </div>
 
         <div class="field">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <label class="flabel" style="cursor:pointer;margin-bottom:0">
             <input type="checkbox" id="adjustMode" style="width:auto">
-            <span class="nm" style="font-family:var(--mono);font-size:12.5px;font-weight:600;letter-spacing:.04em">隨機調整模式</span>
+            <span class="nm">隨機調整模式</span>
             <span class="hint">抓完數據先停在確認頁，填 CPC/CTR 範圍調整曝光/點擊後才產出</span>
           </label>
         </div>
