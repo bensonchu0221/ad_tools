@@ -33,6 +33,7 @@ function fakeDeps(over: Partial<RunDeps> = {}): { deps: Partial<RunDeps>; append
     fetchMgidRows: (async (_c: any, s: string, e: string) => { windows.m = `${s}~${e}`; return { mRows: [['z']], mSource: [{ date: s }], mStat: [{ account: 'M', rows: 1 }] }; }) as any,
     fetchDDeviceRows: async () => [], fetchRDeviceRows: async () => [], fetchMDeviceRows: async () => [],
     appendRows: (async (_id: string, tab: string) => { appended.push(tab); }) as any,
+    deleteRowsByDateRange: (async () => 0) as any,
     ...over,
   };
   return { deps, appended, windows };

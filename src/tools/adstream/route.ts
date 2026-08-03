@@ -5,16 +5,25 @@ import { sbPage } from '../../core/sbui.js';
 import {
   dbAvailable, listDAccounts, listMgidAccounts,
   listBulkConfigs, getBulkConfig, findConfigBySheetId, addBulkConfig, updateBulkConfig, deleteBulkConfig, markBulkRun,
+  enqueueAdstreamBatch, listAdstreamJobs, claimNextAdstreamJob,
+  markAdstreamJobPhase, markAdstreamJobCompleted, markAdstreamJobFailed, requeueAdstreamJob,
+  withAdstreamRunLock,
   type BulkConfigRow, type DAccountRow, type MgidAccountRow,
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { currentUser } from '../../core/auth.js';
-import { runConfig, rerunDay, syncedLabel, RAW_TAB, R_RAW_TAB, M_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RerunScope, type PlatformOutcome, type RerunSourceOutcome } from './run.js';
+import { runConfig, rerunDay, syncedLabel, RAW_TAB, R_RAW_TAB, M_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RunResult, type RerunScope, type PlatformOutcome, type RerunSourceOutcome } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
 // 系統管理者 email：清單看全部設定，並可操作他人設定；其餘使用者只能看/操作自己建立的
 const ADMIN_EMAILS = ['benson@popin.cc'];
+
+function twToday(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
 
 /** 本機未登入（viewer=null）視為管理者，方便開發；線上依 email 判定 */
 function isAdmin(viewer: string | null): boolean {
@@ -114,6 +123,15 @@ const STYLE = `
   .tline.is-wait{color:var(--mut)} .tline.is-warn{color:var(--accent)}
   .tbl-wrap{overflow-x:auto}
   .msgline{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;max-width:16rem;cursor:help}
+  .history-batch{margin-bottom:12px;border:1px solid var(--line);border-radius:7px;background:var(--slot);overflow:hidden}
+  .history-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;
+    border-bottom:1px solid var(--line);background:#F8FAFC}
+  .history-title{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--ink)}
+  .history-counts{display:flex;gap:6px;flex-wrap:wrap}
+  .history-count{font-family:var(--mono);font-size:10px;color:var(--mut);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
+  .history-phase{max-width:18rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-detail summary{cursor:pointer;color:var(--accent);font-family:var(--mono);font-size:10.5px}
+  .history-detail div{margin-top:6px;max-width:28rem;white-space:pre-wrap;word-break:break-word;color:var(--mut);font-size:11.5px}
   .dropdown{position:relative;display:inline-block}
   .dropdown-menu{display:none;position:absolute;z-index:20;top:100%;left:0;margin-top:4px;
     background:#fff;border:1px solid var(--line);border-radius:6px;min-width:148px;
@@ -157,10 +175,16 @@ const STYLE = `
 
 /** 執行一次並把結果寫回 DB（手動執行與 cron 共用）。回傳人類可讀摘要。
  *  平台級容錯：逐平台組訊息與游標；全失敗→error（throw）、部分失敗→partial（不 throw，訊息帶失敗原因）。 */
+interface ExecuteResult {
+  status: 'success' | 'partial';
+  message: string;
+  result: RunResult;
+}
+
 async function executeAndRecord(
   config: BulkConfigRow,
   onPhase: (p: string) => void = () => {}
-): Promise<string> {
+): Promise<ExecuteResult> {
   let recorded = false; // status 已寫 DB 後才 throw 時，catch 不要再覆寫一次
   try {
     const res = await runConfig(config, onPhase);
@@ -181,7 +205,7 @@ async function executeAndRecord(
         ? `已達終止日 ${config.endDate}，停止同步（已同步到 ${syncedLabel(config)}）`
         : `已是最新（無新資料，已同步到 ${syncedLabel(config)}）`;
       await markBulkRun(config.id, { status: 'success', message: msg });
-      return msg;
+      return { status: 'success', message: msg, result: res };
     }
 
     const parts: string[] = [];
@@ -209,7 +233,7 @@ async function executeAndRecord(
     });
     recorded = true;
     if (status === 'error') throw new Error(msg); // 全失敗才讓 job 顯示錯誤；partial 回摘要
-    return msg;
+    return { status, message: msg, result: res };
   } catch (e: any) {
     if (!recorded) {
       await markBulkRun(config.id, { status: 'error', message: String(e?.message ?? e) });
@@ -437,6 +461,8 @@ export async function registerAdstream(app: FastifyInstance) {
 
     <div class="section-label">已設定清單 · configs</div>
     ${listSection}
+    <div class="section-label">執行紀錄 · runs</div>
+    <div id="runHistory"><div class="card"><div class="note" style="margin-top:0">載入執行紀錄中…</div></div></div>
     <div class="toast-dock" id="toastDock" aria-live="polite" aria-atomic="true"></div>
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
     <footer>popin ad-ops · adstream</footer>`;
@@ -842,6 +868,66 @@ export async function registerAdstream(app: FastifyInstance) {
       }).catch(function (err) { setToast({ state: 'err', tag: 'ERROR', msg: err.message, ico: 'err' }); });
     });
   });
+
+  // ---------- 排程執行紀錄（每 5 秒更新；DB 是權威狀態） ----------
+  var historyEl = document.getElementById('runHistory');
+  function historyStatus(status) {
+    var map = {
+      queued: ['st-queued', '等待中'], running: ['st-run', '執行中'],
+      success: ['st-done', '成功'], partial: ['st-part', '部分成功'], failed: ['st-fail', '失敗']
+    };
+    var s = map[status] || ['st-queued', status || '未知'];
+    return '<span class="st ' + s[0] + '">' + s[1] + '</span>';
+  }
+  function historyDuration(start, end, status) {
+    if (!start) return '—';
+    var a = new Date(start.replace(' ', 'T')).getTime();
+    var b = end ? new Date(end.replace(' ', 'T')).getTime() : (status === 'running' ? Date.now() : a);
+    var sec = Math.max(0, Math.floor((b - a) / 1000));
+    var min = Math.floor(sec / 60); sec %= 60;
+    return min ? min + ' 分 ' + sec + ' 秒' : sec + ' 秒';
+  }
+  function renderHistory(jobs) {
+    if (!historyEl) return;
+    if (!jobs.length) {
+      historyEl.innerHTML = '<div class="card"><div class="note" style="margin-top:0">尚無排程執行紀錄</div></div>';
+      return;
+    }
+    var groups = {};
+    jobs.forEach(function (j) { (groups[j.batchDate] = groups[j.batchDate] || []).push(j); });
+    historyEl.innerHTML = Object.keys(groups).sort().reverse().map(function (date) {
+      var list = groups[date];
+      var counts = { queued: 0, running: 0, success: 0, partial: 0, failed: 0 };
+      list.forEach(function (j) { counts[j.status] = (counts[j.status] || 0) + 1; });
+      var rows = list.map(function (j) {
+        var detail = j.message
+          ? '<details class="history-detail"><summary>查看結果</summary><div>' + esc(j.message) + '</div></details>'
+          : '—';
+        return '<tr><td>#' + j.id + '</td><td>' + esc(j.configName) + '</td><td>' + historyStatus(j.status) + '</td>'
+          + '<td class="muted">' + esc(j.queuedAt || '—') + '</td><td class="muted">' + esc(j.startedAt || '—') + '</td>'
+          + '<td class="muted">' + esc(j.finishedAt || '—') + '</td><td class="muted">' + historyDuration(j.startedAt, j.finishedAt, j.status) + '</td>'
+          + '<td class="muted history-phase" title="' + esc(j.phase || '') + '">' + esc(j.phase || '—') + '</td>'
+          + '<td class="muted">' + j.attemptCount + '</td><td>' + detail + '</td></tr>';
+      }).join('');
+      return '<div class="history-batch"><div class="history-head"><span class="history-title">批次 ' + esc(date) + '</span>'
+        + '<div class="history-counts"><span class="history-count">總數 ' + list.length + '</span>'
+        + '<span class="history-count">等待 ' + counts.queued + '</span><span class="history-count">執行 ' + counts.running + '</span>'
+        + '<span class="history-count">成功 ' + counts.success + '</span><span class="history-count">部分 ' + counts.partial + '</span>'
+        + '<span class="history-count">失敗 ' + counts.failed + '</span></div></div>'
+        + '<div class="tbl-wrap"><table class="qtable"><thead><tr><th>Job</th><th>設定</th><th>狀態</th><th>入列</th><th>開始</th><th>完成</th><th>耗時</th><th>階段</th><th>嘗試</th><th>結果</th></tr></thead>'
+        + '<tbody>' + rows + '</tbody></table></div></div>';
+    }).join('');
+  }
+  function loadHistory() {
+    fetch('${BASE_PATH}/jobs/recent').then(function (r) { return r.json(); }).then(renderHistory)
+      .catch(function (e) {
+        if (historyEl && !historyEl.querySelector('.history-batch')) {
+          historyEl.innerHTML = '<div class="card"><div class="note" style="margin-top:0;color:var(--err)">執行紀錄載入失敗：' + esc(e.message) + '</div></div>';
+        }
+      });
+  }
+  loadHistory();
+  setInterval(loadHistory, 5000);
 })();`;
 
     reply.type('text/html').send(
@@ -978,11 +1064,11 @@ export async function registerAdstream(app: FastifyInstance) {
         if (j && !j.done && !j.error) updateJob(jobId, { error: `執行逾時（超過 10 分鐘，卡在「${j.phase}」）` });
       }, 10 * 60 * 1000);
       try {
-        const summary = await executeAndRecord(config, (phase) => {
-          app.log.info({ jobId, phase }, 'adstream progress');
+        const execution = await withAdstreamRunLock(() => executeAndRecord(config, (phase) => {
+          app.log.info({ jobId, configId: config.id, phase }, 'adstream progress');
           updateJob(jobId, { phase });
-        });
-        if (!jobStore.get(jobId)?.error) updateJob(jobId, { done: true, summary });
+        }));
+        if (!jobStore.get(jobId)?.error) updateJob(jobId, { done: true, summary: execution.message });
       } catch (e: any) {
         app.log.error(e, 'adstream run failed');
         updateJob(jobId, { error: String(e?.message ?? e) });
@@ -1011,7 +1097,9 @@ export async function registerAdstream(app: FastifyInstance) {
         if (j && !j.done && !j.error) updateJob(jobId, { error: `執行逾時（超過 10 分鐘，卡在「${j.phase}」）` });
       }, 10 * 60 * 1000);
       try {
-        const summary = await rerunAndRecord(config, scope, (phase) => updateJob(jobId, { phase }));
+        const summary = await withAdstreamRunLock(() =>
+          rerunAndRecord(config, scope, (phase) => updateJob(jobId, { phase }))
+        );
         if (!jobStore.get(jobId)?.error) updateJob(jobId, { done: true, summary });
       } catch (e: any) {
         app.log.error(e, 'adstream rerun failed');
@@ -1030,20 +1118,66 @@ export async function registerAdstream(app: FastifyInstance) {
     reply.send({ phase: j.phase, error: j.error, done: j.done, summary: j.summary });
   });
 
-  // ---------- 排程入口（Cloud Scheduler 用，需 DIAG_KEY） ----------
+  // ---------- 執行紀錄（登入使用者只看自己可管理的設定） ----------
+  app.get(`${BASE_PATH}/jobs/recent`, async (req, reply) => {
+    const viewer = currentUser(req);
+    const jobs = await listAdstreamJobs(200);
+    if (isAdmin(viewer)) return reply.send(jobs);
+    const configs = await listBulkConfigs(viewer);
+    const allowed = new Set(configs.map((c) => c.id));
+    reply.send(jobs.filter((j) => allowed.has(j.configId)));
+  });
+
+  // ---------- 每日 dispatcher：只入列、立即回應（Cloud Scheduler 用，需 DIAG_KEY） ----------
   app.post(`${BASE_PATH}/cron`, async (req, reply) => {
     const key = (req.query as any).key;
     if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
     const configs = await listBulkConfigs();
-    const results: any[] = [];
-    for (const c of configs) {
-      try {
-        const summary = await executeAndRecord(c);
-        results.push({ id: c.id, name: c.name, ok: true, summary });
-      } catch (e: any) {
-        results.push({ id: c.id, name: c.name, ok: false, error: String(e?.message ?? e) });
-      }
+    const batchDate = twToday();
+    const queued = await enqueueAdstreamBatch(
+      batchDate,
+      configs.map((c) => ({ id: c.id, name: c.name }))
+    );
+    app.log.info({ batchDate, ...queued }, 'adstream batch enqueued');
+    reply.code(202).send({ ok: true, batchDate, ...queued });
+  });
+
+  // ---------- 序列 worker：一次認領一個設定（Cloud Scheduler 每分鐘觸發） ----------
+  app.post(`${BASE_PATH}/worker/cron`, async (req, reply) => {
+    const key = (req.query as any).key;
+    if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+    const job = await claimNextAdstreamJob();
+    if (!job) return reply.send({ ok: true, idle: true });
+
+    const config = await getBulkConfig(job.configId);
+    if (!config) {
+      const error = `找不到 AdStream 設定 #${job.configId}`;
+      await markAdstreamJobFailed(job.id, error);
+      return reply.send({ ok: false, jobId: job.id, error });
     }
-    reply.send({ ok: true, count: configs.length, results });
+
+    try {
+      const execution = await withAdstreamRunLock(() => executeAndRecord(config, (phase) => {
+        app.log.info({ batchDate: job.batchDate, jobId: job.id, configId: config.id, phase }, 'adstream worker progress');
+        void markAdstreamJobPhase(job.id, phase).catch((e) =>
+          app.log.error(e, 'adstream worker phase update failed')
+        );
+      }));
+      await markAdstreamJobCompleted(job.id, {
+        status: execution.status,
+        message: execution.message,
+        resultJson: JSON.stringify(execution.result),
+      });
+      reply.send({ ok: true, jobId: job.id, configId: config.id, status: execution.status });
+    } catch (e: any) {
+      const error = String(e?.message ?? e);
+      if (error.includes('已有 AdStream 任務執行中')) {
+        await requeueAdstreamJob(job.id, error);
+        return reply.send({ ok: true, idle: true, busy: true });
+      }
+      app.log.error({ err: e, batchDate: job.batchDate, jobId: job.id, configId: config.id }, 'adstream worker failed');
+      await markAdstreamJobFailed(job.id, error);
+      reply.send({ ok: false, jobId: job.id, configId: config.id, error });
+    }
   });
 }

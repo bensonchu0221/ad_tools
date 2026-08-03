@@ -114,20 +114,35 @@ function reportWindows(sd: string, ed: string): { sd: string; ed: string }[] {
   return out;
 }
 
-/** 對白牌 API 發 GET；429（併發過高）退避重試。回傳解析後 JSON。 */
+/** MGID 暫時性錯誤：限流、5xx，以及實測會以 400 回傳的「稍後再試」。 */
+export function isTransientMgidResponse(status: number, body: any): boolean {
+  const text = JSON.stringify(body ?? '');
+  return status === 429 || status >= 500 ||
+    (status === 400 && text.includes('WAS_SOME_ERROR_TRY_AGAIN_LATER'));
+}
+
+/** 對白牌 API 發 GET；暫時性 HTTP／網路錯誤採指數退避重試。回傳解析後 JSON。 */
 async function get(url: string, token: string, maxRetries = 4): Promise<any> {
   let attempt = 0;
   while (true) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (res.status === 429 && attempt < maxRetries) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (e) {
+      if (attempt >= maxRetries) throw e;
       attempt++;
-      await sleep(800 * attempt); // 線性退避
+      await sleep(800 * (2 ** (attempt - 1)));
       continue;
     }
     const j = await res.json().catch(() => null);
+    if (isTransientMgidResponse(res.status, j) && attempt < maxRetries) {
+      attempt++;
+      await sleep(800 * (2 ** (attempt - 1)));
+      continue;
+    }
     if (res.status !== 200) {
       throw new Error(`MGID API ${res.status}：${JSON.stringify(j)?.slice(0, 200)}`);
     }

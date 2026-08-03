@@ -593,6 +593,204 @@ export async function markBulkRun(
   await p.query(`UPDATE adstream_configs SET ${sets.join(', ')} WHERE id = ?`, params);
 }
 
+// ---------- AdStream 排程佇列（adstream_jobs；本工具自管） ----------
+// 每日 cron 只負責把各設定入列；worker 每次原子認領一筆，避免 28 組設定綁在同一個 HTTP request。
+
+export type AdstreamJobStatus = 'queued' | 'running' | 'success' | 'partial' | 'failed';
+
+export interface AdstreamJobRow {
+  id: number;
+  batchDate: string;
+  configId: number;
+  configName: string;
+  status: AdstreamJobStatus;
+  phase: string | null;
+  attemptCount: number;
+  message: string | null;
+  resultJson: string | null;
+  queuedAt: string;
+  startedAt: string | null;
+  heartbeatAt: string | null;
+  finishedAt: string | null;
+}
+
+const ADSTREAM_RUNNING_TIMEOUT_MIN = 10;
+const ADSTREAM_LOCK_NAME = 'ad_tools:adstream:global';
+let adstreamJobsSchemaReady = false;
+
+async function ensureAdstreamJobsSchema(p: mysql.Pool): Promise<void> {
+  if (adstreamJobsSchemaReady) return;
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS adstream_jobs (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      batch_date DATE NOT NULL,
+      config_id INT NOT NULL,
+      config_name VARCHAR(255) NOT NULL,
+      status ENUM('queued','running','success','partial','failed') NOT NULL DEFAULT 'queued',
+      phase VARCHAR(255) NULL,
+      attempt_count INT NOT NULL DEFAULT 0,
+      message TEXT NULL,
+      result_json MEDIUMTEXT NULL,
+      queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME NULL,
+      heartbeat_at DATETIME NULL,
+      finished_at DATETIME NULL,
+      UNIQUE KEY uniq_batch_config (batch_date, config_id),
+      INDEX idx_status_id (status, id),
+      INDEX idx_batch_date (batch_date)
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  adstreamJobsSchemaReady = true;
+}
+
+const ADSTREAM_JOB_SELECT = `SELECT id,
+  DATE_FORMAT(batch_date, '%Y-%m-%d') AS batch_date,
+  config_id, config_name, status, phase, attempt_count, message, result_json,
+  DATE_FORMAT(queued_at, '%Y-%m-%d %H:%i:%s') AS queued_at,
+  DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
+  DATE_FORMAT(heartbeat_at, '%Y-%m-%d %H:%i:%s') AS heartbeat_at,
+  DATE_FORMAT(finished_at, '%Y-%m-%d %H:%i:%s') AS finished_at
+  FROM adstream_jobs`;
+
+function mapAdstreamJobRow(r: any): AdstreamJobRow {
+  return {
+    id: Number(r.id),
+    batchDate: r.batch_date,
+    configId: Number(r.config_id),
+    configName: r.config_name,
+    status: r.status,
+    phase: r.phase ?? null,
+    attemptCount: Number(r.attempt_count ?? 0),
+    message: r.message ?? null,
+    resultJson: r.result_json ?? null,
+    queuedAt: r.queued_at,
+    startedAt: r.started_at ?? null,
+    heartbeatAt: r.heartbeat_at ?? null,
+    finishedAt: r.finished_at ?? null,
+  };
+}
+
+/** 同一 batch_date + config_id 只入列一次；重複觸發 cron 不會產生雙份工作。 */
+export async function enqueueAdstreamBatch(
+  batchDate: string,
+  configs: { id: number; name: string }[]
+): Promise<{ total: number; created: number }> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureAdstreamJobsSchema(p);
+  if (!configs.length) return { total: 0, created: 0 };
+  const placeholders = configs.map(() => `(?, ?, ?, 'queued')`).join(',');
+  const params = configs.flatMap((c) => [batchDate, c.id, c.name]);
+  const [res] = await p.query(
+    `INSERT IGNORE INTO adstream_jobs (batch_date, config_id, config_name, status)
+     VALUES ${placeholders}`,
+    params
+  );
+  return { total: configs.length, created: Number((res as any).affectedRows ?? 0) };
+}
+
+/** 最近執行紀錄；UI 預設取 200 筆，避免無界讀取歷史資料。 */
+export async function listAdstreamJobs(limit = 200): Promise<AdstreamJobRow[]> {
+  const p = getPool();
+  if (!p) return [];
+  await ensureAdstreamJobsSchema(p);
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+  const [rows] = await p.query(`${ADSTREAM_JOB_SELECT} ORDER BY id DESC LIMIT ${safeLimit}`);
+  return (rows as any[]).map(mapAdstreamJobRow);
+}
+
+/**
+ * 原子認領最舊 queued 工作，全域並發固定為 1。
+ * running 超過 10 分鐘視為孤兒並標 failed；不自動重跑，避免未知的 Sheet 半寫狀態造成重複。
+ */
+export async function claimNextAdstreamJob(): Promise<AdstreamJobRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureAdstreamJobsSchema(p);
+  await p.query(
+    `UPDATE adstream_jobs SET status='failed', phase='執行逾時',
+       message='執行超過 ${ADSTREAM_RUNNING_TIMEOUT_MIN} 分鐘，可能由 Cloud Run 中途回收；下次排程會依游標自動補抓',
+       finished_at=NOW()
+     WHERE status='running'
+       AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL ${ADSTREAM_RUNNING_TIMEOUT_MIN} MINUTE`
+  );
+  const [res] = await p.query(
+    `UPDATE adstream_jobs SET status='running', phase='開始執行…',
+       attempt_count=attempt_count+1, started_at=NOW(), heartbeat_at=NOW(), finished_at=NULL
+     WHERE status='queued'
+       AND NOT EXISTS (
+         SELECT 1 FROM (SELECT 1 FROM adstream_jobs WHERE status='running' LIMIT 1) AS active
+       )
+     ORDER BY id ASC LIMIT 1`
+  );
+  if (Number((res as any).affectedRows ?? 0) === 0) return null;
+  const [rows] = await p.query(
+    `${ADSTREAM_JOB_SELECT} WHERE status='running' ORDER BY started_at DESC, id DESC LIMIT 1`
+  );
+  const row = (rows as any[])[0];
+  return row ? mapAdstreamJobRow(row) : null;
+}
+
+export async function markAdstreamJobPhase(id: number, phase: string): Promise<void> {
+  const p = getPool();
+  if (!p) return;
+  await p.query(
+    `UPDATE adstream_jobs SET phase=?, heartbeat_at=NOW() WHERE id=? AND status='running'`,
+    [phase.slice(0, 255), id]
+  );
+}
+
+export async function markAdstreamJobCompleted(
+  id: number,
+  done: { status: 'success' | 'partial'; message: string; resultJson?: string | null }
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE adstream_jobs SET status=?, phase='完成', message=?, result_json=?,
+       heartbeat_at=NOW(), finished_at=NOW() WHERE id=?`,
+    [done.status, done.message, done.resultJson ?? null, id]
+  );
+}
+
+export async function markAdstreamJobFailed(id: number, error: string): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE adstream_jobs SET status='failed', phase='失敗', message=?,
+       heartbeat_at=NOW(), finished_at=NOW() WHERE id=?`,
+    [error, id]
+  );
+}
+
+/** worker 認領後若發現手動任務正持鎖，放回佇列等待下一次，不算失敗。 */
+export async function requeueAdstreamJob(id: number, message: string): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE adstream_jobs SET status='queued', phase='等待其他 AdStream 任務完成', message=?,
+       started_at=NULL, heartbeat_at=NULL WHERE id=? AND status='running'`,
+    [message, id]
+  );
+}
+
+/** 手動執行、重抓與排程 worker 共用同一把 MySQL advisory lock，避免彼此撞車。 */
+export async function withAdstreamRunLock<T>(work: () => Promise<T>): Promise<T> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const conn = await p.getConnection();
+  let locked = false;
+  try {
+    const [rows] = await conn.query(`SELECT GET_LOCK(?, 0) AS acquired`, [ADSTREAM_LOCK_NAME]);
+    locked = Number((rows as any[])[0]?.acquired ?? 0) === 1;
+    if (!locked) throw new Error('已有 AdStream 任務執行中，請稍候再試');
+    return await work();
+  } finally {
+    if (locked) await conn.query(`SELECT RELEASE_LOCK(?)`, [ADSTREAM_LOCK_NAME]);
+    conn.release();
+  }
+}
+
 // ---------- 週報批次佇列（weekly_jobs；本工具自管） ----------
 // 一次排多份週報：使用者送出即入列（queued），由 cron worker 序列執行（全域並發=1）。
 // 解 popin API 限流的關鍵是「同一時間只有一份在跑」，不是「間隔多久」——並發鎖（claimNextWeeklyJob）才是防線。

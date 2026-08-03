@@ -8,7 +8,7 @@ import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateRepor
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidReportRow } from '../../core/mgid.js';
 import { getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts, EMPTY_CV_BUCKETS, type BucketEvent, type CvBuckets } from '../../core/store.js';
-import { appendRows, deleteRowsByDate } from '../../core/gsheets.js';
+import { appendRows, deleteRowsByDate, deleteRowsByDateRange } from '../../core/gsheets.js';
 import type { BulkConfigRow } from '../../core/store.js';
 
 export const RAW_TAB = 'd_bulk_raw_data';
@@ -613,12 +613,37 @@ export interface RunDeps {
   fetchMDeviceRows: typeof fetchMDeviceRows;
   appendRows: typeof appendRows;
   deleteRowsByDate: typeof deleteRowsByDate;
+  deleteRowsByDateRange: typeof deleteRowsByDateRange;
 }
 const REAL_DEPS: RunDeps = {
   fetchDRows, fetchRRows, fetchMgidRows,
   fetchDDeviceRows, fetchRDeviceRows, fetchMDeviceRows,
-  appendRows, deleteRowsByDate,
+  appendRows, deleteRowsByDate, deleteRowsByDateRange,
 };
+
+/**
+ * 增量同步採「抓成功後，先清該日期區間舊列，再寫新列」。
+ * raw 分頁一設定一 Sheet，可直接按日期清；共享分頁 additionally 以 platform 過濾。
+ * 這讓 worker 在 Sheet 已寫、游標尚未推進時被中斷，下一次仍可安全重跑而不產生雙份。
+ */
+async function clearPlatformWindow(
+  deps: RunDeps,
+  config: BulkConfigRow,
+  platform: 'D' | 'R' | 'M',
+  rawTab: string,
+  rawDateColIndex: number,
+  win: { startDate: string; endDate: string },
+  onPhase: (p: string) => void
+): Promise<void> {
+  onPhase(`清除 ${platform} ${win.startDate}~${win.endDate} 舊資料…`);
+  await deps.deleteRowsByDateRange(config.sheetId, rawTab, rawDateColIndex, win.startDate, win.endDate);
+  await deps.deleteRowsByDateRange(
+    config.sheetId, INTEGRATED_TAB, 2, win.startDate, win.endDate, { colIndex: 0, value: platform }
+  );
+  await deps.deleteRowsByDateRange(
+    config.sheetId, DEVICE_TAB, 2, win.startDate, win.endDate, { colIndex: 0, value: platform }
+  );
+}
 
 const notConfigured = (): PlatformOutcome =>
   ({ configured: false, status: 'skipped', rawRows: 0, integratedRows: 0, deviceRows: 0 });
@@ -669,6 +694,7 @@ export async function runConfig(
       const devInput = await deps.fetchDDeviceRows(config, sd, ed, onPhase);
       const integrated = buildIntegratedRows(dSource, [], syncedAt, cvBuckets, []);
       const device = buildDeviceRows('D', devInput, syncedAt, cvBuckets);
+      await clearPlatformWindow(deps, config, 'D', RAW_TAB, 2, win, onPhase);
       if (dRows.length) { onPhase(`寫入 D 分頁 ${RAW_TAB}（${dRows.length} 列）…`); await deps.appendRows(config.sheetId, RAW_TAB, SHEET_HEADER, dRows); }
       if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
       if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
@@ -686,6 +712,7 @@ export async function runConfig(
       const devInput = userType ? await deps.fetchRDeviceRows(config, win.startDate, win.endDate, userType, onPhase) : [];
       const integrated = buildIntegratedRows([], rSource, syncedAt, cvBuckets, []);
       const device = buildDeviceRows('R', devInput, syncedAt, cvBuckets);
+      await clearPlatformWindow(deps, config, 'R', R_RAW_TAB, 1, win, onPhase);
       if (rRows.length) { onPhase(`寫入 R 分頁 ${R_RAW_TAB}（${rRows.length} 列）…`); await deps.appendRows(config.sheetId, R_RAW_TAB, R_SHEET_HEADER, rRows); }
       if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
       if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
@@ -702,6 +729,7 @@ export async function runConfig(
       const devInput = await deps.fetchMDeviceRows(config, win.startDate, win.endDate, onPhase);
       const integrated = buildIntegratedRows([], [], syncedAt, cvBuckets, mSource);
       const device = buildDeviceRows('M', devInput, syncedAt, cvBuckets);
+      await clearPlatformWindow(deps, config, 'M', M_RAW_TAB, 2, win, onPhase);
       if (mRows.length) { onPhase(`寫入 MGID 分頁 ${M_RAW_TAB}（${mRows.length} 列）…`); await deps.appendRows(config.sheetId, M_RAW_TAB, M_SHEET_HEADER, mRows); }
       if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
       if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
