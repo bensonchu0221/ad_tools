@@ -646,10 +646,10 @@ async function ensureAdstreamJobsSchema(p: mysql.Pool): Promise<void> {
 const ADSTREAM_JOB_SELECT = `SELECT id,
   DATE_FORMAT(batch_date, '%Y-%m-%d') AS batch_date,
   config_id, config_name, status, phase, attempt_count, message, result_json,
-  DATE_FORMAT(queued_at, '%Y-%m-%d %H:%i:%s') AS queued_at,
-  DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
-  DATE_FORMAT(heartbeat_at, '%Y-%m-%d %H:%i:%s') AS heartbeat_at,
-  DATE_FORMAT(finished_at, '%Y-%m-%d %H:%i:%s') AS finished_at
+  DATE_FORMAT(CONVERT_TZ(queued_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS queued_at,
+  DATE_FORMAT(CONVERT_TZ(started_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS started_at,
+  DATE_FORMAT(CONVERT_TZ(heartbeat_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS heartbeat_at,
+  DATE_FORMAT(CONVERT_TZ(finished_at, '+00:00', '+08:00'), '%Y-%m-%d %H:%i:%s') AS finished_at
   FROM adstream_jobs`;
 
 function mapAdstreamJobRow(r: any): AdstreamJobRow {
@@ -757,7 +757,7 @@ export async function markAdstreamJobFailed(id: number, error: string): Promise<
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
   await p.query(
-    `UPDATE adstream_jobs SET status='failed', phase='失敗', message=?,
+    `UPDATE adstream_jobs SET status='failed', message=?,
        heartbeat_at=NOW(), finished_at=NOW() WHERE id=?`,
     [error, id]
   );
