@@ -4,6 +4,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#1＝廣告預覽：在「真實媒體文章頁」的 popin 廣告位換上廣告主素材後供 AM 截圖，取代舊 PPT 產出。
 - tool#2＝整合週報（原 D&R 週報）：整合 Discovery（D）+ Rixbee（R）+ MGID（M）三平台報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device 七工作表），取代舊 weeklyreport。2026-07-11 併入 MGID、改名整合週報。
 - tool#3＝AdStream（廣告凝視者）：多 D／R／MGID 帳戶 bulk 原始報表定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw；另有 integrated／device_summary 整合分頁。
+- tool#4＝Native Revenue：D1 媒體營收（Action4）每日自動同步到既有的營收試算表，取代人工貼數字。2026-08-03 上線。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
@@ -62,6 +63,17 @@ popin 內部工具集（取代舊 dctool）。
 - **重抓昨天**：清單每設定可「重抓昨天(T-1)」——每來源各自「先抓成功→刪該來源昨天列→立刻寫回」（冪等，A 路線靠「一設定一 sheet」唯一性約束精準刪除；2026-07-17 起逐來源隔離，單來源失敗不連累）。依來源動態 UI：單一來源一鍵、多來源下拉選全部/單一。**成功來源各自**把游標對齊到 max(現游標, 昨天)、失敗來源不動。integrated/device 按 **date+platform** 精準刪（`deleteRowsByDate` filter 參數）——舊「單邊重抓誤刪其他平台當天列」取捨已消。新增/編輯設定查重 sheet_id 禁止共用。實作：`gsheets.ts deleteRowsByDate`、`run.ts rerunDay`、路由 `/configs/:id/rerun`
 - 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
+
+## Native Revenue 核心（tool#4，`src/tools/native-revenue/`）
+- 目的：把 **D1 媒體營收**（Action4）每日寫進既有的營收試算表，取代人工貼數字。Sheet id 與分頁名 **hardcode 在 `report.ts`**（單一用途，刻意不做設定 UI）：寫入分頁 `Native_Revenue(瑪姬姐)`、對照分頁 `媒體RS`
+- 資料來源＝`https://action4.popin.cc/popin-action/?op=article&nid={domain}&start=&stop=&categories=ca_all`（回應以 `YYYYMMDD` 為 key 的每日物件）。`媒體RS` 分頁 A2:G 提供 media／domain／三方分潤（broadciel／media／agency）；**同一 domain 出現多列且分潤衝突時整個 domain 排除不寫**（domain 是 Q:T VLOOKUP 的 key，猜不得），列進 `failedItems`
+- **欄位切分：程式只寫 A:P（16 欄），Q:X 是 VLOOKUP／計算公式**。既有列走 update、新列走 append 後由程式補寫 Q:X 公式並從上一列 `copyPaste` 貼格式。冪等鍵＝`date + media + domain`（讀 C2:E 建索引；Sheet 若已有重複鍵直接 throw）
+- **營收算法照 D1 MediaRead**：`M_*` charge 除 1e6；**RTB 再除 1000（CPM 計價）**；imp／click 要併入 `_rtb`／`_criteo` 分支；**裝置別分潤各自四捨五入再相加，不可先合計才四捨五入**（實測會差 1 元）
+- 排程 `native-revenue-daily`（Cloud Scheduler，`0 10,18 * * *` Asia/Taipei、deadline 600s）打 `/tools/native-revenue/cron` 跑 **D-3～D-1**（回頭補三天，吸收 Action4 晚到的數字）。**cron 授權比 AdStream 嚴**：接受 DIAG_KEY **或** Cloud Scheduler 的 OIDC token（驗 audience＝Cloud Run URL、email＝compute SA）。另有 `/verify/cron` 冒煙測試端點，**預設 dry-run，只有 `write=1` 才寫入**
+- 執行紀錄表 `native_revenue_runs`（自動建表）＋ advisory lock（排程與手動共用，避免同時寫同一份 Sheet）；頁面每 30 秒自動 reload。單次區間上限 14 天（`validateRange`）
+- 實測（2026-08-03 上線首日）：341 個 domain、727 列、單次約 20 秒
+- 驗證：`poc/verify_native_revenue.mts`（純函式 46 項：欄序對齊 A:P、RTB/Criteo 併入、charge 換算、裝置別四捨五入、除零保護、週二起算的 periodLabel 含跨月跨年、validateRange、addDays/D-3~D-1）。已做變異測試確認斷言有鑑別力
+- **待確認（未實測，非已知 bug）**：①`syncRows` 寫 A:P 前後各讀一次 Q:X `FORMULA` 比對——公式字串本來就不會因為寫 A:P 而變，這個檢查可能恆真＝無保護力且多花一倍 batchGet 配額；而且它在寫入「之後」才比對，抓到也來不及。②`values.append` 找的是 A:P 最後有值那列，若 Q:X 公式往下拖過一批 A:P 空列，append 可能插進那些列並被程式重寫 Q:X 公式
 
 ## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
 - **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
