@@ -6,7 +6,7 @@
 // ⑤ periodLabel（以「週二」為週起始）含跨月／跨年格式
 // ⑥ validateRange 的日期格式／順序／14 天上限
 // ⑦ addDays／defaultDateRange（D-3～D-1）
-// ⑧ O 欄口徑隨代理商而異：adgeek／bfm 含代理商分潤（含真實回歸案例）
+// ⑧ 一律以「媒體分潤」計算，代理商不影響結果（含真實回歸案例）
 import { addDays, buildRevenueRow, defaultDateRange, runNativeRevenue, twToday } from '../src/tools/native-revenue/report.js';
 
 let failures = 0;
@@ -70,35 +70,26 @@ const mapping = {
   eq('③ 裝置別各自四捨五入再相加＝2（先合計會是 1）', row.values[14], 2);
 }
 
-// ---------- ⑧ O 欄口徑隨代理商而異：adgeek／bfm 含代理商分潤 ----------
+// ---------- ⑧ 一律以「媒體分潤」計算，不因代理商而異 ----------
 {
-  // 真實回歸案例：2026/8/3 mirrormedia_tw / www.mirrormedia.mg
-  // Action4 原始 charge：M_pc_click=348,905,055、M_mobile_click=586,809,756
-  // 媒體RS：broadciel .25 / media .6 / agency .15 / agency 欄=bfm
-  const real = { media: 'mirrormedia_tw', domain: 'www.mirrormedia.mg',
-    broadcielRs: 0.25, mediaRs: 0.6, agencyRs: 0.15, agency: 'bfm' };
-  const stats = { pc_imp: 146_609, mobile_imp: 239_048, pc_click: 125, mobile_click: 196,
-    charge: { M_pc_click: 348_905_055, M_mobile_click: 586_809_756 } };
+  // 真實回歸案例：2026/8/3 setn_DFP / www.setn.com_DFP_All
+  // Action4 原始 charge：M_pc_click=36,180,000、M_mobile_click=1,806,570,396（gross 1842.75）
+  // 媒體RS 媒體分潤 0.5 → ROUND(36.18*.5)+ROUND(1806.570396*.5)=18+903=921
+  const real = { media: 'setn_DFP', domain: 'www.setn.com_DFP_All',
+    broadcielRs: 0.35, mediaRs: 0.5, agencyRs: 0.15, agency: 'bfm' };
+  const stats = { pc_imp: 1, charge: { M_pc_click: 36_180_000, M_mobile_click: 1_806_570_396 } };
 
-  // ROUND(348.905055*0.75)+ROUND(586.809756*0.75)=262+440
-  eq('⑧ bfm → 含代理商分潤（真實案例應為 702）',
-    buildRevenueRow(real, '2026-08-03', stats)!.values[14], 702);
-  // 同一筆若只用媒體分潤＝修正前的錯誤值 561，用來確保這條測試真的分得開
-  eq('⑧ 同組數字只算媒體分潤會是 561（修正前的錯值）',
-    Math.round(348.905055 * 0.6) + Math.round(586.809756 * 0.6), 561);
-
-  eq('⑧ adgeek 同樣含代理商分潤',
-    buildRevenueRow({ ...real, agency: 'adgeek' }, '2026-08-03', stats)!.values[14], 702);
-  eq('⑧ 大小寫不敏感（表上公式也不分大小寫）',
-    buildRevenueRow({ ...real, agency: 'BFM' }, '2026-08-03', stats)!.values[14], 702);
-  eq('⑧ 其他代理商只算媒體分潤',
-    buildRevenueRow({ ...real, agency: 'nissin_tw' }, '2026-08-03', stats)!.values[14], 561);
-  eq('⑧ agency 前後空白不影響判定',
-    buildRevenueRow({ ...real, agency: '  bfm  ' }, '2026-08-03', stats)!.values[14], 702);
-  // 仍維持「裝置別各自四捨五入」：bfm 下也不可先合計才 round
-  eq('⑧ bfm 下仍是裝置別各自四捨五入',
-    buildRevenueRow({ ...real, mediaRs: 0.4, agencyRs: 0.1 }, '2026-08-03',
-      { pc_imp: 1, charge: { M_pc_click: 1_000_000, M_mobile_click: 1_000_000 } })!.values[14], 2);
+  eq('⑧ 真實案例＝媒體分潤 921', buildRevenueRow(real, '2026-08-03', stats)!.values[14], 921);
+  // 代理商欄位不得影響結果（曾短暫對 adgeek/bfm 加計代理商分潤，已回退）
+  for (const agency of ['bfm', 'BFM', 'adgeek', 'nissin_tw', 'infotimes', '']) {
+    eq(`⑧ agency=${agency || '(空)'} 結果不變`,
+      buildRevenueRow({ ...real, agency }, '2026-08-03', stats)!.values[14], 921);
+  }
+  // 代理商分潤數值本身也不得參與計算
+  eq('⑧ 代理商分潤改成 0.9 也不影響 O 欄',
+    buildRevenueRow({ ...real, agencyRs: 0.9 }, '2026-08-03', stats)!.values[14], 921);
+  eq('⑧ 博英分潤改變同樣不影響',
+    buildRevenueRow({ ...real, broadcielRs: 0.9 }, '2026-08-03', stats)!.values[14], 921);
 }
 
 // ---------- ② charge 換算：M_* 除 1e6；RTB 另除 1000（CPM） ----------

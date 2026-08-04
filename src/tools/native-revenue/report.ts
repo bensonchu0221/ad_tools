@@ -6,8 +6,6 @@ const RS_TAB = '媒體RS';
 const ACTION4_URL = 'https://action4.popin.cc/popin-action/';
 const M_CHARGE = 1_000_000;
 const RTB_MEDIA_CPM_CHARGE = 1_000;
-// 這兩家代理商的 O 欄（廣告預估收益）含代理商分潤，見 buildRevenueRow 內的說明。
-const AGENCY_WITH_AGENCY_SHARE = new Set(['adgeek', 'bfm']);
 
 type RsMapping = {
   media: string;
@@ -160,14 +158,10 @@ export function buildRevenueRow(mapping: RsMapping, date: string, stats: Record<
   const mobileGross = (n(charge, 'M_mobile_click') + n(charge, 'M_mobile_imp') + n(charge, 'M_mobile_imp_criteo')) / M_CHARGE
     + n(charge, 'M_mobile_imp_rtb') / M_CHARGE / RTB_MEDIA_CPM_CHARGE;
 
-  // O 欄口徑隨代理商而異：adgeek／bfm 的「廣告預估收益」含代理商分潤，其餘只算媒體分潤。
-  // 依據＝表上既有的 U 欄公式 =ROUND(IF(OR(T="adgeek",T="bfm"), O/(Q+R), O/Q), 0)——U 的用途是
-  // 還原成 gross 再由 V/W/X 拆三方分潤，所以 O 必須跟 U 用同一組分潤率，否則 U 還原不回 gross。
-  const revenueRs = AGENCY_WITH_AGENCY_SHARE.has(mapping.agency.trim().toLowerCase())
-    ? mapping.mediaRs + mapping.agencyRs
-    : mapping.mediaRs;
+  // 一律以「媒體分潤」計算，不因代理商而異：媒體RS 的媒體分潤欄就是實際該付的比率，
+  // 口徑差異由該欄的數值反映，程式不做任何代理商特例。
   // D1 報表是裝置別分潤後各自四捨五入，再相加；不可先合計才四捨五入。
-  const estimatedRevenue = Math.round(pcGross * revenueRs) + Math.round(mobileGross * revenueRs);
+  const estimatedRevenue = Math.round(pcGross * mapping.mediaRs) + Math.round(mobileGross * mapping.mediaRs);
   // 預估營收（O 欄）為 0 就不寫入：對帳沒有意義，只會把表撐大。
   // 這同時涵蓋了「整列全零」的情況（沒有花費就不會有營收）。
   if (estimatedRevenue === 0) return null;
