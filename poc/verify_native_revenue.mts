@@ -2,7 +2,7 @@
 // ① buildRevenueRow 的欄位順序與 A:P 對齊（16 欄）
 // ② RTB／Criteo 的 imp／click 併入、charge 換算（M_* 除 1e6；RTB 再除 1000＝CPM）
 // ③ 裝置別分潤「各自四捨五入再相加」——刻意用會與「先加總才四捨五入」分岔的數字
-// ④ 除以零的比率欄一律回 0、全零列回 null（不寫空列）
+// ④ 除以零的比率欄一律回 0；營收（O 欄）為 0 的列一律不寫入
 // ⑤ periodLabel（以「週二」為週起始）含跨月／跨年格式
 // ⑥ validateRange 的日期格式／順序／14 天上限
 // ⑦ addDays／defaultDateRange（D-3～D-1）
@@ -97,10 +97,11 @@ const mapping = {
   eq('② eCPM＝1/500*1000（四捨五入 3 位）', row.values[15], 2);
 }
 
-// ---------- ④ 除以零與全零 ----------
+// ---------- ④ 除以零與「O 欄為 0 不寫入」 ----------
 {
+  // 有花費（故營收>0）但 pv/inview/曝光皆 0，用來單獨驗除零保護
   const noPv = buildRevenueRow(mapping, '2026-08-05', {
-    pc_rclick: 3, pc_inview: 0, pc_imp: 0, charge: {},
+    pc_rclick: 3, charge: { M_pc_click: 1_000_000 },
   })!;
   eq('④ pv=0 → 推薦點擊率 0（不是 NaN/Infinity）', noPv.values[7], 0);
   eq('④ pv=0 → inview 率 0', noPv.values[9], 0);
@@ -108,18 +109,30 @@ const mapping = {
   eq('④ 曝光=0 → CTR 0', noPv.values[13], 0);
   eq('④ 曝光=0 → eCPM 0', noPv.values[15], 0);
 
-  ok('④ 全零列回 null（不寫空列）',
+  ok('④ 營收>0 才出列', noPv !== null && Number(noPv.values[14]) > 0);
+  ok('④ 全零列回 null',
     buildRevenueRow(mapping, '2026-08-05', { charge: {} }) === null);
   ok('④ 沒有 charge 欄也不炸',
     buildRevenueRow(mapping, '2026-08-05', {}) === null);
-  ok('④ 只有花費沒有流量仍要出列',
-    buildRevenueRow(mapping, '2026-08-05', { charge: { M_pc_click: 1_000_000 } }) !== null);
+
+  // 新規則：有流量但零花費 → 營收 0 → 不寫入（舊行為會寫一列 O=0 的空營收列）
+  ok('④ 有流量但營收 0 → 不寫入',
+    buildRevenueRow(mapping, '2026-08-05', {
+      pc_pv: 1000, mobile_pv: 500, pc_imp: 800, pc_click: 20, pc_inview: 600, charge: {},
+    }) === null);
+  // 分潤為 0 的媒體同樣不寫（round(gross*0)=0）
+  ok('④ mediaRs=0 → 營收 0 → 不寫入',
+    buildRevenueRow({ ...mapping, mediaRs: 0 }, '2026-08-05',
+      { pc_imp: 10, charge: { M_pc_click: 1_000_000 } }) === null);
+  // 花費極小導致四捨五入後為 0 也不寫
+  ok('④ 花費過小四捨五入成 0 → 不寫入',
+    buildRevenueRow(mapping, '2026-08-05', { pc_imp: 1, charge: { M_pc_click: 100 } }) === null);
 }
 
 // ---------- ⑤ periodLabel：以「週二」為週起始（由 values[0] 驗） ----------
 {
   const label = (date: string) =>
-    buildRevenueRow(mapping, date, { pc_pv: 1 })!.values[0];
+    buildRevenueRow(mapping, date, { pc_pv: 1, charge: { M_pc_click: 1_000_000 } })!.values[0];
   eq('⑤ 週二＝該週起點', label('2026-08-04'), '2026/8/04-8/10');
   eq('⑤ 週三→回推到週二', label('2026-08-05'), '2026/8/04-8/10');
   eq('⑤ 週一→回推 6 天（同週尾）', label('2026-08-10'), '2026/8/04-8/10');

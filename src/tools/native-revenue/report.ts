@@ -158,11 +158,11 @@ export function buildRevenueRow(mapping: RsMapping, date: string, stats: Record<
   const mobileGross = (n(charge, 'M_mobile_click') + n(charge, 'M_mobile_imp') + n(charge, 'M_mobile_imp_criteo')) / M_CHARGE
     + n(charge, 'M_mobile_imp_rtb') / M_CHARGE / RTB_MEDIA_CPM_CHARGE;
 
-  const hasData = pv || recClicks || reservedClicks || adImp || adClicks || pcGross || mobileGross;
-  if (!hasData) return null;
-
   // D1 報表是裝置別分潤後各自四捨五入，再相加；不可先合計才四捨五入。
   const estimatedRevenue = Math.round(pcGross * mapping.mediaRs) + Math.round(mobileGross * mapping.mediaRs);
+  // 預估營收（O 欄）為 0 就不寫入：對帳沒有意義，只會把表撐大。
+  // 這同時涵蓋了「整列全零」的情況（沒有花費就不會有營收）。
+  if (estimatedRevenue === 0) return null;
   const month = `${date.slice(0, 7)}-01`;
   return {
     key: `${date}\t${mapping.media}\t${mapping.domain}`,
