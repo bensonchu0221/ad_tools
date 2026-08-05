@@ -637,6 +637,23 @@ export async function fetchWeeklyRaw(
   return { dRaw, rRaw, mRaw, deviceAgg, deviceRaw, warnings, images, imageKeys };
 }
 
+/**
+ * 受眾名稱：取「第一個與第二個底線之間」那一段。
+ * AM 命名規範＝`產品_受眾_隨意命名`（D／M 活動層級、R 群組層級），中間那段就是受眾。
+ * 一份報表固定只放同一個產品帳戶 → 產品前綴每列都一樣、切掉；第三段是日期／版位等備註 → 也切掉，
+ * 同一受眾的多檔活動才會併成一列（`蜂王乳_受眾A_0801` 與 `蜂王乳_受眾A_0901` 同為「受眾A」）。
+ * 只有一個底線 → 取底線之後全部（`蜂王乳_受眾A`→`受眾A`）。
+ * 無底線／中間段是空的（`蜂王乳_`、`蜂王乳__0801`）＝未依規範命名 → 原樣保留（不猜），由 narrative 註明。
+ */
+export function audienceName(raw: string): string {
+  const name = (raw ?? '').trim();
+  const i = name.indexOf('_');
+  if (i < 0) return name;
+  const j = name.indexOf('_', i + 1);
+  const seg = (j < 0 ? name.slice(i + 1) : name.slice(i + 1, j)).trim();
+  return seg || name; // 切完是空字串 → 退回原名，避免整列變無名
+}
+
 /** 階段②：聚合（同步純函式）。吃 fetchWeeklyRaw（或調整後）的 raw → 日/週/素材/受眾聚合。 */
 export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): ReportResult {
   const { dRaw, rRaw, mRaw, warnings, images, imageKeys, deviceAgg, deviceRaw } = raw;
@@ -714,28 +731,40 @@ export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): R
   }
   const assets = [...assetMap.values()].sort((a, b) => b.spend - a.spend);
 
-  // ---- Section 4：受眾分析（D 以 campaign 名、R 以廣告群組名為鍵）----
+  // ---- Section 4：受眾分析（D／M 以 campaign 名、R 以廣告群組名為源，取第一個底線之後當受眾名）----
   const audiences = new Map<string, MetricAgg>();
+  const audRawNames = new Set<string>(); // 原始活動／群組名（去重）
+  const audNoUnderscore = new Set<string>(); // 其中未含底線者＝未依「產品_受眾_隨意命名」命名
+  // 邊統計命名狀況邊轉受眾名；空字串（M 裝置列等無名列）不計入命名統計
+  const audKey = (raw: string): string => {
+    const name = (raw ?? '').trim();
+    if (name) {
+      audRawNames.add(name);
+      if (!name.includes('_')) audNoUnderscore.add(name);
+    }
+    return audienceName(name);
+  };
   for (const row of dRaw) {
-    const key = row.campaign_name ?? '';
+    const key = audKey(row.campaign_name ?? '');
     const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
     addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.charge), cv1, cv2, cv3, cv4);
   }
   for (const row of rRaw) {
-    const key = row.groupname;
+    const key = audKey(row.groupname);
     const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
     addTo(audiences.get(key)!, row.Impressions, row.Clicks, row.Spend, cv1, cv2, cv3, cv4);
   }
   for (const row of mRaw) {
-    const key = row.campaign_name ?? '';
+    const key = audKey(row.campaign_name ?? '');
     const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
     addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
   }
+  const audienceNaming = { total: audRawNames.size, unparsed: audNoUnderscore.size };
 
-  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, audienceNaming, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };
 }
 
 /** 主流程（對外簽名不變）：fetch → aggregate */

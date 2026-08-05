@@ -164,7 +164,9 @@ export interface ReportResult {
   periods: string[]; // 各週標籤 YYYY/MM/DD ~ YYYY/MM/DD
   assets: AssetAgg[]; // 按 spend 降序
   images: Map<string, { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' } | null>; // 已下載素材圖（key=原URL），xlsx 縮圖重用
-  audiences: Map<string, MetricAgg>; // key=campaign_name(D)/groupname(R)
+  audiences: Map<string, MetricAgg>; // key=受眾名＝campaign_name(D/M)/groupname(R) 取第一個底線之後（見 report.ts audienceName）
+  // 受眾命名規範統計：total=原始活動／群組名去重數、unparsed=其中未含底線者。narrative 據此註明（舊 fixture 可不帶）
+  audienceNaming?: { total: number; unparsed: number };
   deviceAgg: Map<string, MetricAgg>; // key=裝置(PC/Mobile/Tablet/Others)；D 端只填 PC/Mobile，R 端 device_type 補滿四桶
   deviceRaw: DeviceRawRow[]; // 裝置層原始寬列（raw_data_device 工作表）；D+R 各列、每列一個 平台×日期×campaign
   dRaw: DRow[];

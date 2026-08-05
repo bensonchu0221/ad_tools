@@ -21,8 +21,9 @@ export interface SnapshotSummary {
   };
   // 延伸洞察（記憶體欄位、不落 DB，比照 device）：客群成效、投放走勢
   audience: {
-    byClickShare: { label: string; share: number } | null; // 點擊占比最高的客群（D=campaign_name/R=groupname）
+    byClickShare: { label: string; share: number } | null; // 點擊占比最高的客群（受眾名＝活動／群組名第一個底線之後）
     byCtr: { label: string; ctr: number } | null; // CTR 最高的客群
+    note: string | null; // 命名規範註記：有活動／群組沒底線＝拆不出受眾，於此告知使用者
   };
   trend: { firstCtr: number; lastCtr: number } | null; // 報表期間內首週→末週 CTR（≥2 週有曝光才有）
 }
@@ -109,7 +110,7 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
   }
 
   // 客群：點擊占比最高 + CTR 最高（audiences 可能為空 → 皆 null）。作法比照裝置段。
-  // audiences 的 key：D=campaign_name、R=groupname，直接當客群名顯示。
+  // audiences 的 key 已是受眾名（活動／群組名取第一個底線之後，見 report.ts audienceName），直接顯示。
   const auds = [...result.audiences.entries()].filter(([, m]) => m.imp > 0 || m.click > 0);
   const audTotalClick = auds.reduce((s, [, m]) => s + m.click, 0);
   let audByClickShare: { label: string; share: number } | null = null;
@@ -124,6 +125,16 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
       const top = withImp.sort((x, y) => (y[1].click / y[1].imp) - (x[1].click / x[1].imp))[0];
       audByCtr = { label: top[0], ctr: top[1].click / top[1].imp };
     }
+  }
+
+  // 命名規範註記：AM 規範「產品_受眾_隨意命名」。完全沒底線的活動／群組拆不出受眾、以原始名呈現，
+  // 於洞察講明白，讓 AM 自己察覺該回頭改命名（工具不猜、不擋）。舊 fixture 無此欄視同全部正常。
+  const naming = result.audienceNaming;
+  let audNote: string | null = null;
+  if (naming && naming.total > 0 && naming.unparsed > 0) {
+    audNote = naming.unparsed === naming.total
+      ? '（註：本期活動／群組名稱皆未含底線，無法拆出受眾，上列為原始名稱；建議依「產品_受眾_隨意命名」命名）'
+      : `（註：${naming.total} 個活動／群組中有 ${naming.unparsed} 個名稱未含底線，該部分以原始名稱呈現）`;
   }
 
   // 走勢：報表期間內分週 CTR（weekly 對齊 periods）。只有 ≥2 週有曝光才算首→末。
@@ -149,7 +160,7 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
     startDate: input.startDate, endDate: input.endDate, days,
     imp, click, spend, cv, ctr, cvDetail, topAsset,
     device: { byClickShare, byCtr },
-    audience: { byClickShare: audByClickShare, byCtr: audByCtr },
+    audience: { byClickShare: audByClickShare, byCtr: audByCtr, note: audNote },
     trend,
   };
 }
@@ -230,7 +241,9 @@ export function buildNarrative(
   const aud: string[] = [];
   if (s.audience.byClickShare) aud.push(`〈${s.audience.byClickShare.label}〉貢獻最多進站（占點擊 ${pct(s.audience.byClickShare.share)}）`);
   if (s.audience.byCtr) aud.push(`〈${s.audience.byCtr.label}〉CTR 最佳 ${pct(s.audience.byCtr.ctr)}`);
-  if (aud.length) extra.push('客群成效：' + aud.join('；') + '。');
+  // 命名註記接在成效句尾；若這期沒有可講的客群成效（無曝光無點擊）但命名有問題，仍單獨出一句
+  if (aud.length) extra.push('客群成效：' + aud.join('；') + '。' + (s.audience.note ?? ''));
+  else if (s.audience.note) extra.push('客群成效：' + s.audience.note);
 
   // 7) 投放走勢段（≥2 週有曝光才寫）：首週→末週 CTR 方向
   if (s.trend) {
