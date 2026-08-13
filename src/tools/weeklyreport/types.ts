@@ -113,6 +113,7 @@ export interface MRow {
 export interface DRow {
   date: string; // YYYY-MM-DD
   account_name: string;
+  campaign_id?: string; // 調整模式的穩定 campaign 鍵；舊 raw 無此欄時退回 campaign_name
   campaign_name: string;
   ad_name: string; // 廣告/素材名稱（getAdLists 的 ad_name，如「圖片1_0516」）→ Raw_Data 的 assetname 欄
   ad_title: string; // 廣告文案標題（getAdLists 的 title，長句）→ Raw_Data 的 ad_title 欄

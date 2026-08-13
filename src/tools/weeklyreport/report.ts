@@ -501,6 +501,7 @@ async function fetchDData(
         ad_title: ad?.title ?? '',
         ad_image: ad?.image ?? '',
         ...data,
+        campaign_id: items[i].campaignId, // 調整模式須用穩定 campaign 鍵，不讓 API 回傳形狀覆寫
       });
     }
   }

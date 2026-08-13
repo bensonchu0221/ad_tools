@@ -68,7 +68,7 @@ export function weeklyAdjustPage(o: {
   const body = `
     <div class="crumb"><a href="/">// tools</a> / <a href="${o.basePath}">weekly</a> / adjust</div>
     <h1>報表數字調整</h1>
-    <p class="sub">花費與轉換數維持真實。每列依你設定的 CPC、CTR 範圍隨機反推點擊與曝光——不滿意就重抽，滿意才產出 Excel。</p>
+    <p class="sub">花費與轉換數維持真實。系統依 campaign 原始成效保留好壞排序與相對差距，再展開到你設定的 CPC、CTR 範圍——不滿意就重抽，滿意才產出 Excel。</p>
     <p class="note" style="margin-top:8px">任務 #${o.jobId}　${esc(o.label)}${o.status === 'done' ? '　·　已產出過，可再調整後重新產出' : ''}</p>
 
     <div class="section-label">調整參數 · console</div>

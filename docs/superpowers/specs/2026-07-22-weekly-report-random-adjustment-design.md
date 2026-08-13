@@ -155,3 +155,13 @@ Tablet/Others）套同規則、再由調整後 `deviceRaw` 重建 `deviceAgg`」
 1. 防呆採用（§3.1）— 已確認採用。
 2. 裝置一致性方向（§6）— 方向已定，實作退路已列，細節留計畫階段。
 3. 暫存 raw 放 GCS 14 天 lifecycle（§5）— 若需更短 TTL 可調。
+
+## 13. 2026-08-13 campaign 比例調整
+
+原本的「逐 raw row 獨立抽 CPC/CTR」會在 campaign 聚合後收斂到區間中間，也可能翻轉原始好壞排序，現改為：
+
+1. 先按 platform＋account＋campaign 聚合原始 CPC/CTR。
+2. 將各 campaign 的原始相對位置映射到使用者範圍；seed 僅調整全體 85%~100% 展開幅度與留白，不翻轉排序。
+3. campaign 目標 click 依各 raw row spend 權重回填；目標 imp 依調整後 click 權重回填，以最大餘數法維持整數合計。
+4. spend、cv、零花費不動與 `imp ≥ click ≥ max(cv1..cv4)` 防呆維持不變。
+5. 裝置資料盡量沿用相同 campaign 目標；MGID 裝置 API 沒有 campaign 維度，只能退回帳號層映射。
