@@ -14,6 +14,7 @@ import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.
 import { registerTokens } from './tools/tokens/route.js';
 import { registerAdstreamLab } from './tools/adstream-lab/route.js'; // 視覺重新設計實驗頁，先不上首頁選單，僅供直接網址訪問
 import { registerNativeRevenue, BASE_PATH as NATIVE_REVENUE } from './tools/native-revenue/route.js';
+import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
@@ -33,13 +34,15 @@ const ICON = {
   camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
   chart: '<path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/>',
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
-  revenue: '<path d="M12 1v22M17 5H9.5a4.5 4.5 0 0 0 0 9h5a4.5 4.5 0 0 1 0 9H6"/>'
+  revenue: '<path d="M12 1v22M17 5H9.5a4.5 4.5 0 0 0 0 9h5a4.5 4.5 0 0 1 0 9H6"/>',
+  gauge: '<path d="M22 12A10 10 0 1 0 2 12"/><path d="M12 12l5-3"/><circle cx="12" cy="12" r="1.6"/><path d="M2 12h3M19 12h3M12 4v1"/>'
 };
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
   { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 7 SHEETS' },
   { name: 'Report Hub', desc: '多 D／R／MGID 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' },
-  { name: 'Native Revenue', desc: 'D1 媒體營收每日自動同步到 Google Sheet', href: NATIVE_REVENUE, icon: ICON.revenue, code: 'NATIVE REVENUE', tag: 'SYNC · 10:00 / 18:00' }
+  { name: 'Native Revenue', desc: 'D1 媒體營收每日自動同步到 Google Sheet', href: NATIVE_REVENUE, icon: ICON.revenue, code: 'NATIVE REVENUE', tag: 'SYNC · 10:00 / 18:00' },
+  { name: '資源看板', desc: 'GCP Redis／Cloud SQL 用量即時監看，記憶體爆掉前先看到', href: GCPWATCH, icon: ICON.gauge, code: 'GCP WATCH', tag: 'MONITOR · LIVE' }
   // 站外工具與快捷連結統一在 slotboard.ts 的 QUICK_LINKS 維護
 ];
 
@@ -109,6 +112,7 @@ await registerAdstream(app);
 await registerTokens(app);
 await registerAdstreamLab(app);
 await registerNativeRevenue(app);
+await registerGcpWatch(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));

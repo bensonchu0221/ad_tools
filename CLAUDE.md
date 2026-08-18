@@ -5,6 +5,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#2＝整合週報（原 D&R 週報）：整合 Discovery（D）+ Rixbee（R）+ MGID（M）三平台報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device 七工作表），取代舊 weeklyreport。2026-07-11 併入 MGID、改名整合週報。
 - tool#3＝AdStream（廣告凝視者）：多 D／R／MGID 帳戶 bulk 原始報表定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw；另有 integrated／device_summary 整合分頁。
 - tool#4＝Native Revenue：D1 媒體營收（Action4）每日自動同步到既有的營收試算表，取代人工貼數字。2026-08-03 上線。
+- tool#5＝資源看板（GCP Watch）：GCP 專案 popinpoc1 的 Memorystore Redis／Cloud SQL 用量即時監看，唯讀 Cloud Monitoring。2026-08-17 建立（起因：Redis 用滿導致爬蟲寫不進去，事後才發現）。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
@@ -77,6 +78,18 @@ popin 內部工具集（取代舊 dctool）。
 - 驗證：`poc/verify_native_revenue.mts`（純函式 46 項：欄序對齊 A:P、RTB/Criteo 併入、charge 換算、裝置別四捨五入、除零保護、週二起算的 periodLabel 含跨月跨年、validateRange、addDays/D-3~D-1）。已做變異測試確認斷言有鑑別力
 - **待確認（未實測，非已知 bug）**：①`syncRows` 寫 A:P 前後各讀一次 Q:X `FORMULA` 比對——公式字串本來就不會因為寫 A:P 而變，這個檢查可能恆真＝無保護力且多花一倍 batchGet 配額；而且它在寫入「之後」才比對，抓到也來不及。②`values.append` 找的是 A:P 最後有值那列，若 Q:X 公式往下拖過一批 A:P 空列，append 可能插進那些列並被程式重寫 Q:X 公式
 
+## 資源看板核心（tool#5，`/tools/gcpwatch`，`src/tools/gcpwatch/`）
+- 目的：**記憶體爆掉前先看得到**。起因是 Redis 用滿→爬蟲寫不進去，事後才發現。純看板、**刻意不做告警**（先把數字看得到，真有需要再加 cron+通知）
+- 分層：`core/monitoring.ts`（Cloud Monitoring v3 唯讀封裝，走 ADC 同 gcs.ts）→ `collect.ts`（清單 API＋指標，組 Snapshot）→ `view.ts`（純函式轉畫面模型 VM）→ `page.ts`（Slot Board 外殼，前端 JS 只把 VM 塞進 DOM）→ `route.ts`。**所有判讀/格式化/sparkline 幾何都在 view/metrics（TS 純函式），前端不含業務邏輯**＝首屏渲染與 60 秒輪詢共用同一份邏輯、可離線驗證
+- 監看對象：Redis 3 台（ad-engine-redis 2GB／crawler-cache 4GB／newsscope 12GB）＋ Cloud SQL 2 台（internal-tool db-g1-small、popin-audience-center）。清單走 Memorystore Admin API `instances.list`(locations `-`)／`sqladmin.instances.list`，**scope 用 `cloud-platform.read-only`**（實測夠）
+- **關鍵判讀（這次事故的根因）**：Memorystore 未自訂 `maxmemory-policy` 時＝官方預設 **volatile-lru**，只淘汰「有 TTL」的 key；沒設 TTL 的 key 塞滿記憶體時 Redis **無 key 可逐出 → 寫入被拒（OOM）**，而此時 `evicted_keys` 仍是 0 ⇒ **只看逐出數會完全漏判**。故卡片同時顯示使用率＋`keyspace/keys` vs `keys_with_expiration` 算出的「無 TTL 佔比」（≥20% 且用量高就出 ▲ 提示）。三台目前都是 volatile-lru 未自訂，但無 TTL 佔比 ≤0.07%（＝TTL 有好好設）
+- **指標型別務必配對正確的對齊方式**（踩錯就是靜默錯值）：`stats/memory/usage_ratio|usage|maxmemory|system_memory_usage_ratio|cache_hit_ratio`、`clients/connected`、`keyspace/keys(_with_expiration)` 是 GAUGE→ALIGN_MEAN；`stats/evicted_keys`／`stats/reject_connections_count` 是 **DELTA→ALIGN_SUM**（24h 累計）；`stats/cpu_utilization` 是 **DELTA 秒數→ALIGN_RATE**（回 vCPU 數，且有 space/relationship 四條 label 組合 → 必須 `crossSeriesReducer=REDUCE_SUM` + `groupByFields=resource.instance_id` 合併）。Cloud SQL 用 `database/{memory,cpu,disk}/utilization`＋quota/usage/`network/connections`（Postgres 那台不吐 connections＝顯示 —，非漏抓）
+- 門檻：<60% 正常（綠 #15803D）、60~80% 偏高（黃 #CA8A04）、≥80% 危險（紅 #B91C1C）。**這組色通過 dataviz validate_palette 的 CVD／正常視覺分離檢查**（黃對白底 2.86:1 屬 WARN → 一律同時給文字標籤與數值，不用顏色單獨表意）。sparkline y 軸固定 0~100%＋60/80% 虛線＝斜率誠實，hover 有十字線與 tooltip
+- 成本：Monitoring **讀取** API $0.50/百萬條 time series、每月前 100 萬條免費（官方 pricing 查證），一次刷新約 50 條 ⇒ 實質 $0。後端 20 秒共用快取（多人同開只抓一次）＋前端分頁切到背景就停止輪詢
+- 權限：Cloud Run SA 已有 `roles/editor`（含 monitoring 讀取）⇒ **不需改 IAM**；本機用 gcloud ADC
+- 容錯：單支指標失敗→該欄位 null（UI 顯示 —）＋訊息進頁面紅色橫幅；清單 API 失敗才整區空；整包失敗仍渲染頁面只顯示錯誤
+- 驗證 `poc/verify_gcpwatch.mts`：100 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
+
 ## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
 - **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
 - **D 分頁**：沿用原語意——鏡像列（`source='dctool'`）唯讀、自建列（`adtools`）受保護可編輯／刪除；KPI 3 磚（總／自建／鏡像）＋來源篩選 chip。走 `store.ts addToken/updateToken/deleteToken`
@@ -100,6 +113,7 @@ popin 內部工具集（取代舊 dctool）。
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 待辦
+- **資源看板（tool#5，2026-08-17）本機全綠、線上待驗**：本機真 API 端到端過（三台 Redis／兩台 SQL 都有值、144 點趨勢、hover 正常、console 無錯）。**線上待驗**：①Cloud Run SA 打 Memorystore／sqladmin／Monitoring 三支 API 是否都通（本機是使用者憑證，線上是 SA；理論上 roles/editor 夠，但沒實跑過）；②頁面 60 秒自動更新有沒有真的動；③首頁版位卡進得去。**後續可加**：告警（Cloud Scheduler 每小時檢查 + Slack/Email，使用者這次選純看板先不做）、Cloud Run 5xx（第一版刻意不收）
 - **週報隨機調整模式（2026-07-22）本機全綠、線上端到端待驗**：離線 8 支迴歸全過（`verify_weekly_adjust`/`split_equiv`/`preview` 及既有 5 支未回歸）＋自包含頁面視覺檢視（CPC/CTR 落在區間、裝置 Tablet/Others 零花費維持 0、Raw 寬表橫向捲動）；DB 冒煙過（awaiting_adjustment/adjust_json/requeue）。**線上待驗**：①表單勾「隨機調整」跑一個小帳號短區間 → cron 觸發後佇列顯示「待調整」；②進調整頁填 CPC/CTR 生成預覽 → 7 表數字合理、Raw spend 與抓取一致；③「重抽」數字變、同參數同 seed 重現；④「產出」下載 xlsx 與預覽逐格一致、`weekly_snapshots` 無新列；⑤「再調整」覆寫同檔；⑥「重新抓取」回佇列重跑、adjust_json 預填保留；⑦刪 GCS `weekly/{id}/raw.json` 模擬逾期 → 預覽報「請按重新抓取」。⚠️ bucket lifecycle 需確認有「weekly/ 前綴 14 天」規則涵蓋 raw.json
 - **AdStream MGID 串接（2026-07-10）本機資料層已驗（真 API 抓取＋欄位對齊＋cv/imp 守恆全過），線上端到端待驗**：①在設定加 MGID 帳號＋把 conv_interest/decision/buy 拖進 cv 桶 → 跑一次確認 `m_bulk_raw_data` 有 24 欄、`integrated` 出現 platform=M 列、`device_summary` MGID 裝置有併入；②清單「訊息」欄會顯示「MGID N 列（帳號:列數）」，`MGID 0 列`＝帳號無資料或 token 問題；③重抓昨天多來源下拉新增「只重抓 MGID」。注意 4A 兩帳號(默沙東/黑松)近期 0 投放屬正常
 - 選單裡 r_bulk_upload 連結是 placeholder
