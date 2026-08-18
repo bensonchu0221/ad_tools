@@ -87,6 +87,7 @@ popin 內部工具集（取代舊 dctool）。
 - 門檻：<60% 正常（綠 #15803D）、60~80% 偏高（黃 #CA8A04）、≥80% 危險（紅 #B91C1C）。**這組色通過 dataviz validate_palette 的 CVD／正常視覺分離檢查**（黃對白底 2.86:1 屬 WARN → 一律同時給文字標籤與數值，不用顏色單獨表意）。sparkline y 軸固定 0~100%＋60/80% 虛線＝斜率誠實，hover 有十字線與 tooltip
 - 成本：Monitoring **讀取** API $0.50/百萬條 time series、每月前 100 萬條免費（官方 pricing 查證），一次刷新約 50 條 ⇒ 實質 $0。後端 20 秒共用快取（多人同開只抓一次）＋前端分頁切到背景就停止輪詢
 - 權限：Cloud Run SA 已有 `roles/editor`（含 monitoring 讀取）⇒ **不需改 IAM**；本機用 gcloud ADC
+- **⚠️ scope 必須用 `cloud-platform`，別改成看起來更小的 `*.read-only`**（2026-08-18 上線首發踩到）：Memorystore（redis.googleapis.com）discovery 只接受 `redis.read-only`／`cloud-platform`，SQL Admin 只接受 `sqlservice.admin`／`cloud-platform`，都**不收 `cloud-platform.read-only`** → 線上兩支清單 API 回 `Request had insufficient authentication scopes.`（整頁沒有卡片、只剩紅色橫幅）。**本機完全不會重現**：gcloud 使用者憑證會忽略程式指定的 scope，只有 Cloud Run 的 SA token 才照 scope 發 ⇒ 這類問題只有部署後才看得到。三支 API（monitoring/redis/sqladmin）都列了 `cloud-platform`，故 `core/monitoring.ts` 匯出單一 `gcpAuth` 共用
 - 容錯：單支指標失敗→該欄位 null（UI 顯示 —）＋訊息進頁面紅色橫幅；清單 API 失敗才整區空；整包失敗仍渲染頁面只顯示錯誤
 - 驗證 `poc/verify_gcpwatch.mts`：100 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
 

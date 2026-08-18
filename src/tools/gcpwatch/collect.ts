@@ -3,12 +3,11 @@
 // 容錯原則：每支指標各自 allSettled ⇒ 單支壞掉只讓該欄位變 null（UI 顯示 —），不整頁掛；
 //           清單 API 掛掉才會整區沒有卡片，錯誤訊息一律收進 errors 顯示在頁面橫幅。
 import { google } from 'googleapis';
-import { fetchTimeSeries, byKey, PROJECT_ID, type Point } from '../../core/monitoring.js';
+import { fetchTimeSeries, byKey, gcpAuth, PROJECT_ID, type Point } from '../../core/monitoring.js';
 import { DEFAULT_POLICY, latest, sum } from './metrics.js';
 
-const readAuth = new google.auth.GoogleAuth({
-  scopes: ['https://www.googleapis.com/auth/cloud-platform.read-only'],
-});
+// 清單 API 與指標共用同一顆 ADC（scope=cloud-platform，原因見 core/monitoring.ts 註解）
+const readAuth = gcpAuth;
 
 /** 24 小時趨勢：10 分鐘一點＝144 點（點數夠看出爬升、又不會讓 payload 變大） */
 const TREND_HOURS = 24;

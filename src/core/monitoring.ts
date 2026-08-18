@@ -7,9 +7,16 @@ import { google } from 'googleapis';
 export const PROJECT_ID = process.env.GCP_PROJECT ?? 'popinpoc1';
 
 const monitoring = google.monitoring('v3');
-const auth = new google.auth.GoogleAuth({
-  scopes: ['https://www.googleapis.com/auth/monitoring.read'],
+
+// ⚠️ scope 一律用 cloud-platform，別改成看起來更小的 *.read-only：
+// Memorystore（redis.googleapis.com）與 SQL Admin 的 discovery 文件都不接受
+// cloud-platform.read-only，線上會回 "Request had insufficient authentication scopes."。
+// 本機不會重現：gcloud 使用者憑證會忽略程式指定的 scope，只有 Cloud Run 的 SA token 才照發。
+// 三支 API（monitoring / redis / sqladmin）都列了 cloud-platform，故共用這一顆 auth。
+export const gcpAuth = new google.auth.GoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/cloud-platform'],
 });
+const auth = gcpAuth;
 
 /** 對齊後的一個資料點；t＝該區間結束時間（epoch ms）、v＝值 */
 export interface Point {
