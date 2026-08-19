@@ -109,13 +109,17 @@ const STYLE = `
   .section-label .cnt{font-family:var(--mono);font-size:10px;color:var(--accent);
     border:1px solid rgba(122,165,240,.3);border-radius:3px;padding:2px 6px}
 
-  .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+  .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
-  /* 機櫃單元：切角 HUD 框；狀態改走框色＋角標，不再用左側色條 */
-  .rcard{--cut:11px;background:linear-gradient(180deg,var(--deck2),var(--deck));
-    border:1px solid var(--rail);padding:16px 18px 15px}
-  .rcard.is-warn{border-color:color-mix(in srgb,var(--warn2) 50%,var(--rail))}
-  .rcard.is-crit{border-color:color-mix(in srgb,var(--crit2) 55%,var(--rail))}
+  /* 試做：只改資源卡。對齊參考圖的 HUD 元件——青光雙描邊、不對稱切角、角上硬體刻痕。
+     框是像素座標 SVG（viewBox＝實際寬高），角不會被拉變形。KPI／主控條先不動。 */
+  .rcard{--hud:#3AD0EA;position:relative;background:transparent;border:none;
+    padding:20px 22px 22px;overflow:visible}
+  .rcard.is-warn{--hud:var(--warn2)}
+  .rcard.is-crit{--hud:var(--crit2)}
+  .rcard .hud-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;
+    overflow:visible;filter:drop-shadow(0 0 6px color-mix(in srgb,var(--hud) 55%,transparent))}
+  .rcard > *:not(.hud-svg){position:relative;z-index:1}
   .r-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
   .r-name{font-family:var(--disp);font-weight:600;font-size:16.5px;letter-spacing:-.01em}
   .r-meta{font-family:var(--mono);font-size:10.5px;color:var(--mut);margin-top:4px;letter-spacing:.05em;
@@ -225,6 +229,56 @@ const RENDER_JS = `
     ['tl','tr','bl','br'].forEach(function(p){ node.appendChild(el('i','hk '+p)); });
     return node;
   }
+  // 資源卡 HUD 外框（試做）：對齊參考圖的「CONTROL PANEL / SYSTEM MODULE」語彙。
+  // 切角用 px、viewBox 跟卡片一樣大 ⇒ 寬卡／高卡角落形狀不變。
+  function mountHud(host){
+    var svg=svgEl('svg',{'class':'hud-svg','aria-hidden':'true'});
+    host.insertBefore(svg, host.firstChild);
+    var paint=function(){
+      var w=host.clientWidth, h=host.clientHeight;
+      if(w<8||h<8) return;
+      svg.setAttribute('viewBox','0 0 '+w+' '+h);
+      svg.setAttribute('width',String(w));
+      svg.setAttribute('height',String(h));
+      while(svg.firstChild) svg.removeChild(svg.firstChild);
+      var cs=getComputedStyle(host), stroke=(cs.getPropertyValue('--hud')||'#3AD0EA').trim();
+      var tl=10, tr=18, br=16, bl=28, inset=6.5, o=0.6;
+      var outer='M'+(tl)+','+o+' L'+(w-tr)+','+o+' L'+(w-o)+','+tr+
+        ' L'+(w-o)+','+(h-br)+' L'+(w-br)+','+(h-o)+
+        ' L'+bl+','+(h-o)+' L'+o+','+(h-bl)+' L'+o+','+tl+' Z';
+      var i=inset;
+      var inner='M'+(tl+i)+','+i+' L'+(w-tr-i)+','+i+' L'+(w-i)+','+(tr+i)+
+        ' L'+(w-i)+','+(h-br-i)+' L'+(w-br-i)+','+(h-i)+
+        ' L'+(bl+i)+','+(h-i)+' L'+i+','+(h-bl-i)+' L'+i+','+(tl+i)+' Z';
+      svg.appendChild(svgEl('path',{d:outer,fill:'rgba(7,32,44,.94)',stroke:'none'}));
+      svg.appendChild(svgEl('path',{d:outer,fill:'none',stroke:stroke,'stroke-width':1.45,
+        'stroke-linejoin':'miter','stroke-linecap':'square'}));
+      svg.appendChild(svgEl('path',{d:inner,fill:'none',stroke:stroke,'stroke-width':0.7,
+        opacity:.5,'stroke-linejoin':'miter'}));
+      // 角上硬體：短 L，對齊參考圖內框角落
+      var tick=function(x,y,dx,dy){
+        svg.appendChild(svgEl('polyline',{
+          points:[x,y+dy, x,y, x+dx,y].join(' '),
+          fill:'none',stroke:stroke,'stroke-width':1.6,'stroke-linejoin':'miter','stroke-linecap':'square'
+        }));
+      };
+      tick(i+1, i+1, 11, 11);
+      tick(w-i-1, i+1, -11, 11);
+      tick(i+1, h-i-1, 11, -11);
+      tick(w-i-1, h-i-1, -11, -11);
+      // 右下「埠」：三道短刻，參考圖 POWER UNIT / CONTROL PANEL 常見
+      var hx=w-i-2, hy=h-br-i-18;
+      for(var k=0;k<3;k++){
+        svg.appendChild(svgEl('line',{x1:hx-10,y1:hy+k*5,x2:hx,y2:hy+k*5,
+          stroke:stroke,'stroke-width':1.2,opacity:.85}));
+      }
+      // 左上小方塊（參考圖 SYSTEM MODULE 的角樁）
+      svg.appendChild(svgEl('rect',{x:o+3,y:o+3,width:4,height:4,fill:stroke,opacity:.9}));
+    };
+    if(window.ResizeObserver) new ResizeObserver(paint).observe(host);
+    requestAnimationFrame(paint);
+    return host;
+  }
 
   // sparkline：0~100% 固定刻度（斜率誠實）＋ 掃描光帶 ＋ 游標十字與提示
   function spark(card){
@@ -305,8 +359,8 @@ const RENDER_JS = `
   }
 
   function cardNode(c){
-    var box=boot(el('div','rcard hud'+(c.level==='crit'?' is-crit':c.level==='warn'?' is-warn':'')));
-    hudMarks(box);
+    var box=boot(el('div','rcard'+(c.level==='crit'?' is-crit':c.level==='warn'?' is-warn':'')));
+    mountHud(box);
     var top=el('div','r-top'), left=el('div');
     left.appendChild(el('div','r-name',c.name));
     left.appendChild(el('div','r-meta',c.meta+(c.state&&c.state!=='READY'&&c.state!=='RUNNABLE'?' · '+c.state:'')));
