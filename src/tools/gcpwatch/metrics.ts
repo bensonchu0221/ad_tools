@@ -4,9 +4,9 @@ import type { Point } from '../../core/monitoring.js';
 
 export type Level = 'ok' | 'warn' | 'crit' | 'none';
 
-/** 門檻：<60% 正常、60~80% 偏高、>=80% 危險（記憶體/CPU/磁碟共用） */
-export const WARN_AT = 0.6;
-export const CRIT_AT = 0.8;
+/** 門檻：<80% 正常、80~90% 偏高、>=90% 危險（記憶體/CPU/磁碟共用） */
+export const WARN_AT = 0.8;
+export const CRIT_AT = 0.9;
 
 /** Memorystore 未設定 maxmemory-policy 時的預設值（官方文件：預設 volatile-lru） */
 export const DEFAULT_POLICY = 'volatile-lru';

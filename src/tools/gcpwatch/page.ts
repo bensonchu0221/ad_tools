@@ -55,10 +55,25 @@ const STYLE = `
     border:1px solid rgba(122,165,240,.34);border-radius:3px;padding:4px 9px;white-space:nowrap}
   .sub{max-width:600px}
 
+  /* HUD 切角：所有面板共用，取代圓角矩形。--cut 是切掉的直角邊長。 */
+  .hud{--cut:10px;position:relative;border-radius:0;
+    clip-path:polygon(var(--cut) 0,calc(100% - var(--cut)) 0,100% var(--cut),
+      100% calc(100% - var(--cut)),calc(100% - var(--cut)) 100%,var(--cut) 100%,
+      0 calc(100% - var(--cut)),0 var(--cut))}
+  /* 角標往內縮，才不會被 clip-path 切角吃掉 */
+  .hk{position:absolute;width:11px;height:11px;pointer-events:none;z-index:2;
+    border-color:var(--mut);border-style:solid;opacity:.5}
+  .hk.tl{top:7px;left:7px;border-width:1.5px 0 0 1.5px}
+  .hk.tr{top:7px;right:7px;border-width:1.5px 1.5px 0 0}
+  .hk.bl{bottom:7px;left:7px;border-width:0 0 1.5px 1.5px}
+  .hk.br{bottom:7px;right:7px;border-width:0 1.5px 1.5px 0}
+  .hud.is-warn .hk,.hud.is-crit .hk,.hud.lv-warn .hk,.hud.lv-crit .hk{
+    border-color:currentColor;opacity:.95}
+
   /* 主控條：系統燈號 ＋ 時鐘／同步時間／下次更新／連線狀態 */
   .console{display:flex;align-items:center;gap:10px 18px;flex-wrap:wrap;margin:26px 0 0;
     background:linear-gradient(180deg,var(--deck2),var(--deck));border:1px solid var(--rail);
-    border-radius:4px;padding:12px 16px}
+    padding:12px 16px}
   .console .sys{display:flex;align-items:center;gap:9px;padding-right:18px;border-right:1px solid var(--rail);
     min-height:26px}
   .console .sys b{font-family:var(--disp);font-weight:700;font-size:17px;letter-spacing:-.01em}
@@ -81,11 +96,9 @@ const STYLE = `
 
   .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}
   @media(max-width:880px){.kpis{grid-template-columns:repeat(2,1fr)}}
-  .kpi{position:relative;background:linear-gradient(180deg,var(--deck2),var(--deck));
-    border:1px solid var(--rail);border-radius:4px;padding:14px 16px 15px;overflow:hidden}
-  /* 頂條與卡片左緣同一套語言：只有需要注意時才上色，正常＝灰（顏色本身就是訊號） */
-  .kpi::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--rail)}
-  .kpi.lv-warn::before,.kpi.lv-crit::before{background:currentColor;opacity:.75}
+  .kpi{background:linear-gradient(180deg,var(--deck2),var(--deck));
+    border:1px solid var(--rail);padding:14px 16px 15px;overflow:hidden}
+  .kpi.lv-warn,.kpi.lv-crit{border-color:color-mix(in srgb,currentColor 45%,var(--rail))}
   .kpi .k-l{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;
     letter-spacing:.13em;text-transform:uppercase;color:var(--mut)}
   .kpi .k-v{font-family:var(--disp);font-weight:700;font-size:31px;line-height:1.12;margin-top:8px;
@@ -98,11 +111,11 @@ const STYLE = `
 
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
-  /* 機櫃單元：左側 3px 色條是這台的狀態（正常時是灰的，不搶眼） */
-  .rcard{position:relative;background:linear-gradient(180deg,var(--deck2),var(--deck));
-    border:1px solid var(--rail);border-left:3px solid var(--rail);border-radius:4px;padding:16px 18px 15px}
-  .rcard.is-warn{border-left-color:var(--warn2)}
-  .rcard.is-crit{border-left-color:var(--crit2);border-color:rgba(255,77,141,.34)}
+  /* 機櫃單元：切角 HUD 框；狀態改走框色＋角標，不再用左側色條 */
+  .rcard{--cut:11px;background:linear-gradient(180deg,var(--deck2),var(--deck));
+    border:1px solid var(--rail);padding:16px 18px 15px}
+  .rcard.is-warn{border-color:color-mix(in srgb,var(--warn2) 50%,var(--rail))}
+  .rcard.is-crit{border-color:color-mix(in srgb,var(--crit2) 55%,var(--rail))}
   .r-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
   .r-name{font-family:var(--disp);font-weight:600;font-size:16.5px;letter-spacing:-.01em}
   .r-meta{font-family:var(--mono);font-size:10.5px;color:var(--mut);margin-top:4px;letter-spacing:.05em;
@@ -117,10 +130,10 @@ const STYLE = `
   .r-val .trd{font-family:var(--mono);font-size:11px;color:var(--mut);margin-left:auto;
     font-variant-numeric:tabular-nums}
 
-  /* signature：內凹的示波器螢幕。60~80 琥珀帶、80~100 紅帶直接印在刻度上，
-     曲線帶磷光，最右一點是「現在」。y 軸固定 0~100% ⇒ 斜率誠實。 */
-  .spark{position:relative;margin-top:14px;background:var(--screen);border:1px solid var(--rail);
-    border-radius:3px;padding:9px 10px 5px;box-shadow:inset 0 0 26px rgba(0,0,0,.75)}
+  /* signature：內凹的示波器螢幕。曲線帶磷光，最右一點是「現在」。
+     y 軸固定 0~100% ⇒ 斜率誠實。危險帶改由掃描光帶取代色塊。 */
+  .spark{--cut:6px;position:relative;margin-top:14px;background:var(--screen);border:1px solid var(--rail);
+    padding:9px 10px 5px;box-shadow:inset 0 0 26px rgba(0,0,0,.75)}
   .spark::before,.spark::after{content:"";position:absolute;width:8px;height:8px;pointer-events:none;
     border-color:var(--mut);border-style:solid;opacity:.5}
   .spark::before{top:4px;left:4px;border-width:1px 0 0 1px}
@@ -129,9 +142,19 @@ const STYLE = `
   .spark svg .trace{filter:drop-shadow(0 0 3px currentColor)}
   /* ⚠️ viewBox 是 preserveAspectRatio="none" 拉寬的 ⇒ SVG 圓會被拉成橢圓。
      游標點與「現在」點改用 CSS 定位的 div，才是正圓。 */
-  .plot{position:relative}
+  .plot{position:relative;overflow:hidden}
+  /* 掃描光帶：顏色跟折線（currentColor），由上往下循環掃。transform-only＝不觸發 layout。 */
+  .plot .scan{position:absolute;left:0;right:0;height:38%;top:0;pointer-events:none;z-index:1;
+    background:linear-gradient(180deg,
+      transparent 0%,
+      color-mix(in srgb,currentColor 10%,transparent) 42%,
+      color-mix(in srgb,currentColor 26%,transparent) 78%,
+      color-mix(in srgb,currentColor 42%,transparent) 93%,
+      transparent 100%);
+    transform:translateY(-100%);animation:scanY 4.8s linear infinite}
+  @keyframes scanY{0%{transform:translateY(-100%)}100%{transform:translateY(280%)}}
   .plot .pt{position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;
-    background:currentColor;pointer-events:none}
+    background:currentColor;pointer-events:none;z-index:2}
   .plot .now{box-shadow:0 0 0 3px rgba(220,229,239,.10),0 0 10px currentColor}
   .plot .hov{display:none;box-shadow:0 0 9px currentColor}
   .spark .axis{display:flex;justify-content:space-between;gap:8px;margin-top:6px;
@@ -164,6 +187,7 @@ const STYLE = `
   @media(prefers-reduced-motion:reduce){
     .boot{animation:none}
     .led.lv-warn,.led.lv-crit{animation:none}
+    .plot .scan{animation:none;opacity:0}
   }
   @media(max-width:600px){
     .console .sys{border-right:0;padding-right:0;width:100%}
@@ -196,10 +220,15 @@ const RENDER_JS = `
   }
   // 首次繪製才掛開機動畫；--i 決定逐格亮起的順序
   function boot(node){ if(first){ node.classList.add('boot'); node.style.setProperty('--i',seq++); } return node; }
+  // HUD 四角標：跟 clip-path 切角對齊，warn/crit 時跟著 currentColor 亮
+  function hudMarks(node){
+    ['tl','tr','bl','br'].forEach(function(p){ node.appendChild(el('i','hk '+p)); });
+    return node;
+  }
 
-  // sparkline：0~100% 固定刻度（斜率誠實）＋ 60~80／80~100 危險帶 ＋ 游標十字與提示
+  // sparkline：0~100% 固定刻度（斜率誠實）＋ 掃描光帶 ＋ 游標十字與提示
   function spark(card){
-    var box=el('div','spark');
+    var box=el('div','spark hud');
     var gid='sg'+(++uid);
     var svg=svgEl('svg',{viewBox:'0 0 '+W+' '+H,preserveAspectRatio:'none',role:'img',
       'aria-label':card.name+' 24 小時記憶體使用率趨勢'});
@@ -211,9 +240,6 @@ const RENDER_JS = `
     grad.appendChild(svgEl('stop',{offset:'100%','stop-color':'currentColor','stop-opacity':'0'}));
     defs.appendChild(grad); svg.appendChild(defs);
 
-    // 危險帶（80~100% 紅、60~80% 琥珀）直接印在刻度上，不必看虛線去對照數字
-    svg.appendChild(svgEl('rect',{x:0,y:0,width:W,height:H*0.2,fill:'var(--crit2)','fill-opacity':.17}));
-    svg.appendChild(svgEl('rect',{x:0,y:H*0.2,width:W,height:H*0.2,fill:'var(--warn2)','fill-opacity':.15}));
     [0.2,0.4,0.6,0.8].forEach(function(r){
       svg.appendChild(svgEl('line',{x1:0,x2:W,y1:H*r,y2:H*r,stroke:'var(--rail)','stroke-width':1,
         'vector-effect':'non-scaling-stroke'}));
@@ -235,6 +261,7 @@ const RENDER_JS = `
 
     var plot=el('div','plot '+lvClass(card.level));
     plot.appendChild(svg);
+    plot.appendChild(el('div','scan'));
     var pts=card.points||[];
     var hov=el('div','pt hov');
     if(pts.length){
@@ -249,7 +276,7 @@ const RENDER_JS = `
 
     var ax=el('div','axis');
     ax.appendChild(el('span',null,pts.length?'-24H '+tpe(pts[0][0]):''));
-    ax.appendChild(el('span',null,'0–100%　60↑ 偏高　80↑ 危險'));
+    ax.appendChild(el('span',null,'0–100%　80↑ 偏高　90↑ 危險'));
     ax.appendChild(el('span',null,pts.length?'NOW '+tpe(pts[pts.length-1][0]):''));
     box.appendChild(ax);
 
@@ -278,7 +305,8 @@ const RENDER_JS = `
   }
 
   function cardNode(c){
-    var box=boot(el('div','rcard'+(c.level==='crit'?' is-crit':c.level==='warn'?' is-warn':'')));
+    var box=boot(el('div','rcard hud'+(c.level==='crit'?' is-crit':c.level==='warn'?' is-warn':'')));
+    hudMarks(box);
     var top=el('div','r-top'), left=el('div');
     left.appendChild(el('div','r-name',c.name));
     left.appendChild(el('div','r-meta',c.meta+(c.state&&c.state!=='READY'&&c.state!=='RUNNABLE'?' · '+c.state:'')));
@@ -349,7 +377,8 @@ const RENDER_JS = `
   function render(vm){
     var k=document.getElementById('kpis'); k.innerHTML='';
     vm.kpis.forEach(function(x){
-      var box=boot(el('div','kpi '+lvClass(x.level)));
+      var box=boot(el('div','kpi hud '+lvClass(x.level)));
+      hudMarks(box);
       var l=el('div','k-l');
       l.appendChild(el('i','led '+lvClass(x.level)));
       l.appendChild(el('span',null,x.label));
@@ -412,9 +441,10 @@ export function renderGcpWatch(vm: DashboardVM): string {
       <h1>資源看板</h1>
       <span class="tag">${vm.project.toUpperCase()} · ASIA-EAST1</span>
     </div>
-    <p class="sub">Memorystore Redis 與 Cloud SQL 的即時用量。記憶體 60% 起偏高、80% 起危險；
+    <p class="sub">Memorystore Redis 與 Cloud SQL 的即時用量。記憶體 80% 起偏高、90% 起危險；
       Redis 另外判讀「用滿的時候會不會寫不進去」。</p>
-    <div class="console">
+    <div class="console hud">
+      <i class="hk tl"></i><i class="hk tr"></i><i class="hk bl"></i><i class="hk br"></i>
       <div class="sys"><i class="led lv-none" id="sysled"></i>
         <b id="systx">讀取中</b><span class="note" id="sysnote">—</span></div>
       <div class="rd"><span class="l">本地</span><span class="v" id="clock">--:--:--</span></div>
