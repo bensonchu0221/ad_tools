@@ -230,6 +230,7 @@ const RENDER_JS = `
   }
   // 刻自參考圖 POWER UNIT：外框不是整圈粗邊。
   // 細＝完整切角外框＋左直邊＋內框＋斜線；粗＝上下橫條、四個切角、右邊斜線埠上下兩段。
+  // 粗接細一律斜切，細線延續的外側當長邊。
   function mountHud(host){
     var svg=svgEl('svg',{'class':'hud-svg','aria-hidden':'true'});
     host.insertBefore(svg, host.firstChild);
@@ -252,7 +253,7 @@ const RENDER_JS = `
       var cs=getComputedStyle(host), stroke=(cs.getPropertyValue('--hud')||'#2EC8F0').trim();
       var x0=1.2, y0=1.2, x1=w-1.2, y1=h-1.2;
       var cut=24, band=10, gap=8;
-      var hatchY=Math.round(h*0.40), hatchH=36;
+      var hatchY=Math.round(h*0.38), hatchH=72;
       var fill=oct(x0,y0,x1-x0,y1-y0,cut);
       svg.appendChild(svgEl('path',{d:poly(fill,true),fill:'rgba(6,30,40,.96)',stroke:'none'}));
       // 細外框：整圈切角線，左邊中段只靠這條細線
@@ -261,24 +262,31 @@ const RENDER_JS = `
       var fat=function(pts){
         svg.appendChild(svgEl('path',{d:poly(pts,true),fill:stroke,stroke:'none'}));
       };
-      // 粗切角：外緣 45° 段往內推 band
-      var chamfer=function(ax,ay,bx,by){
+      // 粗切角：接細線的那頭斜切（細線延續側為長邊），粗接粗仍平接
+      var chamfer=function(ax,ay,bx,by,thinAt){
         var dx=bx-ax, dy=by-ay, len=Math.hypot(dx,dy)||1;
         var nx=-dy/len, ny=dx/len;
-        var mx=(ax+bx)/2, my=(ay+by)/2;
-        if((w/2-mx)*nx+(h/2-my)*ny<0){ nx=-nx; ny=-ny; }
-        fat([[ax,ay],[bx,by],[bx+nx*band,by+ny*band],[ax+nx*band,ay+ny*band]]);
+        if((w/2-(ax+bx)/2)*nx+(h/2-(ay+by)/2)*ny<0){ nx=-nx; ny=-ny; }
+        nx*=band; ny*=band;
+        var cx=bx+nx, cy=by+ny, ix=ax+nx, iy=ay+ny;
+        var bevel=function(px,py, qx,qy){
+          var ipy=Math.abs(px-x0)<2||Math.abs(px-x1)<2 ? 0 : 1;
+          var ddx=qx-px, ddy=qy-py;
+          var t=Math.abs(ipy)<1e-6 ? -ny/ddy : -nx/ddx;
+          return [px+nx+t*ddx, py+ny+t*ddy];
+        };
+        if(thinAt==='A'){ var p=bevel(ax,ay,bx,by); ix=p[0]; iy=p[1]; }
+        if(thinAt==='B'){ var p=bevel(bx,by,ax,ay); cx=p[0]; cy=p[1]; }
+        fat([[ax,ay],[bx,by],[cx,cy],[ix,iy]]);
       };
-      chamfer(x0, y0+cut, x0+cut, y0);       // 左上
-      chamfer(x1-cut, y0, x1, y0+cut);       // 右上
-      chamfer(x1, y1-cut, x1-cut, y1);       // 右下
-      chamfer(x0+cut, y1, x0, y1-cut);       // 左下
-      // 粗上下橫條（頂條右端留缺口，對齊參考圖右上內凹）
-      fat([[x0+cut, y0],[x1-cut-8, y0],[x1-cut-8, y0+band],[x0+cut, y0+band]]);
+      chamfer(x0, y0+cut, x0+cut, y0, 'A');   // 左上 → 左細線
+      chamfer(x1-cut, y0, x1, y0+cut, '');    // 右上 粗接粗
+      chamfer(x1, y1-cut, x1-cut, y1, '');    // 右下 粗接粗
+      chamfer(x0+cut, y1, x0, y1-cut, 'B');   // 左下 → 左細線
+      fat([[x0+cut, y0],[x1-cut-8, y0],[x1-cut-8-band, y0+band],[x0+cut, y0+band]]);
       fat([[x0+cut, y1],[x1-cut, y1],[x1-cut, y1-band],[x0+cut, y1-band]]);
-      // 粗右邊：斜線埠上下兩段，中間留空給細 hatch
-      fat([[x1, y0+cut],[x1, hatchY],[x1-band, hatchY],[x1-band, y0+cut]]);
-      fat([[x1, hatchY+hatchH],[x1, y1-cut],[x1-band, y1-cut],[x1-band, hatchY+hatchH]]);
+      fat([[x1, y0+cut],[x1, hatchY],[x1-band, hatchY-band],[x1-band, y0+cut]]);
+      fat([[x1, hatchY+hatchH],[x1, y1-cut],[x1-band, y1-cut],[x1-band, hatchY+hatchH+band]]);
       // 細內框＋左下折階
       var t=band+gap, tc=14, shelf=34, shelfW=Math.min(132, Math.max(88, w*0.28));
       svg.appendChild(svgEl('path',{d:poly([
@@ -290,12 +298,12 @@ const RENDER_JS = `
         points:[t, t+16, t, t, t+16, t].join(' '),
         fill:'none',stroke:stroke,'stroke-width':1.55,'stroke-linejoin':'miter','stroke-linecap':'square'
       }));
-      // 細斜線埠
-      var sx=x1-band+2, sy=hatchY+7;
+      // 斜線埠：4px 粗、整組加長加寬
+      var sx=x1-20, sy=hatchY+12;
       for(var k=0;k<4;k++){
         svg.appendChild(svgEl('line',{
-          x1:sx, y1:sy+k*7+9, x2:sx+8, y2:sy+k*7+1,
-          stroke:stroke,'stroke-width':1.45,'stroke-linecap':'butt',opacity:.95
+          x1:sx, y1:sy+k*13+16, x2:sx+18, y2:sy+k*13,
+          stroke:stroke,'stroke-width':4,'stroke-linecap':'butt',opacity:.95
         }));
       }
     };
