@@ -114,7 +114,7 @@ const STYLE = `
   /* 試做：只改資源卡。對齊參考圖的 HUD 元件——青光雙描邊、不對稱切角、角上硬體刻痕。
      框是像素座標 SVG（viewBox＝實際寬高），角不會被拉變形。KPI／主控條先不動。 */
   .rcard{--hud:#3AD0EA;position:relative;background:transparent;border:none;
-    padding:20px 22px 22px;overflow:visible}
+    padding:22px 26px 24px 22px;overflow:visible}
   .rcard.is-warn{--hud:var(--warn2)}
   .rcard.is-crit{--hud:var(--crit2)}
   .rcard .hud-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;
@@ -229,51 +229,69 @@ const RENDER_JS = `
     ['tl','tr','bl','br'].forEach(function(p){ node.appendChild(el('i','hk '+p)); });
     return node;
   }
-  // 資源卡 HUD 外框（試做）：對齊參考圖的「CONTROL PANEL / SYSTEM MODULE」語彙。
-  // 切角用 px、viewBox 跟卡片一樣大 ⇒ 寬卡／高卡角落形狀不變。
+  // 資源卡 HUD 外框：對齊參考圖——不規則折線（step/jog）、粗細混用、右下斜線埠（hatch）。
+  // 切角／折線用 px、viewBox 跟卡片一樣大 ⇒ 寬卡／高卡角落形狀不變。
   function mountHud(host){
     var svg=svgEl('svg',{'class':'hud-svg','aria-hidden':'true'});
     host.insertBefore(svg, host.firstChild);
+    var poly=function(pts, close){
+      var d='M'+pts[0][0]+','+pts[0][1];
+      for(var i=1;i<pts.length;i++) d+=' L'+pts[i][0]+','+pts[i][1];
+      return close?d+' Z':d;
+    };
     var paint=function(){
       var w=host.clientWidth, h=host.clientHeight;
-      if(w<8||h<8) return;
+      if(w<80||h<80) return;
       svg.setAttribute('viewBox','0 0 '+w+' '+h);
       svg.setAttribute('width',String(w));
       svg.setAttribute('height',String(h));
       while(svg.firstChild) svg.removeChild(svg.firstChild);
       var cs=getComputedStyle(host), stroke=(cs.getPropertyValue('--hud')||'#3AD0EA').trim();
-      var tl=10, tr=18, br=16, bl=28, inset=6.5, o=0.6;
-      var outer='M'+(tl)+','+o+' L'+(w-tr)+','+o+' L'+(w-o)+','+tr+
-        ' L'+(w-o)+','+(h-br)+' L'+(w-br)+','+(h-o)+
-        ' L'+bl+','+(h-o)+' L'+o+','+(h-bl)+' L'+o+','+tl+' Z';
-      var i=inset;
-      var inner='M'+(tl+i)+','+i+' L'+(w-tr-i)+','+i+' L'+(w-i)+','+(tr+i)+
-        ' L'+(w-i)+','+(h-br-i)+' L'+(w-br-i)+','+(h-i)+
-        ' L'+(bl+i)+','+(h-i)+' L'+i+','+(h-bl-i)+' L'+i+','+(tl+i)+' Z';
-      svg.appendChild(svgEl('path',{d:outer,fill:'rgba(7,32,44,.94)',stroke:'none'}));
-      svg.appendChild(svgEl('path',{d:outer,fill:'none',stroke:stroke,'stroke-width':1.45,
+      var o=0.7, step=10, tr=20, ventW=26, ventH=40;
+      var dipX=Math.round(w*0.58), jogY=Math.round(h*0.38);
+      // 外框：左上台階 → 頂邊中段下凹 → 右上切角 → 右邊中段內折 → 右下斜線埠凹槽 → 左下兩段切
+      var outer=[
+        [o, step], [step, step], [step, o],
+        [dipX, o], [dipX+7, 5.5], [dipX+22, 5.5], [dipX+29, o],
+        [w-tr, o], [w-o, tr],
+        [w-o, jogY], [w-8, jogY], [w-8, jogY+20], [w-o, jogY+20],
+        [w-o, h-ventH], [w-ventW, h-ventH], [w-ventW, h-15], [w-15, h-o],
+        [34, h-o], [o, h-28], [o, step]
+      ];
+      var i=7;
+      var inner=[
+        [o+i, step+i-2], [step+i, step+i-2], [step+i, o+i],
+        [dipX+2, o+i], [dipX+8, 5.5+i-2], [dipX+21, 5.5+i-2], [dipX+27, o+i],
+        [w-tr-i+2, o+i], [w-o-i, tr+i-2],
+        [w-o-i, jogY+2], [w-8-i+2, jogY+2], [w-8-i+2, jogY+18], [w-o-i, jogY+18],
+        [w-o-i, h-ventH+2], [w-ventW-i+4, h-ventH+2], [w-ventW-i+4, h-15-2], [w-15-2, h-o-i],
+        [34+i-2, h-o-i], [o+i, h-28-2], [o+i, step+i-2]
+      ];
+      svg.appendChild(svgEl('path',{d:poly(outer,true),fill:'rgba(7,32,44,.94)',stroke:'none'}));
+      // 細內框 + 中粗外框（同一條走線，粗細分開畫）
+      svg.appendChild(svgEl('path',{d:poly(inner,true),fill:'none',stroke:stroke,'stroke-width':0.65,
+        opacity:.48,'stroke-linejoin':'miter'}));
+      svg.appendChild(svgEl('path',{d:poly(outer,true),fill:'none',stroke:stroke,'stroke-width':1.35,
         'stroke-linejoin':'miter','stroke-linecap':'square'}));
-      svg.appendChild(svgEl('path',{d:inner,fill:'none',stroke:stroke,'stroke-width':0.7,
-        opacity:.5,'stroke-linejoin':'miter'}));
-      // 角上硬體：短 L，對齊參考圖內框角落
-      var tick=function(x,y,dx,dy){
-        svg.appendChild(svgEl('polyline',{
-          points:[x,y+dy, x,y, x+dx,y].join(' '),
-          fill:'none',stroke:stroke,'stroke-width':1.6,'stroke-linejoin':'miter','stroke-linecap':'square'
+      // 粗段：左上補強條、底邊左段橫軌、右上切角蓋（參考圖一段特別粗）
+      svg.appendChild(svgEl('path',{d:poly([[o,step],[5.4,step],[5.4,step+30],[o,step+30]],true),
+        fill:stroke,opacity:.92}));
+      var railR=Math.round(w*0.34);
+      svg.appendChild(svgEl('path',{d:poly([[16,h-5.2],[railR,h-5.2],[railR,h-o],[34,h-o],[o,h-28],[o,h-22]],true),
+        fill:stroke,opacity:.9}));
+      svg.appendChild(svgEl('path',{d:poly([[w-tr,o],[w-o,tr],[w-o,tr+7],[w-tr+7,o]],true),
+        fill:stroke,opacity:.9}));
+      // 斜線埠（hatch slats）：寬、平行、約 50°，不是水平細線
+      var sx=w-ventW+5, sy=h-ventH+10;
+      for(var k=0;k<4;k++){
+        var ox=k*5.2;
+        svg.appendChild(svgEl('line',{
+          x1:sx+ox, y1:sy+20, x2:sx+ox+13, y2:sy+2,
+          stroke:stroke,'stroke-width':3.1,'stroke-linecap':'square',opacity:.95
         }));
-      };
-      tick(i+1, i+1, 11, 11);
-      tick(w-i-1, i+1, -11, 11);
-      tick(i+1, h-i-1, 11, -11);
-      tick(w-i-1, h-i-1, -11, -11);
-      // 右下「埠」：三道短刻，參考圖 POWER UNIT / CONTROL PANEL 常見
-      var hx=w-i-2, hy=h-br-i-18;
-      for(var k=0;k<3;k++){
-        svg.appendChild(svgEl('line',{x1:hx-10,y1:hy+k*5,x2:hx,y2:hy+k*5,
-          stroke:stroke,'stroke-width':1.2,opacity:.85}));
       }
-      // 左上小方塊（參考圖 SYSTEM MODULE 的角樁）
-      svg.appendChild(svgEl('rect',{x:o+3,y:o+3,width:4,height:4,fill:stroke,opacity:.9}));
+      // 左上角樁
+      svg.appendChild(svgEl('rect',{x:step+2,y:o+2,width:4,height:4,fill:stroke}));
     };
     if(window.ResizeObserver) new ResizeObserver(paint).observe(host);
     requestAnimationFrame(paint);
