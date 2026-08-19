@@ -111,14 +111,13 @@ const STYLE = `
 
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
-  /* 試做：只改資源卡。對齊參考圖的 HUD 元件——青光雙描邊、不對稱切角、角上硬體刻痕。
-     框是像素座標 SVG（viewBox＝實際寬高），角不會被拉變形。KPI／主控條先不動。 */
-  .rcard{--hud:#3AD0EA;position:relative;background:transparent;border:none;
-    padding:22px 26px 24px 22px;overflow:visible}
+  /* 資源卡外框刻自參考圖 POWER UNIT：等寬粗邊＋細內框。切角固定 px，中段隨卡片拉長。 */
+  .rcard{--hud:#2EC8F0;position:relative;background:transparent;border:none;
+    padding:28px 32px 30px 28px;overflow:visible}
   .rcard.is-warn{--hud:var(--warn2)}
   .rcard.is-crit{--hud:var(--crit2)}
   .rcard .hud-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;
-    overflow:visible;filter:drop-shadow(0 0 6px color-mix(in srgb,var(--hud) 55%,transparent))}
+    overflow:visible;filter:drop-shadow(0 0 5px color-mix(in srgb,var(--hud) 40%,transparent))}
   .rcard > *:not(.hud-svg){position:relative;z-index:1}
   .r-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
   .r-name{font-family:var(--disp);font-weight:600;font-size:16.5px;letter-spacing:-.01em}
@@ -229,8 +228,8 @@ const RENDER_JS = `
     ['tl','tr','bl','br'].forEach(function(p){ node.appendChild(el('i','hk '+p)); });
     return node;
   }
-  // 資源卡 HUD 外框：對齊參考圖——不規則折線（step/jog）、粗細混用、右下斜線埠（hatch）。
-  // 切角／折線用 px、viewBox 跟卡片一樣大 ⇒ 寬卡／高卡角落形狀不變。
+  // 刻自參考圖 POWER UNIT：外緣整齊 45° 切角的等寬粗邊；內緣才凹槽；斜線是細 hatch。
+  // 切角／邊寬固定 px，只有直邊隨卡片變長。
   function mountHud(host){
     var svg=svgEl('svg',{'class':'hud-svg','aria-hidden':'true'});
     host.insertBefore(svg, host.firstChild);
@@ -239,6 +238,10 @@ const RENDER_JS = `
       for(var i=1;i<pts.length;i++) d+=' L'+pts[i][0]+','+pts[i][1];
       return close?d+' Z':d;
     };
+    var oct=function(x,y,ww,hh,c){
+      c=Math.max(6, Math.min(c, ww/2-2, hh/2-2));
+      return [[x+c,y],[x+ww-c,y],[x+ww,y+c],[x+ww,y+hh-c],[x+ww-c,y+hh],[x+c,y+hh],[x,y+hh-c],[x,y+c]];
+    };
     var paint=function(){
       var w=host.clientWidth, h=host.clientHeight;
       if(w<80||h<80) return;
@@ -246,52 +249,58 @@ const RENDER_JS = `
       svg.setAttribute('width',String(w));
       svg.setAttribute('height',String(h));
       while(svg.firstChild) svg.removeChild(svg.firstChild);
-      var cs=getComputedStyle(host), stroke=(cs.getPropertyValue('--hud')||'#3AD0EA').trim();
-      var o=0.7, step=10, tr=20, ventW=26, ventH=40;
-      var dipX=Math.round(w*0.58), jogY=Math.round(h*0.38);
-      // 外框：左上台階 → 頂邊中段下凹 → 右上切角 → 右邊中段內折 → 右下斜線埠凹槽 → 左下兩段切
-      var outer=[
-        [o, step], [step, step], [step, o],
-        [dipX, o], [dipX+7, 5.5], [dipX+22, 5.5], [dipX+29, o],
-        [w-tr, o], [w-o, tr],
-        [w-o, jogY], [w-8, jogY], [w-8, jogY+20], [w-o, jogY+20],
-        [w-o, h-ventH], [w-ventW, h-ventH], [w-ventW, h-15], [w-15, h-o],
-        [34, h-o], [o, h-28], [o, step]
+      var cs=getComputedStyle(host), stroke=(cs.getPropertyValue('--hud')||'#2EC8F0').trim();
+      var band=11, cut=24, gap=9;
+      var hatchY=Math.round(h*0.40), hatchH=36;
+      var outer=oct(1,1,w-2,h-2,cut);
+      var ix=1+band, iy=1+band, iw=w-2-2*band, ih=h-2-2*band;
+      var ic=Math.max(8, cut-band*0.55);
+      // 粗邊內緣：右上從內側挖一個槽、右邊挖斜線埠（外緣保持完整切角）
+      var innerBand=[
+        [ix+ic, iy],
+        [ix+iw-ic-32, iy],
+        [ix+iw-ic-32, iy-5], [ix+iw-ic-10, iy-5], [ix+iw-ic-10, iy],
+        [ix+iw-ic, iy],
+        [ix+iw, iy+ic],
+        [ix+iw, hatchY],
+        [ix+iw+band-2.4, hatchY], [ix+iw+band-2.4, hatchY+hatchH], [ix+iw, hatchY+hatchH],
+        [ix+iw, iy+ih-ic],
+        [ix+iw-ic, iy+ih],
+        [ix+ic, iy+ih],
+        [ix, iy+ih-ic],
+        [ix, iy+ic]
       ];
-      var i=7;
-      var inner=[
-        [o+i, step+i-2], [step+i, step+i-2], [step+i, o+i],
-        [dipX+2, o+i], [dipX+8, 5.5+i-2], [dipX+21, 5.5+i-2], [dipX+27, o+i],
-        [w-tr-i+2, o+i], [w-o-i, tr+i-2],
-        [w-o-i, jogY+2], [w-8-i+2, jogY+2], [w-8-i+2, jogY+18], [w-o-i, jogY+18],
-        [w-o-i, h-ventH+2], [w-ventW-i+4, h-ventH+2], [w-ventW-i+4, h-15-2], [w-15-2, h-o-i],
-        [34+i-2, h-o-i], [o+i, h-28-2], [o+i, step+i-2]
+      svg.appendChild(svgEl('path',{d:poly(innerBand,true),fill:'rgba(6,30,40,.96)',stroke:'none'}));
+      var ring=poly(outer,true)+' '+poly(innerBand.slice().reverse(),true);
+      svg.appendChild(svgEl('path',{d:ring,fill:stroke,'fill-rule':'evenodd'}));
+      // 細內框：與粗邊平行的切角矩形，左下折一階（參考圖 Reserve 那條）
+      var t=band+gap, tc=14, shelf=34, shelfW=Math.min(132, Math.max(88, w*0.28));
+      var thin=[
+        [t+18, t],
+        [w-t-tc, t],
+        [w-t, t+tc],
+        [w-t, h-t-tc],
+        [w-t-tc, h-t],
+        [t+shelfW+18, h-t],
+        [t+shelfW, h-t-shelf],
+        [t, h-t-shelf],
+        [t, t+18]
       ];
-      svg.appendChild(svgEl('path',{d:poly(outer,true),fill:'rgba(7,32,44,.94)',stroke:'none'}));
-      // 細內框 + 中粗外框（同一條走線，粗細分開畫）
-      svg.appendChild(svgEl('path',{d:poly(inner,true),fill:'none',stroke:stroke,'stroke-width':0.65,
-        opacity:.48,'stroke-linejoin':'miter'}));
-      svg.appendChild(svgEl('path',{d:poly(outer,true),fill:'none',stroke:stroke,'stroke-width':1.35,
-        'stroke-linejoin':'miter','stroke-linecap':'square'}));
-      // 粗段：左上補強條、底邊左段橫軌、右上切角蓋（參考圖一段特別粗）
-      svg.appendChild(svgEl('path',{d:poly([[o,step],[5.4,step],[5.4,step+30],[o,step+30]],true),
-        fill:stroke,opacity:.92}));
-      var railR=Math.round(w*0.34);
-      svg.appendChild(svgEl('path',{d:poly([[16,h-5.2],[railR,h-5.2],[railR,h-o],[34,h-o],[o,h-28],[o,h-22]],true),
-        fill:stroke,opacity:.9}));
-      svg.appendChild(svgEl('path',{d:poly([[w-tr,o],[w-o,tr],[w-o,tr+7],[w-tr+7,o]],true),
-        fill:stroke,opacity:.9}));
-      // 斜線埠（hatch slats）：寬、平行、約 50°，不是水平細線
-      var sx=w-ventW+5, sy=h-ventH+10;
+      svg.appendChild(svgEl('path',{d:poly(thin,false),fill:'none',stroke:stroke,'stroke-width':1.15,
+        'stroke-linejoin':'miter','stroke-linecap':'square',opacity:.92}));
+      // 左上 L 角標（細框在此缺口，不閉合）
+      svg.appendChild(svgEl('polyline',{
+        points:[t, t+16, t, t, t+16, t].join(' '),
+        fill:'none',stroke:stroke,'stroke-width':1.6,'stroke-linejoin':'miter','stroke-linecap':'square'
+      }));
+      // 斜線埠：細、短、平行、約 50°，嵌在右邊粗邊挖空處
+      var sx=w-band+1, sy=hatchY+7;
       for(var k=0;k<4;k++){
-        var ox=k*5.2;
         svg.appendChild(svgEl('line',{
-          x1:sx+ox, y1:sy+20, x2:sx+ox+13, y2:sy+2,
-          stroke:stroke,'stroke-width':3.1,'stroke-linecap':'square',opacity:.95
+          x1:sx, y1:sy+k*7+9, x2:sx+9, y2:sy+k*7+1,
+          stroke:stroke,'stroke-width':1.55,'stroke-linecap':'butt',opacity:.95
         }));
       }
-      // 左上角樁
-      svg.appendChild(svgEl('rect',{x:step+2,y:o+2,width:4,height:4,fill:stroke}));
     };
     if(window.ResizeObserver) new ResizeObserver(paint).observe(host);
     requestAnimationFrame(paint);
