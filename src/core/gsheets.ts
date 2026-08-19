@@ -10,7 +10,7 @@ export const SA_EMAIL =
 
 let sheetsClient: ReturnType<typeof google.sheets> | null = null;
 
-export function getSheets() {
+function getSheets() {
   if (sheetsClient) return sheetsClient;
   const auth = new google.auth.GoogleAuth({
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],

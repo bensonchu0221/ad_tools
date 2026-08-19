@@ -1,4 +1,4 @@
-// Cloud Monitoring v3 讀取封裝（tool#5 資源看板用）。
+// Cloud Monitoring v3 讀取封裝（tool#4 資源看板用）。
 // 用 ADC（同 gcs.ts／gsheets.ts）：線上 Cloud Run 用服務帳號、本機用 gcloud 使用者憑證，皆免金鑰檔。
 // 計費：讀取 API 以「回傳的 time series 條數」計價（$0.50/百萬條，每月前 100 萬條免費），
 //       本工具一次刷新約 50 條 → 實質免費。GCP 內建指標本身的 ingestion 不計費。
