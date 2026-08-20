@@ -1,6 +1,6 @@
 // 查詢編排：把契約驗證 → 授權計算 → 呼叫 P → 整形輸出串起來。
 // 這裡是唯一知道「對外欄位名」與「P 原生欄位名」如何互換的地方。
-import { validateQuery, toPrismFields, buildColumns, DIMENSIONS, METRICS, MAX_ROWS, type ApiError } from './contract.js';
+import { validateQuery, toPrismFields, buildColumns, DIMENSIONS, METRICS, MAX_ROWS, ERROR_CODES, type ApiError } from './contract.js';
 import { resolveAdvertisers } from './scope.js';
 import { fetchPrismReport, PrismUpstreamError } from '../../core/prism.js';
 import type { ApiClientRow } from '../../core/store.js';
@@ -8,11 +8,6 @@ import type { ApiClientRow } from '../../core/store.js';
 export type ReportOutcome =
   | { ok: true; columns: string[]; rows: Record<string, unknown>[]; format: 'json' | 'csv' }
   | { ok: false; status: number; error: ApiError; logDetail?: string };
-
-const STATUS: Record<string, number> = {
-  INVALID_REQUEST: 400, INVALID_DIMENSION: 400, INVALID_METRIC: 400, DATE_RANGE_TOO_LARGE: 400,
-  FORBIDDEN_ADVERTISER: 403, ROW_LIMIT_EXCEEDED: 413, UPSTREAM_ERROR: 502,
-};
 
 /** P 的原生欄位名 → 我們的對外欄位名（用於整形回應的 key） */
 function prismKeyToPublicKey(dimensions: string[]): Record<string, string> {
@@ -27,7 +22,7 @@ function prismKeyToPublicKey(dimensions: string[]): Record<string, string> {
 
 export async function runReport(body: unknown, client: ApiClientRow): Promise<ReportOutcome> {
   const v = validateQuery(body);
-  if (!v.ok) return { ok: false, status: STATUS[v.error.code] ?? 400, error: v.error };
+  if (!v.ok) return { ok: false, status: ERROR_CODES[v.error.code as keyof typeof ERROR_CODES]?.status ?? 400, error: v.error };
   const q = v.query;
 
   const scope = resolveAdvertisers(q.advertiserIds, client.scopes, 'P');
@@ -63,7 +58,7 @@ export async function runReport(body: unknown, client: ApiClientRow): Promise<Re
   const columns = buildColumns(q.dimensions, q.metrics);
   const keyMap = prismKeyToPublicKey(q.dimensions);
   const metricMap: Record<string, string> = {};
-  for (const m of q.metrics) metricMap[METRICS[m as keyof typeof METRICS]] = m;
+  for (const m of q.metrics) metricMap[METRICS[m as keyof typeof METRICS].prism] = m;
 
   const rows = raw.map((r) => {
     const out: Record<string, unknown> = {};

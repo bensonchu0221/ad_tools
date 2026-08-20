@@ -8,6 +8,7 @@ import { DIMENSIONS, METRICS, MAX_SPAN_DAYS, MAX_ROWS } from './contract.js';
 import { runReport } from './reports.js';
 import { checkRateLimit } from './ratelimit.js';
 import { toCsv } from './csv.js';
+import { buildOpenApiSpec, renderDocsPage } from './docs.js';
 
 export const BASE_PATH = '/api/v1';
 
@@ -23,6 +24,9 @@ export async function registerPubApi(app: FastifyInstance): Promise<void> {
   // 認證 + 速率限制：只作用在 /api/v1 底下
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.url.startsWith(BASE_PATH)) return;
+    // 文件與規格是公開的，不需要 API key
+    const path = req.url.split('?')[0];
+    if (path === `${BASE_PATH}/docs` || path === `${BASE_PATH}/openapi.json`) return;
     const requestId = randomUUID();
     (req as any).requestId = requestId;
     reply.header('x-request-id', requestId);
@@ -84,5 +88,20 @@ export async function registerPubApi(app: FastifyInstance): Promise<void> {
         .send(toCsv(out.columns, out.rows));
     }
     reply.send({ data: out.rows, columns: out.columns, row_count: out.rows.length, request_id: requestId });
+  });
+
+  // 公開文件（不需 key）。origin 從請求推導，本機與正式站都會產出正確的範例網址。
+  const originOf = (req: FastifyRequest) =>
+    process.env.PUBLIC_API_ORIGIN ?? `${req.protocol}://${req.headers.host ?? 'localhost'}`;
+
+  app.get(`${BASE_PATH}/docs`, async (req, reply) => {
+    reply.header('x-robots-tag', 'noindex, nofollow')
+      .type('text/html; charset=utf-8')
+      .send(renderDocsPage(originOf(req)));
+  });
+
+  app.get(`${BASE_PATH}/openapi.json`, async (req, reply) => {
+    reply.header('x-robots-tag', 'noindex, nofollow')
+      .send(buildOpenApiSpec(originOf(req)));
   });
 }

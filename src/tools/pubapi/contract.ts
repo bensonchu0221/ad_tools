@@ -6,38 +6,37 @@
 export const MAX_SPAN_DAYS = 400; // 單次查詢的日期區間上限（含頭含尾）
 export const MAX_ROWS = 50_000;   // 單次回傳列數上限
 
-/** 對外維度名 → P 原生欄位名 + 回應要附帶的名稱欄位 */
+/** 對外維度名 → P 原生欄位名 + 回應要附帶的名稱欄位 + 文件說明 */
 export const DIMENSIONS = {
-  advertiser:     { prism: 'advertiser',      idKey: 'advertiser_id',  nameKey: 'advertiser_name' },
-  date:           { prism: 'date',            idKey: 'date',           nameKey: null },
-  campaign:       { prism: 'campaign_id',     idKey: 'campaign_id',    nameKey: 'campaign_name' },
-  adgroup:        { prism: 'adgroup_id',      idKey: 'adgroup_id',     nameKey: 'adgroup_name' },
-  creative:       { prism: 'creative_id',     idKey: 'creative_id',    nameKey: 'creative_name' },
-  device:         { prism: 'device',          idKey: 'device',         nameKey: null },
-  country:        { prism: 'country',         idKey: 'country',        nameKey: null },
-  city:           { prism: 'city',            idKey: 'city',           nameKey: null },
-  ad_title:       { prism: 'title',           idKey: 'ad_title',       nameKey: null },
-  ad_description: { prism: 'ad_description',  idKey: 'ad_description', nameKey: null },
-  ad_cta:         { prism: 'cta_label',       idKey: 'ad_cta',         nameKey: null },
+  advertiser:     { prism: 'advertiser',     idKey: 'advertiser_id',  nameKey: 'advertiser_name', label: '廣告主' },
+  date:           { prism: 'date',           idKey: 'date',           nameKey: null,              label: '日期（台北時區）' },
+  campaign:       { prism: 'campaign_id',    idKey: 'campaign_id',    nameKey: 'campaign_name',   label: '廣告活動' },
+  adgroup:        { prism: 'adgroup_id',     idKey: 'adgroup_id',     nameKey: 'adgroup_name',    label: '廣告組' },
+  creative:       { prism: 'creative_id',    idKey: 'creative_id',    nameKey: 'creative_name',   label: '素材' },
+  device:         { prism: 'device',         idKey: 'device',         nameKey: null,              label: '裝置（Desktop／Mobile／Tablet）' },
+  country:        { prism: 'country',        idKey: 'country',        nameKey: null,              label: '國家（ISO 二碼）' },
+  city:           { prism: 'city',           idKey: 'city',           nameKey: null,              label: '城市' },
+  ad_title:       { prism: 'title',          idKey: 'ad_title',       nameKey: null,              label: '廣告標題' },
+  ad_description: { prism: 'ad_description', idKey: 'ad_description', nameKey: null,              label: '廣告內文' },
+  ad_cta:         { prism: 'cta_label',      idKey: 'ad_cta',         nameKey: null,              label: 'CTA 文字' },
 } as const;
 // 註：P 另有 domain（媒體域名）與 slot（版位），v1 刻意不對外開放（商業敏感）。
 
-/** 對外指標名 → P 原生欄位名 */
+/** 對外指標名 → P 原生欄位名、型別與文件說明 */
 export const METRICS = {
-  impressions:          'impressions',
-  clicks:               'clicks',
-  ctr:                  'ctr',
-  spend:                'spend',
-  viewable_impressions: 'viewable_impressions',
-  viewability:          'viewability',
-  video_views_25:       'view_25',
-  video_views_50:       'view_50',
-  video_views_75:       'view_75',
-  video_views_100:      'view_100',
-  vtr:                  'vtr',
+  impressions:          { prism: 'impressions',          type: 'integer', label: '曝光數' },
+  clicks:               { prism: 'clicks',               type: 'integer', label: '點擊數' },
+  ctr:                  { prism: 'ctr',                  type: 'number',  label: '點擊率（小數，0.0038 表示 0.38%；曝光為 0 時回 null）' },
+  spend:                { prism: 'spend',                type: 'number',  label: '花費（四捨五入至小數第 2 位）' },
+  viewable_impressions: { prism: 'viewable_impressions', type: 'integer', label: '可視曝光數' },
+  viewability:          { prism: 'viewability',          type: 'number',  label: '可視率（小數；曝光為 0 時回 null）' },
+  video_views_25:       { prism: 'view_25',              type: 'integer', label: '影音播放 25% 次數' },
+  video_views_50:       { prism: 'view_50',              type: 'integer', label: '影音播放 50% 次數' },
+  video_views_75:       { prism: 'view_75',              type: 'integer', label: '影音播放 75% 次數' },
+  video_views_100:      { prism: 'view_100',             type: 'integer', label: '影音播放完成次數' },
+  vtr:                  { prism: 'vtr',                  type: 'number',  label: '完播率（小數；曝光為 0 時回 null）' },
 } as const;
 
-// 註：Task 10 會把 METRICS 的值從字串改成物件（加 type/label 供文件生成），屆時 toPrismFields 一併調整。
 export type DimName = keyof typeof DIMENSIONS;
 export type MetricName = keyof typeof METRICS;
 export type Format = 'json' | 'csv';
@@ -144,7 +143,7 @@ export function validateQuery(body: unknown): ValidateResult {
 export function toPrismFields(names: string[], kind: 'dimension' | 'metric'): string[] {
   return kind === 'dimension'
     ? names.map((n) => DIMENSIONS[n as DimName].prism)
-    : names.map((n) => METRICS[n as MetricName]);
+    : names.map((n) => METRICS[n as MetricName].prism);
 }
 
 /** 回應的欄位順序：維度（名稱欄緊接在 id 之後）→ 指標 */
@@ -158,3 +157,17 @@ export function buildColumns(dimensions: string[], metrics: string[]): string[] 
   out.push(...metrics);
   return out;
 }
+
+/** 錯誤碼的單一真相：驗證層、路由層與線上文件都讀這張表，不會各寫各的 */
+export const ERROR_CODES = {
+  UNAUTHORIZED:         { status: 401, label: 'API key 缺少、無效或已停用' },
+  INVALID_REQUEST:      { status: 400, label: '缺少必填欄位、日期格式錯誤，或 end_date 早於 start_date' },
+  INVALID_DIMENSION:    { status: 400, label: '要求了不支援的維度；details.allowed 會列出合法值' },
+  INVALID_METRIC:       { status: 400, label: '要求了不支援的指標；details.allowed 會列出合法值' },
+  DATE_RANGE_TOO_LARGE: { status: 400, label: `查詢區間超過 ${MAX_SPAN_DAYS} 天` },
+  FORBIDDEN_ADVERTISER: { status: 403, label: '要求的廣告主不在這把 key 的授權範圍內' },
+  RATE_LIMITED:         { status: 429, label: '超過每分鐘呼叫上限' },
+  ROW_LIMIT_EXCEEDED:   { status: 413, label: `結果超過單次上限 ${MAX_ROWS} 列` },
+  UPSTREAM_ERROR:       { status: 502, label: '資料來源暫時無法取得' },
+  INTERNAL_ERROR:       { status: 500, label: '未預期的系統錯誤' },
+} as const;
