@@ -23,6 +23,7 @@
 - **絕不信任客戶端傳來的 `advertiser_ids`**：一律與該 key 的授權清單取交集後才送給 P。
 - **v1 不開放 `domain`（媒體域名）與 `slot`（版位）兩個維度**——商業敏感，日後要加容易，開了要收回很難。
 - **v1 不放任何轉換指標**（conversions／CVR）。P 平台沒有轉換事件（BigQuery 表中查無 `conversion`），放一個永遠是 0 的欄位會在日後加 D/R/M 時造成語意衝突。
+- **`npm run build` 不會檢查 `poc/`**：`tsconfig.json` 的 `include` 只有 `src`，而 `tsx` 只轉譯不做型別檢查 ⇒ **poc 腳本的型別錯誤不會被任何指令抓到**。寫 poc 時型別靠自己顧，真正的把關是它跑出來的 `✓`／`✗`。
 - **每個 Task 結束一定要 commit**，訊息格式 `對外 API：<做了什麼>`。
 - **不要 push**。全部做完後由 Benson 確認再推（push main 會觸發 Cloud Build 自動部署）。
 
@@ -69,6 +70,8 @@ P 平台 token 向 Benson 索取，放進 `.env` 的 `PRISM_API_TOKEN`。**不�
 | **新增** `poc/verify_prism_client.mts` | Task 3 的測試（含真 API）。 |
 | **新增** `poc/verify_pubapi_scope.mts` | Task 5 的測試。 |
 | **新增** `poc/verify_pubapi_e2e.mts` | Task 8 的端到端測試。 |
+| **新增** `src/tools/pubapi/docs.ts` | 線上公開文件與 OpenAPI 規格，**從 contract.ts 的常數生成**（不需登入、不需 key）。 |
+| **新增** `poc/verify_pubapi_docs.mts` | Task 10 的測試（防漂移＋防洩漏）。 |
 
 ### 為什麼要分這麼多檔
 
@@ -344,6 +347,7 @@ export const METRICS = {
   vtr:                  'vtr',
 } as const;
 
+// 註：Task 10 會把 METRICS 的值從字串改成物件（加 type/label 供文件生成），屆時 toPrismFields 一併調整。
 export type DimName = keyof typeof DIMENSIONS;
 export type MetricName = keyof typeof METRICS;
 export type Format = 'json' | 'csv';
@@ -1747,7 +1751,562 @@ git commit -m "對外 API：key 管理頁（核發／授權範圍／停用／刪
 
 ---
 
-## Task 10：文件與交接
+## Task 10：線上公開 API 文件（從常數生成）
+
+**Files:**
+- Modify: `src/tools/pubapi/contract.ts`（加 `label` 說明與 `ERROR_CODES`）
+- Modify: `src/tools/pubapi/reports.ts`（改用 `ERROR_CODES` 的 status，移除本地 STATUS 表）
+- Create: `src/tools/pubapi/docs.ts`
+- Modify: `src/tools/pubapi/route.ts`（掛兩條路由）
+- Test: `poc/verify_pubapi_docs.mts`
+
+**Interfaces:**
+- Consumes：`DIMENSIONS`／`METRICS`／`MAX_SPAN_DAYS`／`MAX_ROWS`（Task 1）
+- Produces：`ERROR_CODES`、`buildOpenApiSpec(origin)`、`renderDocsPage(origin)`
+
+**核心原則：文件從 `contract.ts` 的常數生成，不手寫平行的表格。** API 文件最常見的死法是漂移——欄位加了、上限改了，文件沒跟上，客戶照著打卻拿到 400。生成就不可能漂移。本專案已有先例：`tools/gcpwatch/page.ts` 就是每次 request 動態組字串、無 build step。
+
+**三個公開文件特有的限制：**
+
+1. **不可用 `sbPage()`**。它的頂部導覽列會列出內部工具連結（`/tools/adpreview`、`/tools/weeklyreport`、`/tools/adstream`，見 `core/sbui.ts:8`），公開頁面不能洩漏內部結構。docs 頁要自己出一份獨立、自帶 CSS 的 HTML。
+2. **零外部依賴**。不要用 `core/html.ts` 的 `layout()`——它引 daisyUI 與 Tailwind 的 jsdelivr CDN，客戶端網路可能擋。用系統字體，CSS 內嵌。
+3. **內容不得含任何內部資訊**。不可提資料來源平台、BigQuery、內部檔案結構；範例的 advertiser id 一律用假值（`000-000-0000`），不可用真實客戶的 id。
+
+- [ ] **Step 1：擴充 contract.ts**
+
+在 `DIMENSIONS` 每一項加 `label`（給文件顯示的中文說明），並新增 `ERROR_CODES` 當錯誤碼的單一真相。
+
+把 `DIMENSIONS` 改成帶 `label`（其餘欄位不動）：
+
+```ts
+export const DIMENSIONS = {
+  advertiser:     { prism: 'advertiser',     idKey: 'advertiser_id',  nameKey: 'advertiser_name', label: '廣告主' },
+  date:           { prism: 'date',           idKey: 'date',           nameKey: null,              label: '日期（台北時區）' },
+  campaign:       { prism: 'campaign_id',    idKey: 'campaign_id',    nameKey: 'campaign_name',   label: '廣告活動' },
+  adgroup:        { prism: 'adgroup_id',     idKey: 'adgroup_id',     nameKey: 'adgroup_name',    label: '廣告組' },
+  creative:       { prism: 'creative_id',    idKey: 'creative_id',    nameKey: 'creative_name',   label: '素材' },
+  device:         { prism: 'device',         idKey: 'device',         nameKey: null,              label: '裝置（Desktop／Mobile／Tablet）' },
+  country:        { prism: 'country',        idKey: 'country',        nameKey: null,              label: '國家（ISO 二碼）' },
+  city:           { prism: 'city',           idKey: 'city',           nameKey: null,              label: '城市' },
+  ad_title:       { prism: 'title',          idKey: 'ad_title',       nameKey: null,              label: '廣告標題' },
+  ad_description: { prism: 'ad_description', idKey: 'ad_description', nameKey: null,              label: '廣告內文' },
+  ad_cta:         { prism: 'cta_label',      idKey: 'ad_cta',         nameKey: null,              label: 'CTA 文字' },
+} as const;
+```
+
+`METRICS` 目前是「對外名 → 原生名」的字串對映，文件需要說明與型別，改成物件（**`toPrismFields` 也要跟著改**）：
+
+```ts
+export const METRICS = {
+  impressions:          { prism: 'impressions',          type: 'integer', label: '曝光數' },
+  clicks:               { prism: 'clicks',               type: 'integer', label: '點擊數' },
+  ctr:                  { prism: 'ctr',                  type: 'number',  label: '點擊率（小數，0.0038 表示 0.38%；曝光為 0 時回 null）' },
+  spend:                { prism: 'spend',                type: 'number',  label: '花費（四捨五入至小數第 2 位）' },
+  viewable_impressions: { prism: 'viewable_impressions', type: 'integer', label: '可視曝光數' },
+  viewability:          { prism: 'viewability',          type: 'number',  label: '可視率（小數；曝光為 0 時回 null）' },
+  video_views_25:       { prism: 'view_25',              type: 'integer', label: '影音播放 25% 次數' },
+  video_views_50:       { prism: 'view_50',              type: 'integer', label: '影音播放 50% 次數' },
+  video_views_75:       { prism: 'view_75',              type: 'integer', label: '影音播放 75% 次數' },
+  video_views_100:      { prism: 'view_100',             type: 'integer', label: '影音播放完成次數' },
+  vtr:                  { prism: 'vtr',                  type: 'number',  label: '完播率（小數；曝光為 0 時回 null）' },
+} as const;
+```
+
+`toPrismFields` 的 metric 分支改成讀 `.prism`：
+
+```ts
+export function toPrismFields(names: string[], kind: 'dimension' | 'metric'): string[] {
+  return kind === 'dimension'
+    ? names.map((n) => DIMENSIONS[n as DimName].prism)
+    : names.map((n) => METRICS[n as MetricName].prism);
+}
+```
+
+`reports.ts` 裡建 `metricMap` 的那行也要跟著改：
+
+```ts
+  for (const m of q.metrics) metricMap[METRICS[m as keyof typeof METRICS].prism] = m;
+```
+
+在 `contract.ts` 末端新增錯誤碼表：
+
+```ts
+/** 錯誤碼的單一真相：驗證層、路由層與線上文件都讀這張表，不會各寫各的 */
+export const ERROR_CODES = {
+  UNAUTHORIZED:         { status: 401, label: 'API key 缺少、無效或已停用' },
+  INVALID_REQUEST:      { status: 400, label: '缺少必填欄位、日期格式錯誤，或 end_date 早於 start_date' },
+  INVALID_DIMENSION:    { status: 400, label: '要求了不支援的維度；details.allowed 會列出合法值' },
+  INVALID_METRIC:       { status: 400, label: '要求了不支援的指標；details.allowed 會列出合法值' },
+  DATE_RANGE_TOO_LARGE: { status: 400, label: `查詢區間超過 ${MAX_SPAN_DAYS} 天` },
+  FORBIDDEN_ADVERTISER: { status: 403, label: '要求的廣告主不在這把 key 的授權範圍內' },
+  RATE_LIMITED:         { status: 429, label: '超過每分鐘呼叫上限' },
+  ROW_LIMIT_EXCEEDED:   { status: 413, label: `結果超過單次上限 ${MAX_ROWS} 列` },
+  UPSTREAM_ERROR:       { status: 502, label: '資料來源暫時無法取得' },
+  INTERNAL_ERROR:       { status: 500, label: '未預期的系統錯誤' },
+} as const;
+```
+
+然後把 `reports.ts` 開頭那個本地的 `STATUS` 常數**刪掉**，改成：
+
+```ts
+import { ..., ERROR_CODES } from './contract.js';
+// ...
+  if (!v.ok) return { ok: false, status: ERROR_CODES[v.error.code as keyof typeof ERROR_CODES]?.status ?? 400, error: v.error };
+```
+
+- [ ] **Step 2：先寫會失敗的測試**
+
+建立 `poc/verify_pubapi_docs.mts`。**最重要的兩組斷言是「防漂移」與「防洩漏」**：
+
+```ts
+// 驗證：線上公開 API 文件。核心主張：
+//   1) 防漂移——openapi.json 的欄位 enum 必須與 contract.ts 的常數完全一致
+//   2) 防洩漏——公開頁面不得出現任何內部資訊（資料來源平台、內部工具連結、真實客戶 id）
+//   3) 零外部依賴——頁面不得引用任何 CDN
+import { buildOpenApiSpec, renderDocsPage } from '../src/tools/pubapi/docs.js';
+import { DIMENSIONS, METRICS, ERROR_CODES, MAX_SPAN_DAYS, MAX_ROWS } from '../src/tools/pubapi/contract.js';
+
+let fail = 0;
+const eq = (name: string, got: any, want: any) => {
+  const g = JSON.stringify(got), w = JSON.stringify(want);
+  if (g !== w) { console.log(`✗ ${name}: got ${g} want ${w}`); fail++; } else console.log(`✓ ${name}`);
+};
+const ok = (name: string, cond: boolean, extra = '') => {
+  if (!cond) { console.log(`✗ ${name} ${extra}`); fail++; } else console.log(`✓ ${name}`);
+};
+
+const spec = buildOpenApiSpec('https://example.com');
+const html = renderDocsPage('https://example.com');
+
+// ── 1) 防漂移：spec 的 enum 必須等於常數 ──
+const reqSchema = spec.components.schemas.ReportRequest.properties;
+eq('維度 enum 與常數一致', reqSchema.dimensions.items.enum, Object.keys(DIMENSIONS));
+eq('指標 enum 與常數一致', reqSchema.metrics.items.enum, Object.keys(METRICS));
+eq('區間上限與常數一致', reqSchema.start_date['x-max-span-days'], MAX_SPAN_DAYS);
+
+// ── 2) 兩個端點都要有 ──
+ok('spec 有 /reports', !!spec.paths['/reports']?.post);
+ok('spec 有 /meta', !!spec.paths['/meta']?.get);
+ok('spec 有 bearer 認證', spec.components.securitySchemes.bearerAuth.scheme === 'bearer');
+
+// ── 3) 錯誤碼全部進 spec 與頁面 ──
+for (const code of Object.keys(ERROR_CODES)) {
+  ok(`頁面含錯誤碼 ${code}`, html.includes(code));
+}
+
+// ── 4) 頁面含每一個欄位（生成而非手寫的證據）──
+for (const d of Object.keys(DIMENSIONS)) ok(`頁面含維度 ${d}`, html.includes(d));
+for (const m of Object.keys(METRICS)) ok(`頁面含指標 ${m}`, html.includes(m));
+ok('頁面含列數上限', html.includes(String(MAX_ROWS)));
+
+// ── 5) 防洩漏：公開頁不得出現內部字眼 ──
+const FORBIDDEN = [
+  'prism', 'Prism', 'pacplatform', 'bigquery', 'BigQuery', 'asia-east1',
+  '/tools/adpreview', '/tools/weeklyreport', '/tools/adstream', '/tools/apikeys',
+  '233-688-3595', '292-462-3142', // 真實廣告主 id 絕不可當範例
+  'jsdelivr', 'unpkg', 'cdn.',    // 零外部依賴
+];
+for (const word of FORBIDDEN) {
+  ok(`頁面不含「${word}」`, !html.includes(word));
+  ok(`spec 不含「${word}」`, !JSON.stringify(spec).includes(word));
+}
+
+// ── 6) 頁面是完整可獨立開啟的 HTML ──
+ok('有 doctype', html.trimStart().toLowerCase().startsWith('<!doctype html>'));
+ok('有 lang', html.includes('<html lang='));
+ok('CSS 內嵌', html.includes('<style>'));
+ok('沒有外部 script src', !/<script[^>]+src=/.test(html));
+
+console.log(fail === 0 ? '\n全部通過' : `\n${fail} 項失敗`);
+process.exit(fail === 0 ? 0 : 1);
+```
+
+- [ ] **Step 3：跑測試確認失敗**
+
+Run：`npx tsx poc/verify_pubapi_docs.mts`
+Expected：FAIL，找不到 `docs.js`
+
+- [ ] **Step 4：實作 docs.ts**
+
+```ts
+// 線上公開 API 文件（不需登入、不需 API key）。
+// 兩個產出都從 contract.ts 的常數生成，欄位一改文件跟著改，不會漂移。
+//
+// ⚠️ 這是「公開」頁面，三條紅線：
+//   1. 不可用 core/sbui.ts 的 sbPage()——它的頂部導覽列會列出內部工具連結
+//   2. 不可用 core/html.ts 的 layout()——它引 jsdelivr CDN，客戶端網路可能擋
+//   3. 內容不得含資料來源平台、內部路徑、真實客戶 id
+import { DIMENSIONS, METRICS, ERROR_CODES, MAX_SPAN_DAYS, MAX_ROWS } from './contract.js';
+
+const esc = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** 範例值一律用假的廣告主 id */
+const SAMPLE_ADVERTISER = '000-000-0000';
+
+const SAMPLE_REQUEST = {
+  start_date: '2026-08-01',
+  end_date: '2026-08-20',
+  dimensions: ['date', 'campaign'],
+  metrics: ['impressions', 'clicks', 'ctr', 'spend'],
+  advertiser_ids: [SAMPLE_ADVERTISER],
+  format: 'json',
+};
+
+const SAMPLE_RESPONSE = {
+  data: [{
+    date: '2026-08-19', campaign_id: '1234567890', campaign_name: '範例活動_受眾A_0801-0831',
+    impressions: 39315, clicks: 151, ctr: 0.0038407732, spend: 1572.6,
+  }],
+  columns: ['date', 'campaign_id', 'campaign_name', 'impressions', 'clicks', 'ctr', 'spend'],
+  row_count: 1,
+  request_id: '6f1c2a30-8e4b-4d2a-9f1e-7c5b3a2d1e0f',
+};
+
+export function buildOpenApiSpec(origin: string) {
+  const dimNames = Object.keys(DIMENSIONS);
+  const metricNames = Object.keys(METRICS);
+
+  // 回應中每一欄的型別：維度（含附帶的名稱欄）都是字串，指標依 METRICS 的 type
+  const rowProps: Record<string, unknown> = {};
+  for (const [name, def] of Object.entries(DIMENSIONS)) {
+    rowProps[def.idKey] = { type: 'string', description: def.label };
+    if (def.nameKey) rowProps[def.nameKey] = { type: 'string', description: `${def.label}名稱` };
+  }
+  for (const [name, def] of Object.entries(METRICS)) {
+    rowProps[name] = { type: [def.type, 'null'], description: def.label };
+  }
+
+  const errorSchema = {
+    type: 'object',
+    properties: {
+      error: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', enum: Object.keys(ERROR_CODES) },
+          message: { type: 'string' },
+          details: { type: 'object', additionalProperties: true },
+          request_id: { type: 'string' },
+        },
+        required: ['code', 'message', 'request_id'],
+      },
+    },
+  };
+
+  const errorResponses: Record<string, unknown> = {};
+  for (const [code, def] of Object.entries(ERROR_CODES)) {
+    const status = String(def.status);
+    // 同一個 HTTP status 可能對應多個 code，描述合併呈現
+    const prev = errorResponses[status] as { description: string } | undefined;
+    errorResponses[status] = {
+      description: prev ? `${prev.description}／${code}：${def.label}` : `${code}：${def.label}`,
+      content: { 'application/json': { schema: errorSchema } },
+    };
+  }
+
+  return {
+    openapi: '3.1.0',
+    info: {
+      title: '報表 API',
+      version: '1.0.0',
+      description: '查詢廣告投放成效的報表 API。所有請求都需要 API key，且只能查詢該 key 被授權的廣告主。',
+    },
+    servers: [{ url: `${origin}/api/v1` }],
+    security: [{ bearerAuth: [] }],
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: 'http', scheme: 'bearer', description: 'Authorization: Bearer <api_key>' },
+      },
+      schemas: {
+        ReportRequest: {
+          type: 'object',
+          required: ['start_date', 'end_date', 'dimensions', 'metrics'],
+          properties: {
+            start_date: {
+              type: 'string', format: 'date', description: '起始日（含），格式 YYYY-MM-DD',
+              'x-max-span-days': MAX_SPAN_DAYS,
+            },
+            end_date: { type: 'string', format: 'date', description: '結束日（含），格式 YYYY-MM-DD' },
+            dimensions: { type: 'array', minItems: 1, items: { type: 'string', enum: dimNames } },
+            metrics: { type: 'array', minItems: 1, items: { type: 'string', enum: metricNames } },
+            advertiser_ids: {
+              type: 'array', items: { type: 'string' },
+              description: '選填。省略時查詢這把 key 被授權的全部廣告主；若指定，必須是授權範圍的子集。',
+            },
+            format: { type: 'string', enum: ['json', 'csv'], default: 'json' },
+          },
+          example: SAMPLE_REQUEST,
+        },
+        ReportResponse: {
+          type: 'object',
+          properties: {
+            data: { type: 'array', items: { type: 'object', properties: rowProps } },
+            columns: { type: 'array', items: { type: 'string' }, description: '欄位順序；只會包含實際存在的欄位' },
+            row_count: { type: 'integer', description: `本次回傳列數，上限 ${MAX_ROWS}` },
+            request_id: { type: 'string' },
+          },
+          example: SAMPLE_RESPONSE,
+        },
+        MetaResponse: {
+          type: 'object',
+          properties: {
+            dimensions: { type: 'array', items: { type: 'string', enum: dimNames } },
+            metrics: { type: 'array', items: { type: 'string', enum: metricNames } },
+            advertisers: { type: 'array', items: { type: 'string' }, description: '這把 key 可查詢的廣告主' },
+            limits: {
+              type: 'object',
+              properties: {
+                max_span_days: { type: 'integer' },
+                max_rows: { type: 'integer' },
+                rate_limit_per_min: { type: 'integer' },
+              },
+            },
+            request_id: { type: 'string' },
+          },
+        },
+      },
+    },
+    paths: {
+      '/reports': {
+        post: {
+          summary: '查詢報表',
+          description: `format 為 json 時回傳 JSON；為 csv 時回傳 text/csv（UTF-8、CRLF、不含 BOM）。`,
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/ReportRequest' } } },
+          },
+          responses: {
+            '200': {
+              description: '查詢成功',
+              content: {
+                'application/json': { schema: { $ref: '#/components/schemas/ReportResponse' } },
+                'text/csv': { schema: { type: 'string' } },
+              },
+            },
+            ...errorResponses,
+          },
+        },
+      },
+      '/meta': {
+        get: {
+          summary: '查詢可用欄位與授權範圍',
+          description: '回傳這把 API key 能使用的維度、指標、廣告主與各項上限。',
+          responses: {
+            '200': {
+              description: '查詢成功',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/MetaResponse' } } },
+            },
+            ...errorResponses,
+          },
+        },
+      },
+    },
+  };
+}
+
+function fieldRows(entries: [string, { label: string }][], typeOf?: (k: string) => string): string {
+  return entries
+    .map(([name, def]) =>
+      `<tr><td><code>${esc(name)}</code></td>${typeOf ? `<td>${esc(typeOf(name))}</td>` : ''}<td>${esc(def.label)}</td></tr>`)
+    .join('');
+}
+
+export function renderDocsPage(origin: string): string {
+  const dimEntries = Object.entries(DIMENSIONS) as [string, { label: string; nameKey: string | null }][];
+  const metricEntries = Object.entries(METRICS) as [string, { label: string; type: string }][];
+
+  const dimTable = dimEntries
+    .map(([name, def]) =>
+      `<tr><td><code>${esc(name)}</code></td><td>${esc(def.label)}</td>
+       <td>${def.nameKey ? `<code>${esc(def.nameKey)}</code>` : '—'}</td></tr>`)
+    .join('');
+
+  const metricTable = fieldRows(metricEntries, (k) => (METRICS as any)[k].type);
+
+  const errorTable = Object.entries(ERROR_CODES)
+    .map(([code, def]) =>
+      `<tr><td><code>${esc(code)}</code></td><td>${def.status}</td><td>${esc(def.label)}</td></tr>`)
+    .join('');
+
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>報表 API 文件</title>
+<style>
+  :root{ --bg:#F7F8FA; --panel:#FFF; --ink:#16212B; --mut:#6E8190; --rule:#D9E1E8; --code:#EDF1F4; --accent:#0F5F63; }
+  @media (prefers-color-scheme:dark){
+    :root{ --bg:#0D1319; --panel:#141C24; --ink:#E2EAF1; --mut:#7E93A3; --rule:#233039; --code:#0A1016; --accent:#5FD3D8; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);line-height:1.7;
+    font-family:system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
+  .wrap{max-width:60rem;margin:0 auto;padding:3rem 1.25rem 5rem}
+  h1{font-size:1.9rem;margin:0 0 .5rem}
+  h2{font-size:1.2rem;margin:2.5rem 0 .75rem;padding-bottom:.4rem;border-bottom:1px solid var(--rule)}
+  h3{font-size:.98rem;margin:1.5rem 0 .5rem}
+  p{max-width:60ch}
+  .lead{color:var(--mut);margin-top:0}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.87em;
+    background:var(--code);padding:.1em .35em;border:1px solid var(--rule);border-radius:3px}
+  pre{background:var(--code);border:1px solid var(--rule);padding:1rem;overflow-x:auto;
+    font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.8rem;line-height:1.6}
+  pre code{background:none;border:none;padding:0}
+  .tw{overflow-x:auto;border:1px solid var(--rule);background:var(--panel);margin:.75rem 0}
+  table{border-collapse:collapse;width:100%;font-size:.85rem;min-width:34rem}
+  th{text-align:left;background:var(--code);padding:.5rem .7rem;border-bottom:1px solid var(--rule);
+    font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+  td{padding:.5rem .7rem;border-bottom:1px solid var(--rule);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  .note{background:var(--panel);border:1px solid var(--rule);border-left:3px solid var(--accent);
+    padding:.9rem 1.1rem;margin:1rem 0}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>報表 API</h1>
+<p class="lead">查詢廣告投放成效。所有請求都需要 API key，且只能查到該 key 被授權的廣告主資料。</p>
+
+<h2>認證</h2>
+<p>每個請求都要帶上 API key：</p>
+<pre><code>Authorization: Bearer &lt;你的 API key&gt;</code></pre>
+<div class="note">API key 請向窗口索取。key 遺失無法找回，只能重新核發。</div>
+
+<h2>查詢報表</h2>
+<p><code>POST ${esc(origin)}/api/v1/reports</code></p>
+<h3>請求</h3>
+<pre><code>${esc(JSON.stringify(SAMPLE_REQUEST, null, 2))}</code></pre>
+<div class="tw"><table>
+  <thead><tr><th>參數</th><th>必填</th><th>說明</th></tr></thead>
+  <tbody>
+    <tr><td><code>start_date</code></td><td>是</td><td>起始日（含），格式 <code>YYYY-MM-DD</code></td></tr>
+    <tr><td><code>end_date</code></td><td>是</td><td>結束日（含）。與起始日的間隔上限 ${MAX_SPAN_DAYS} 天</td></tr>
+    <tr><td><code>dimensions</code></td><td>是</td><td>分組維度，見下表，至少一個</td></tr>
+    <tr><td><code>metrics</code></td><td>是</td><td>要查的指標，見下表，至少一個</td></tr>
+    <tr><td><code>advertiser_ids</code></td><td>否</td><td>省略時查詢你被授權的全部廣告主；若指定，必須是授權範圍的子集</td></tr>
+    <tr><td><code>format</code></td><td>否</td><td><code>json</code>（預設）或 <code>csv</code></td></tr>
+  </tbody>
+</table></div>
+
+<h3>回應</h3>
+<pre><code>${esc(JSON.stringify(SAMPLE_RESPONSE, null, 2))}</code></pre>
+<p><code>columns</code> 是欄位順序，<strong>只會包含實際存在的欄位</strong>，可以直接拿來當表頭。
+<code>format</code> 指定為 <code>csv</code> 時回傳 <code>text/csv</code>（UTF-8、CRLF 換行、不含 BOM）。</p>
+
+<h2>維度</h2>
+<p>要求帶 ID 的維度時，會自動附上對應的名稱欄位。</p>
+<div class="tw"><table>
+  <thead><tr><th>維度</th><th>說明</th><th>自動附帶</th></tr></thead>
+  <tbody>${dimTable}</tbody>
+</table></div>
+
+<h2>指標</h2>
+<div class="tw"><table>
+  <thead><tr><th>指標</th><th>型別</th><th>說明</th></tr></thead>
+  <tbody>${metricTable}</tbody>
+</table></div>
+
+<h2>查詢可用欄位</h2>
+<p><code>GET ${esc(origin)}/api/v1/meta</code></p>
+<p>回傳你這把 key 能用的維度、指標、廣告主清單與各項上限。不確定能查什麼的時候先打這支。</p>
+
+<h2>錯誤</h2>
+<p>所有錯誤都是這個格式，<code>request_id</code> 也會放在回應的 <code>x-request-id</code> 標頭，回報問題時請一併提供：</p>
+<pre><code>${esc(JSON.stringify({
+    error: { code: 'INVALID_DIMENSION', message: '不支援的維度：foo',
+             details: { invalid: ['foo'], allowed: ['date', '…'] },
+             request_id: '6f1c2a30-8e4b-4d2a-9f1e-7c5b3a2d1e0f' },
+  }, null, 2))}</code></pre>
+<div class="tw"><table>
+  <thead><tr><th>code</th><th>HTTP</th><th>說明</th></tr></thead>
+  <tbody>${errorTable}</tbody>
+</table></div>
+
+<h2>限制</h2>
+<div class="tw"><table>
+  <thead><tr><th>項目</th><th>上限</th></tr></thead>
+  <tbody>
+    <tr><td>單次查詢的日期區間</td><td>${MAX_SPAN_DAYS} 天（含頭含尾）</td></tr>
+    <tr><td>單次回傳列數</td><td>${MAX_ROWS} 列，超過回 <code>ROW_LIMIT_EXCEEDED</code></td></tr>
+    <tr><td>呼叫頻率</td><td>依 key 設定，見 <code>x-ratelimit-limit</code> 標頭</td></tr>
+  </tbody>
+</table></div>
+
+<h2>機器可讀規格</h2>
+<p>OpenAPI 3.1 規格：<a href="${esc(origin)}/api/v1/openapi.json"><code>/api/v1/openapi.json</code></a>。
+可匯入 Postman、Insomnia 或用來產生各語言的 client。</p>
+
+</div>
+</body>
+</html>`;
+}
+```
+
+- [ ] **Step 5：掛路由**
+
+在 `src/tools/pubapi/route.ts` 的 import 區加：
+
+```ts
+import { buildOpenApiSpec, renderDocsPage } from './docs.js';
+```
+
+**在 `onRequest` 認證 hook 裡放行文件路徑**（文件不需要 key，否則客戶還沒拿到 key 就看不到文件）。把 hook 開頭那行改成：
+
+```ts
+  app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!req.url.startsWith(BASE_PATH)) return;
+    // 文件與規格是公開的，不需要 API key
+    const path = req.url.split('?')[0];
+    if (path === `${BASE_PATH}/docs` || path === `${BASE_PATH}/openapi.json`) return;
+```
+
+然後在 `registerPubApi` 內加兩條路由：
+
+```ts
+  // 公開文件（不需 key）。origin 從請求推導，本機與正式站都會產出正確的範例網址。
+  const originOf = (req: FastifyRequest) =>
+    process.env.PUBLIC_API_ORIGIN ?? `${req.protocol}://${req.headers.host ?? 'localhost'}`;
+
+  app.get(`${BASE_PATH}/docs`, async (req, reply) => {
+    reply.header('x-robots-tag', 'noindex, nofollow')
+      .type('text/html; charset=utf-8')
+      .send(renderDocsPage(originOf(req)));
+  });
+
+  app.get(`${BASE_PATH}/openapi.json`, async (req, reply) => {
+    reply.header('x-robots-tag', 'noindex, nofollow')
+      .send(buildOpenApiSpec(originOf(req)));
+  });
+```
+
+- [ ] **Step 6：跑測試並實際看一眼**
+
+```bash
+npx tsx poc/verify_pubapi_docs.mts
+npm run build
+npm run dev
+```
+然後開 `http://localhost:8080/api/v1/docs`（**不要帶 API key、用無痕視窗確認沒有登入 cookie 也看得到**），以及 `http://localhost:8080/api/v1/openapi.json`。
+
+檢查點：
+- 無痕視窗打得開，沒有被導去 Google 登入頁
+- 頁面沒有頂部的內部工具導覽列
+- 維度表 11 列、指標表 11 列、錯誤碼表 10 列
+- 深色模式下可讀（切換系統外觀確認）
+
+- [ ] **Step 7：commit**
+
+```bash
+git add src/tools/pubapi/contract.ts src/tools/pubapi/reports.ts src/tools/pubapi/docs.ts src/tools/pubapi/route.ts poc/verify_pubapi_docs.mts
+git commit -m "對外 API：線上公開文件與 OpenAPI 規格（從 contract 常數生成）"
+```
+
+---
+## Task 11：交接
 
 - [ ] **Step 1：更新 CLAUDE.md**
 
@@ -1765,9 +2324,9 @@ git commit -m "對外 API：key 管理頁（核發／授權範圍／停用／刪
 - 驗證：`poc/verify_pubapi_{contract,csv,scope}.mts`（純函式）／`verify_prism_client.mts`（含真 API）／`verify_apikey_store.mts`（需 DB）／`verify_pubapi_e2e.mts`（需 server + DB + token）
 ```
 
-- [ ] **Step 2：寫給客戶看的 API 文件**
+- [ ] **Step 2：確認線上文件已就緒**
 
-新增 `docs/public-api-v1.md`，內容＝本計劃書「對外契約（v1 規格）」那一節，但**拿掉所有內部實作細節**（不要提 P 平台、BigQuery、我們的檔案結構）。要有：端點、認證、請求範例、回應範例、完整欄位表、錯誤碼表、限制。
+給客戶看的文件是 Task 10 生成的線上頁面（`/api/v1/docs`），**不要另外手寫一份 markdown**——手寫的那份一定會跟程式漂移。這一步只需確認：正式站的 `/api/v1/docs` 打得開、內容正確、無痕視窗（無登入 cookie）也看得到。
 
 - [ ] **Step 3：全部測試重跑一次**
 
@@ -1775,6 +2334,7 @@ git commit -m "對外 API：key 管理頁（核發／授權範圍／停用／刪
 npx tsx poc/verify_pubapi_contract.mts
 npx tsx poc/verify_pubapi_csv.mts
 npx tsx poc/verify_pubapi_scope.mts
+npx tsx poc/verify_pubapi_docs.mts
 PRISM_API_TOKEN=… npx tsx poc/verify_prism_client.mts
 npx tsx poc/verify_apikey_store.mts
 npx tsx poc/verify_pubapi_e2e.mts     # 另一個終端機要有 npm run dev
@@ -1799,6 +2359,9 @@ git commit -m "對外 API：CLAUDE.md 章節與對外文件"
 - [ ] 正式站建一把測試 key，確認只查得到授權的廣告主
 - [ ] 確認錯誤回應不含 BigQuery Job ID（拿 `dimensions: ["foo"]` 打一次看看）
 - [ ] 速率限制在多實例下有效（連打超過上限，確認 429）
+- [ ] `/api/v1/docs` 在**無痕視窗**（無登入 cookie、無 API key）打得開，且沒有內部工具導覽列
+- [ ] `/api/v1/openapi.json` 可匯入 Postman，且內容不含資料來源平台字樣
+- [ ] 若不希望文件被搜尋引擎收錄，確認回應含 `X-Robots-Tag: noindex`（程式已設，用 curl -I 驗一次）
 
 ## 已知限制（v1 刻意不做）
 
