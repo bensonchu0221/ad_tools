@@ -7,6 +7,7 @@
 // 注意：token 表放在共用庫 nexus（不是連線預設的 DB_NAME=ad_tools），故查詢一律用 ${TOKENS_DB} 限定；
 // adstream_configs 等本工具自管表仍在 ad_tools（連線預設庫）。同實例跨庫查，popin 有 *.* 權限。
 import mysql from 'mysql2/promise';
+import { createHash, randomBytes } from 'node:crypto';
 
 export interface DAccountRow {
   id: number;
@@ -1222,4 +1223,184 @@ export async function saveQuickLinks(email: string, overlay: QuickLinkOverlay): 
      ON DUPLICATE KEY UPDATE overlay = VALUES(overlay)`,
     [email, json]
   );
+}
+
+// ---------- 對外 API key（api_clients / api_client_scopes / api_key_usage） ----------
+// 三張表都在連線預設庫 ad_tools（nexus 只放跨工具共用的平台 token）。
+// 安全模型：明文 key 只在建立時回傳一次，DB 只存 sha256；之後任何地方都無法還原明文。
+
+export interface ApiScope { platform: 'P' | 'D' | 'R' | 'M'; advertiserId: string; }
+export interface ApiClientRow {
+  id: number;
+  clientName: string;
+  status: 'active' | 'disabled';
+  rateLimitPerMin: number;
+  createdBy: string | null;
+  createdAt: string;
+  scopes: ApiScope[];
+}
+
+let apiKeySchemaReady = false;
+
+async function ensureApiKeySchema(p: mysql.Pool): Promise<void> {
+  if (apiKeySchemaReady) return;
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS api_clients (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      client_name VARCHAR(255) NOT NULL,
+      key_hash CHAR(64) NOT NULL UNIQUE,
+      key_prefix VARCHAR(24) NOT NULL,
+      status VARCHAR(16) NOT NULL DEFAULT 'active',
+      rate_limit_per_min INT NOT NULL DEFAULT 60,
+      created_by VARCHAR(255) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS api_client_scopes (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      client_id INT NOT NULL,
+      platform VARCHAR(4) NOT NULL,
+      advertiser_id VARCHAR(64) NOT NULL,
+      UNIQUE KEY uniq_scope (client_id, platform, advertiser_id)
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  // 速率限制計數：一個 key 一分鐘一列。minute_bucket 格式 'YYYY-MM-DD HH:MM'
+  await p.query(
+    `CREATE TABLE IF NOT EXISTS api_key_usage (
+      client_id INT NOT NULL,
+      minute_bucket VARCHAR(16) NOT NULL,
+      hits INT NOT NULL DEFAULT 0,
+      PRIMARY KEY (client_id, minute_bucket)
+    ) DEFAULT CHARSET=utf8mb4`
+  );
+  apiKeySchemaReady = true;
+}
+
+/** key 明文格式 pk_live_<32 hex>；只在建立時出現一次 */
+export function generateApiKey(): string {
+  return `pk_live_${randomBytes(16).toString('hex')}`;
+}
+
+export function hashApiKey(plain: string): string {
+  return createHash('sha256').update(plain).digest('hex');
+}
+
+export async function createApiClient(input: {
+  clientName: string; rateLimitPerMin?: number; createdBy?: string | null;
+}): Promise<{ id: number; plainKey: string }> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  const plainKey = generateApiKey();
+  const [r] = await p.query(
+    `INSERT INTO api_clients (client_name, key_hash, key_prefix, rate_limit_per_min, created_by)
+     VALUES (?, ?, ?, ?, ?)`,
+    [input.clientName, hashApiKey(plainKey), plainKey.slice(0, 16), input.rateLimitPerMin ?? 60, input.createdBy ?? null]
+  );
+  return { id: (r as any).insertId as number, plainKey };
+}
+
+/** 用明文 key 查客戶（只回 active 的），並帶出授權範圍 */
+export async function findApiClientByKey(plainKey: string): Promise<ApiClientRow | null> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  const [rows] = await p.query(
+    `SELECT id, client_name, status, rate_limit_per_min, created_by, created_at
+     FROM api_clients WHERE key_hash = ? AND status = 'active' LIMIT 1`,
+    [hashApiKey(plainKey)]
+  );
+  const row = (rows as any[])[0];
+  if (!row) return null;
+  return { ...mapApiClient(row), scopes: await getApiClientScopes(row.id) };
+}
+
+function mapApiClient(row: any): Omit<ApiClientRow, 'scopes'> {
+  return {
+    id: row.id,
+    clientName: row.client_name,
+    status: row.status,
+    rateLimitPerMin: row.rate_limit_per_min,
+    createdBy: row.created_by,
+    createdAt: String(row.created_at),
+  };
+}
+
+async function getApiClientScopes(clientId: number): Promise<ApiScope[]> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [rows] = await p.query(
+    `SELECT platform, advertiser_id FROM api_client_scopes WHERE client_id = ? ORDER BY platform, advertiser_id`,
+    [clientId]
+  );
+  return (rows as any[]).map((r) => ({ platform: r.platform, advertiserId: r.advertiser_id }));
+}
+
+export async function listApiClients(): Promise<ApiClientRow[]> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  const [rows] = await p.query(
+    `SELECT id, client_name, status, rate_limit_per_min, created_by, created_at
+     FROM api_clients ORDER BY created_at DESC`
+  );
+  const out: ApiClientRow[] = [];
+  for (const r of rows as any[]) out.push({ ...mapApiClient(r), scopes: await getApiClientScopes(r.id) });
+  return out;
+}
+
+export async function updateApiClient(
+  id: number, patch: { clientName?: string; status?: 'active' | 'disabled'; rateLimitPerMin?: number }
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (patch.clientName !== undefined) { sets.push('client_name = ?'); vals.push(patch.clientName); }
+  if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
+  if (patch.rateLimitPerMin !== undefined) { sets.push('rate_limit_per_min = ?'); vals.push(patch.rateLimitPerMin); }
+  if (!sets.length) return;
+  vals.push(id);
+  await p.query(`UPDATE api_clients SET ${sets.join(', ')} WHERE id = ?`, vals);
+}
+
+export async function deleteApiClient(id: number): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  await p.query(`DELETE FROM api_client_scopes WHERE client_id = ?`, [id]);
+  await p.query(`DELETE FROM api_key_usage WHERE client_id = ?`, [id]);
+  await p.query(`DELETE FROM api_clients WHERE id = ?`, [id]);
+}
+
+/** 整份覆寫授權範圍（不是增量） */
+export async function setApiClientScopes(clientId: number, scopes: ApiScope[]): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  await p.query(`DELETE FROM api_client_scopes WHERE client_id = ?`, [clientId]);
+  if (!scopes.length) return;
+  await p.query(
+    `INSERT INTO api_client_scopes (client_id, platform, advertiser_id) VALUES ${scopes.map(() => '(?,?,?)').join(',')}`,
+    scopes.flatMap((s) => [clientId, s.platform, s.advertiserId])
+  );
+}
+
+/** 累加這一分鐘的呼叫數並回傳累加後的值（原子操作，Cloud Run 多實例安全） */
+export async function bumpApiUsage(clientId: number, now = new Date()): Promise<number> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureApiKeySchema(p);
+  const bucket = now.toISOString().slice(0, 16).replace('T', ' '); // 'YYYY-MM-DD HH:MM'
+  await p.query(
+    `INSERT INTO api_key_usage (client_id, minute_bucket, hits) VALUES (?, ?, 1)
+     ON DUPLICATE KEY UPDATE hits = hits + 1`,
+    [clientId, bucket]
+  );
+  const [rows] = await p.query(
+    `SELECT hits FROM api_key_usage WHERE client_id = ? AND minute_bucket = ?`, [clientId, bucket]
+  );
+  return (rows as any[])[0]?.hits ?? 1;
 }
