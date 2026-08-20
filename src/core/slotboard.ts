@@ -31,6 +31,7 @@ interface BuiltinLink {
 const QUICK_LINKS: BuiltinLink[] = [
   { id: 'b:d-token', name: 'D Token', meta: 'Discovery 帳號管理', href: '/tools/tokens#d', internal: true },
   { id: 'b:mgid-token', name: 'MGID Token', meta: 'MGID 帳號管理', href: '/tools/tokens#mgid', internal: true },
+  { id: 'b:api-keys', name: 'API Key', meta: '對外 API 金鑰管理', href: '/tools/apikeys', internal: true },
   { id: 'b:cmp', name: 'CMP', meta: 'R 大量上傳', href: 'https://cmp.pacnexus.net/cmp' },
   { id: 'b:bh', name: 'Budget Hunter', meta: '神盾追速', href: 'https://cmp.pacnexus.net/bh' },
   { id: 'b:timeoff', name: 'Timeoff', meta: '請假系統', href: 'https://timeoff.pacnexus.net/' },
