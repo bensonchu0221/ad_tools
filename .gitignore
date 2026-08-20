@@ -7,3 +7,4 @@ poc/
 *.mhtml
 ad-tools-ico.png
 ad-tools-ico.ico
+.claude/settings.local.json
