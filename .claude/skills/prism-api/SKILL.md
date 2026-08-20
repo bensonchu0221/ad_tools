@@ -98,12 +98,45 @@ received_at BETWEEN TIMESTAMP('{start} 00:00:00','Asia/Taipei') AND TIMESTAMP('{
 | `spend` | 非 cpc：Σ`bid_cpm`/1000（每次曝光）＋ cpc：Σ`bid_cpc`（每次點擊） | 有浮點尾差，自行 round |
 | `viewable_impressions` | `COUNTIF(event_name='viewable')` | 實測 31570/39315 |
 | `viewability` | `SAFE_DIVIDE(viewable, impressions)` | 小數（實測 0.803） |
-| `view_25` `view_50` `view_75` `view_100` | `COUNTIF(event_name='25%view')` 等 | **實測全為 0**（影音事件目前沒在打） |
-| `vtr` | `SAFE_DIVIDE(view_100, impressions)` | 同上，實測 0.0 |
+| `view_25` `view_50` `view_75` `view_100` | `COUNTIF(event_name='25%view')` 等 | **有在打點**，但只有影音素材的廣告主有值 |
+| `vtr` | `SAFE_DIVIDE(view_100, impressions)` | 同上（安達人壽實測 41.9%） |
 
 **不存在**（14 個實測皆被靜默忽略）：`cost` `conversions` `cvr` `cpc` `cpm` `cpa` `revenue` `views` `video_views` `completions` `reach` `frequency` `engagements` `installs`。
 
-⇒ **P 平台沒有任何轉換指標**。要併進 tool#2 的 cv1~cv4 桶，P 只能補 0。`cpc`/`cpm` 也沒有，要自己用 `spend`/`clicks`、`spend`/`impressions` 算。
+`cpc`/`cpm` 自己用 `spend`/`clicks`、`spend`/`impressions` 算即可。
+
+### ⚠️ 影音指標要看廣告主，不是「沒在打點」
+
+`25%view`~`100%view` 事件確實有在寫入（2026-05-28 起，全表 23~36 萬筆／檔），但**只有跑影音素材的廣告主有值**：
+
+| 廣告主 | impressions | 25%view | 100%view | VTR |
+|---|---|---|---|---|
+| 安達人壽 `464-144-2909` | 540,360 | 355,552 | 226,407 | **41.9%** |
+| 安達人壽 `114-232-5873` | 32,710 | 11,935 | 7,258 | 22.2% |
+| 國泰航空 `233-688-3595` | 3,289,386 | 0 | 0 | 0 |
+| Coupang_Ads `292-462-3142` | 2,899,448 | 0 | 0 | 0 |
+
+⇒ 拿國泰航空或 Coupang 試 `vtr` 會全 0，那是**該廣告主沒有影音素材**，不是 API 壞掉。
+
+### ⚠️ 轉換：事件根本不存在，儀表板的 CVR 恆為 0
+
+`prism_events` 全表（2026-01-01~08-21）**沒有任何 `conversion` 事件**。相關現況：
+
+- 儀表板程式有讀 `event_name == 'conversion'` 並算 `cvr = conversions/clicks*100`（`app.py:2042`、`:2276`），但**全 repo 沒有任何地方寫入這個事件**，也沒有 `/api/track/conversion` 端點 ⇒ **後台看到的轉換與 CVR 永遠是 0**，是未完成的功能
+- 就算 `metric_map` 補上 conversions 也沒用：報表 SQL 的 `event_name IN (...)` 白名單也沒列 `conversion`，**兩個地方都要改**
+
+⇒ 併進 tool#2 的 cv1~cv4 桶時，P 只能補 0——而且這不是 API 限制，是**平台還沒有轉換追蹤**。
+
+### 事件表裡有、但報表 API 不給的兩個大宗
+
+| event_name | 筆數（2026-06-01~08-20） | 用途 |
+|---|---|---|
+| `widget_load` | 97,601,945 | 版位載入 |
+| `ad_response` | 97,566,846 | 有回廣告 |
+
+兩者都不在報表 SQL 的 `event_name IN (...)` 白名單裡 ⇒ **API 拿不到**。有了它們才能算 **fill rate**（`ad_response`/`widget_load`）與真實曝光率（`impression`/`ad_response`，實測量級落差約 14 倍）。要這些數字目前只能直接查 BigQuery。
+
+另注意表裡有髒事件名：`www.google.com`（18 筆，2026-07-06~08-05）。
 
 ## ⚠️⚠️ 最危險的行為：不合法欄位「有時靜默吞掉、有時 500」
 
@@ -258,6 +291,7 @@ curl -sS -X POST 'https://ads.pacplatform.net/api/external/reports/generate' \
 
 ## 給平台方的修正建議（依嚴重度）
 
+0. **轉換追蹤沒有實作**：儀表板顯示轉換數與 CVR，但沒有任何程式寫入 `conversion` 事件，數字恆為 0。要嘛補上追蹤（端點＋報表兩處白名單），要嘛先把 UI 該欄位隱藏，避免業務誤讀成「真的沒轉換」。
 1. **不合法的 dimension/metric 應回 400 並列出合法值**，而不是靜默跳過或噴 BigQuery 錯誤。這是目前最容易讓使用者拿到錯報表的地方。
 2. **`group_cols.append(str(i + 1))` 是 bug**：`i` 是「請求陣列」的索引，應改成 `select_cols` 的實際位置（或直接改用欄位別名 `GROUP BY date, device`）。修好第 1 點後這個 bug 自然消失。
 3. **`advertiser_ids` 與 `start_date`/`end_date` 是字串直接串進 SQL**（`f"'{x}'"`、`TIMESTAMP('{start_date} ...')`），沒有跳脫也沒有參數化。dimensions/metrics 走白名單是安全的，但這三個不是——建議改用 BigQuery 的 query parameters。**我沒有做任何注入嘗試去驗證可利用性，這是從原始碼讀出來的。**
@@ -269,5 +303,6 @@ curl -sS -X POST 'https://ads.pacplatform.net/api/external/reports/generate' \
 
 - **限流**：本次共約 50 發請求未遇到 429。不代表沒有，大量回補前先小量試
 - **`viewable` 事件的判定標準**（是否 IAB 50%×1s）：要看打點端而非本 API
+- **`widget_load` / `ad_response` 與 `impression` 量級差 14 倍**的原因（no-fill？未曝光？重複計數？）未查
 - **同區間重複請求的數字穩定性**（是否會回填修正）未測
 - `/api/external/` 底下是否還有其他端點（只確認 `reports/generate`）
