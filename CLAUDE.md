@@ -6,6 +6,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#3＝AdStream（廣告凝視者）：多 D／R／MGID 帳戶 bulk 原始報表定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw；另有 integrated／device_summary 整合分頁。
 - tool#4＝資源看板（GCP Watch）：GCP 專案 popinpoc1 的 Memorystore Redis／Cloud SQL 用量即時監看，唯讀 Cloud Monitoring。2026-08-17 建立（起因：Redis 用滿導致爬蟲寫不進去，事後才發現）。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
+- 對外報表 API（v1，`/api/v1`）：給外部客戶／廣告主的統一報表 API，v1 資料源只有 P 平台；客戶文件 `/api/v1/docs`、核發 `/tools/apikeys`
 
 ## 溝通與程式規範
 - 一律使用繁體中文回答；重要業務邏輯加中文註解
@@ -106,9 +107,21 @@ popin 內部工具集（取代舊 dctool）。
 - `/health/db?key=...`：token DB 與舊庫同步狀態
 - `/tools/adstream/cron?key=...`：AdStream 排程入口（Cloud Scheduler `adstream-daily` POST）
 - `/tools/adstream/worker/cron?key=...`：AdStream 單設定 worker（Cloud Scheduler `adstream-worker` 每分鐘 POST；一次原子認領一筆）
-- **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
+- **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron、`/api/v1`）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.startsWith('/api/v1')`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
+
+## 對外報表 API 核心（v1，`/api/v1`，`src/tools/pubapi/`）
+- 目的：給**外部客戶／廣告主**的統一報表 API。v1 資料源只有 P 平台，契約設計成之後可加 D/R/M（對外名與平台原生名分離）
+- 認證＝`Authorization: Bearer pk_live_*`，表 `api_clients`(key 只存 sha256)／`api_client_scopes`(一 client 一平台一廣告主)／`api_key_usage`(每分鐘計數)，皆在 `ad_tools` 庫。核發走 `/tools/apikeys`
+- 客戶文件＝`/api/v1/docs`（無登入、從 `contract.ts` 常數生成 HTML＋`/api/v1/openapi.json`）；給客戶看的只有這份，不要另寫平行 markdown
+- **⚠️ `/api/v1` 必須在 `auth.ts` 的 OAuth 白名單**，否則外部呼叫會被 302 導去登入頁（同 `/cron` 的坑）
+- **⚠️ 安全邊界在 `pubapi/scope.ts`**：P 平台的 token 是全域的、省略 `advertiser_ids` 會回全部廣告主，故**永不透傳客戶傳來的值**，一律與該 key 的授權取交集
+- **P 的坑都在 `pubapi/contract.ts` 擋掉**：P 對不合法欄位是「排後面靜默丟棄、排前面回 500 並吐 BigQuery 錯誤」，我們用白名單先擋，不合法的根本不送出去（詳見 skill `prism-api`）
+- v1 刻意**不開放 `domain`／`slot`**（媒體與版位，商業敏感）、**不放轉換指標**（P 平台沒有 conversion 事件）
+- 上限：日期區間 400 天、單次 50000 列、per-key 每分鐘 60 次（可個別調整）
+- 驗證：`poc/verify_pubapi_{contract,csv,scope,docs}.mts`（純函式）／`verify_prism_client.mts`（含真 API）／`verify_apikey_store.mts`（需 DB）／`verify_pubapi_e2e.mts`（需 server + DB + token）
 
 ## 待辦
+- **對外報表 API（v1，2026-08-20）本機全綠、線上待驗**：本機純函式＋e2e（無 `PRISM_API_TOKEN` 時略過真查詢／CSV）＋tsc 過。**push main 才部署**。上線前：①`PRISM_API_TOKEN` 進 Secret Manager 並掛 `cloudbuild.yaml`（目前尚未掛，不掛則 `/reports` 真查詢必 502）②正式站 `/api/v1/meta` 不帶 key 回 401 不是 302 ③建測試 key 只查得到授權廣告主 ④壞維度錯誤不含 BigQuery Job ID ⑤多實例連打超上限回 429 ⑥無痕視窗打得開 `/api/v1/docs`（無內部導覽）⑦`/api/v1/openapi.json` 可匯入 Postman、不含平台字樣 ⑧回應含 `X-Robots-Tag: noindex`
 - **資源看板（tool#4，2026-08-17）本機全綠、線上待驗**：本機真 API 端到端過（三台 Redis／兩台 SQL 都有值、144 點趨勢、hover 正常、console 無錯）。**線上待驗**：①Cloud Run SA 打 Memorystore／sqladmin／Monitoring 三支 API 是否都通（本機是使用者憑證，線上是 SA；理論上 roles/editor 夠，但沒實跑過）；②頁面 60 秒自動更新有沒有真的動；③首頁版位卡進得去。**後續可加**：告警（Cloud Scheduler 每小時檢查 + Slack/Email，使用者這次選純看板先不做）、Cloud Run 5xx（第一版刻意不收）
 - **週報隨機調整模式（2026-07-22）本機全綠、線上端到端待驗**：離線 8 支迴歸全過（`verify_weekly_adjust`/`split_equiv`/`preview` 及既有 5 支未回歸）＋自包含頁面視覺檢視（CPC/CTR 落在區間、裝置 Tablet/Others 零花費維持 0、Raw 寬表橫向捲動）；DB 冒煙過（awaiting_adjustment/adjust_json/requeue）。**線上待驗**：①表單勾「隨機調整」跑一個小帳號短區間 → cron 觸發後佇列顯示「待調整」；②進調整頁填 CPC/CTR 生成預覽 → 7 表數字合理、Raw spend 與抓取一致；③「重抽」數字變、同參數同 seed 重現；④「產出」下載 xlsx 與預覽逐格一致、`weekly_snapshots` 無新列；⑤「再調整」覆寫同檔；⑥「重新抓取」回佇列重跑、adjust_json 預填保留；⑦刪 GCS `weekly/{id}/raw.json` 模擬逾期 → 預覽報「請按重新抓取」。⚠️ bucket lifecycle 需確認有「weekly/ 前綴 14 天」規則涵蓋 raw.json
 - **AdStream MGID 串接（2026-07-10）本機資料層已驗（真 API 抓取＋欄位對齊＋cv/imp 守恆全過），線上端到端待驗**：①在設定加 MGID 帳號＋把 conv_interest/decision/buy 拖進 cv 桶 → 跑一次確認 `m_bulk_raw_data` 有 24 欄、`integrated` 出現 platform=M 列、`device_summary` MGID 裝置有併入；②清單「訊息」欄會顯示「MGID N 列（帳號:列數）」，`MGID 0 列`＝帳號無資料或 token 問題；③重抓昨天多來源下拉新增「只重抓 MGID」。注意 4A 兩帳號(默沙東/黑松)近期 0 投放屬正常
