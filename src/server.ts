@@ -14,6 +14,7 @@ import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.
 import { registerTokens } from './tools/tokens/route.js';
 import { registerAdstreamLab } from './tools/adstream-lab/route.js'; // 視覺重新設計實驗頁，先不上首頁選單，僅供直接網址訪問
 import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.js';
+import { registerPubApi } from './tools/pubapi/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
@@ -109,6 +110,7 @@ await registerAdstream(app);
 await registerTokens(app);
 await registerAdstreamLab(app);
 await registerGcpWatch(app);
+await registerPubApi(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));
