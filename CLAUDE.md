@@ -112,6 +112,7 @@ popin 內部工具集（取代舊 dctool）。
 ## 對外報表 API 核心（v1，`/api/v1`，`src/tools/pubapi/`）
 - 目的：給**外部客戶／廣告主**的統一報表 API。v1 資料源只有 P 平台，契約設計成之後可加 D/R/M（對外名與平台原生名分離）
 - 認證＝`Authorization: Bearer pk_live_*`，表 `api_clients`(key 只存 sha256)／`api_client_scopes`(一 client 一平台一廣告主)／`api_key_usage`(每分鐘計數)，皆在 `ad_tools` 庫。核發走 `/tools/apikeys`
+- **⚠️ 核發後明文用 HttpOnly flash cookie 帶到下一頁，redirect Location 只有路徑**。不可改回 `?new_key=`：query 會進 Fastify `req.url`、Cloud Run `httpRequest.requestUrl`、瀏覽器歷史與 Referer
 - 客戶文件＝`/api/v1/docs`（無登入、從 `contract.ts` 常數生成 HTML＋`/api/v1/openapi.json`）；給客戶看的只有這份，不要另寫平行 markdown
 - **⚠️ `/api/v1` 必須在 `auth.ts` 的 OAuth 白名單**，否則外部呼叫會被 302 導去登入頁（同 `/cron` 的坑）
 - **⚠️ 安全邊界在 `pubapi/scope.ts`**：P 平台的 token 是全域的、省略 `advertiser_ids` 會回全部廣告主，故**永不透傳客戶傳來的值**，一律與該 key 的授權取交集

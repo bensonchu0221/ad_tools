@@ -10,6 +10,51 @@ import {
 
 export const BASE_PATH = '/tools/apikeys';
 
+// 明文 key 用一次性 HttpOnly cookie 帶到下一頁，絕不能放進 redirect URL。
+// query string 會進 Fastify access log 的 req.url、Cloud Run 的 httpRequest.requestUrl，
+// 以及瀏覽器歷史／後續點擊的 Referer——等於明文寫進持久化 log。
+export const FLASH_COOKIE = 'apikey_flash';
+const FLASH_MAX_AGE = 120; // 秒；夠跟完 302，逾時就不顯示
+const KEY_RE = /^pk_live_[0-9a-f]{32}$/;
+
+export function setFlashCookieHeader(plainKey: string, secure: boolean): string {
+  const parts = [
+    `${FLASH_COOKIE}=${encodeURIComponent(plainKey)}`,
+    `Path=${BASE_PATH}`,
+    'HttpOnly',
+    'SameSite=Strict',
+    `Max-Age=${FLASH_MAX_AGE}`,
+  ];
+  if (secure) parts.push('Secure');
+  return parts.join('; ');
+}
+
+export function clearFlashCookieHeader(secure: boolean): string {
+  const parts = [
+    `${FLASH_COOKIE}=`,
+    `Path=${BASE_PATH}`,
+    'HttpOnly',
+    'SameSite=Strict',
+    'Max-Age=0',
+  ];
+  if (secure) parts.push('Secure');
+  return parts.join('; ');
+}
+
+/** 只接受本系統核發的 key 格式，其他 cookie 值一律當沒有（避免把任意內容灌進 HTML） */
+export function readFlashCookie(cookieHeader: string | undefined): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (name !== FLASH_COOKIE) continue;
+    const value = decodeURIComponent(part.slice(eq + 1).trim());
+    return KEY_RE.test(value) ? value : null;
+  }
+  return null;
+}
+
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -57,7 +102,7 @@ function clientRows(rows: ApiClientRow[]): string {
 }
 
 function page(rows: ApiClientRow[], newKey?: string): string {
-  // 新建立的 key 只在這一次的頁面呈現；重新整理就不見了
+  // 新建立的 key 只在這一次的頁面呈現（讀完 flash cookie 立刻清掉）；重新整理就不見了
   const keyBanner = newKey
     ? `<div class="msg msg-ok" style="margin-top:24px">
          <b>已建立。請立刻複製保存，關閉後無法再查看：</b>
@@ -96,9 +141,12 @@ function page(rows: ApiClientRow[], newKey?: string): string {
 
 export async function registerApiKeys(app: FastifyInstance): Promise<void> {
   app.get(BASE_PATH, async (req, reply) => {
-    const newKey = (req.query as any)?.new_key as string | undefined;
+    const secure = req.protocol === 'https';
+    // 刻意不讀 URL query：舊書籤若把明文當參數帶來，也不能再顯示（那條路就是 log 外洩）
+    const newKey = readFlashCookie(req.headers.cookie);
+    if (newKey) reply.header('Set-Cookie', clearFlashCookieHeader(secure));
     try {
-      reply.type('text/html').send(page(await listApiClients(), newKey));
+      reply.type('text/html').send(page(await listApiClients(), newKey ?? undefined));
     } catch (e: any) {
       reply.type('text/html').send(noticePage(String(e?.message ?? e)));
     }
@@ -110,14 +158,16 @@ export async function registerApiKeys(app: FastifyInstance): Promise<void> {
     if (!clientName) return reply.type('text/html').send(noticePage('客戶名稱必填'));
     const rate = Number(b.rate_limit_per_min ?? 60);
     try {
-      // 建立者取自登入身分，不信任表單傳來的值
+      // 建立者取自登入身分，不信任表單傳來的 email
       const created = await createApiClient({
         clientName,
         rateLimitPerMin: Number.isFinite(rate) && rate > 0 ? Math.floor(rate) : 60,
         createdBy: currentUser(req) ?? null,
       });
-      // 明文 key 只透過這一次 redirect 呈現，不寫入任何持久化位置
-      reply.redirect(`${BASE_PATH}?new_key=${encodeURIComponent(created.plainKey)}`);
+      // Location 只有路徑，明文走 Set-Cookie（HttpOnly、兩分鐘、讀完即清）
+      reply
+        .header('Set-Cookie', setFlashCookieHeader(created.plainKey, req.protocol === 'https'))
+        .redirect(BASE_PATH);
     } catch (e: any) {
       reply.type('text/html').send(noticePage(String(e?.message ?? e)));
     }
