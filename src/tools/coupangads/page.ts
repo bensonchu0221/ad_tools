@@ -6,6 +6,7 @@ import { sbPage } from '../../core/sbui.js';
 // 配色經 dataviz validator 驗過（light/#FFFFFF：CVD ΔE 29.1、normal 40.8、對比 ≥3:1 全 PASS）。
 const C_SPEND = '#FF5436';  // 花費＝Slot Board accent
 const C_COMM = '#2563EB';   // 佣金
+const C_CTR = '#0E9F6E';    // CTR（獨立一張圖，單位是 % 不能與金額同軸）
 
 const STYLE = `
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:18px 0}
@@ -26,7 +27,7 @@ const STYLE = `
   .lg{display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:8px}
   .lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
   .plot{position:relative}
-  .plot svg{display:block;width:100%;height:230px}
+  .plot svg{display:block;width:100%}
   .tip{position:absolute;pointer-events:none;background:var(--ink);color:#fff;font-size:11.5px;line-height:1.5;padding:7px 9px;border-radius:5px;white-space:nowrap;opacity:0;transition:opacity .1s;z-index:3}
   .tip b{font-weight:600}
   .tip .r{display:flex;justify-content:space-between;gap:12px;font-variant-numeric:tabular-nums}
@@ -82,18 +83,30 @@ const BODY = `
       <span id="chart-note"></span>
     </div>
     <div class="plot" id="plot">
-      <svg id="svg" preserveAspectRatio="none"></svg>
+      <svg id="svg"></svg>
       <div class="tip" id="tip"></div>
     </div>
   </div>
 
+  <div class="panel" style="margin-top:14px">
+    <div class="lg">
+      <span><i style="background:${C_CTR}"></i>CTR（點擊 ÷ 曝光）</span>
+      <span class="spacer"></span>
+      <span id="ctr-note"></span>
+    </div>
+    <div class="plot" id="plot2">
+      <svg id="svg2"></svg>
+      <div class="tip" id="tip2"></div>
+    </div>
+  </div>
+
   <div class="sec">
-    <h2>投放中的商品 <span id="pcount" class="muted"></span></h2>
+    <h2>投放中的商品 <span id="pcount" class="muted"></span> <span class="muted" style="text-transform:none;letter-spacing:0">· 依 CTR 由高到低</span></h2>
     <div class="panel" style="padding:0;overflow-x:auto">
       <table class="tb" id="tbl">
         <thead><tr>
           <th style="width:66px">素材</th><th>商品</th>
-          <th class="n hide-s">曝光</th><th class="n">點擊</th><th class="n">花費</th>
+          <th class="n hide-s">曝光</th><th class="n">點擊</th><th class="n">CTR</th><th class="n">花費</th>
           <th class="n">訂單</th><th class="n hide-s">GMV</th><th class="n">佣金</th><th class="n">ROI</th>
           <th class="n">日預算</th><th>狀態</th>
         </tr></thead>
@@ -113,11 +126,12 @@ const BODY = `
 `;
 
 const SCRIPT = `
-const C_SPEND=${JSON.stringify(C_SPEND)}, C_COMM=${JSON.stringify(C_COMM)};
+const C_SPEND=${JSON.stringify(C_SPEND)}, C_COMM=${JSON.stringify(C_COMM)}, C_CTR=${JSON.stringify(C_CTR)};
 let days=7, data=null;
 const $=(s)=>document.querySelector(s);
 const nf=(n,d=0)=>Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d});
 const money=(n)=>'NT$'+nf(n,0);
+const pct=(v)=>v==null?'—':(v*100).toFixed(2)+'%';
 
 async function load(){
   $('#chart-note').textContent='讀取中…';
@@ -135,6 +149,7 @@ function render(){
   const t=data.totals;
   $('#kpis').innerHTML=[
     ['投放中商品','hero',data.running+' 檔','共 '+data.products.length+' 個廣告群組'],
+    ['CTR','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
     ['聯盟淨佣金','',money(t.commission),'已扣退貨取消'],
     ['廣告花費','',money(t.spend),'日預算合計 '+money(t.dayBudget)],
     ['ROI','',t.roi==null?'—':(t.roi*100).toFixed(0)+'%',t.roi==null?'尚無花費':'佣金 ÷ 花費'],
@@ -155,79 +170,92 @@ function render(){
       '<td>'+(p.imageUrl?'<img loading="lazy" src="'+esc(p.imageUrl)+'" alt="">':'')+'</td>'+
       '<td><div class="nm">'+(p.landingUrl?'<a href="'+esc(p.landingUrl)+'" target="_blank" rel="noopener">'+esc(p.title||p.productId)+'</a>':esc(p.title||p.productId))+'</div>'+
         '<div class="muted" style="font-size:11px">'+esc(p.productId)+'</div></td>'+
-      '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n">'+money(p.spend)+'</td>'+
+      '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n"><b>'+pct(p.ctr)+'</b></td><td class="n">'+money(p.spend)+'</td>'+
       '<td class="n">'+nf(p.orders)+'</td><td class="n hide-s">'+money(p.gmv)+'</td><td class="n">'+money(p.commission)+'</td>'+
       '<td class="n">'+(p.roi==null?'—':(p.roi*100).toFixed(0)+'%')+'</td>'+
       '<td class="n">'+money(p.dayBudget)+'</td>'+
       '<td><span class="pill '+(p.active&&p.hasCreative!==false?'on':'off')+'">'+(p.active?'投放中':'暫停')+'</span></td>';
     tb.appendChild(tr);
   }
-  if(!data.products.length) tb.innerHTML='<tr><td colspan="11" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
-  drawChart();
+  if(!data.products.length) tb.innerHTML='<tr><td colspan="12" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
+  drawCharts();
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
 
-// ── 折線圖：兩系列同單位（台幣）共用一條 y 軸；座標依容器實際寬度計算（不縮放 SVG，圓點才不會被拉成橢圓）
-function drawChart(){
-  const svg=$('#svg'), plot=$('#plot'), d=data.daily;
-  const W=plot.clientWidth||720, H=230, L=52, R=14, T=14, B=28;
+// ── 折線圖：座標依容器實際寬度算（不縮放 SVG，圓點才不會被拉成橢圓）。
+// 金額（佣金／花費）同單位＝共用一張圖的一條 y 軸；CTR 是百分比 → **另開一張圖，不做雙軸**。
+function renderPlot(o){
+  const svg=document.querySelector(o.svg), host=document.querySelector(o.host), tip=document.querySelector(o.tip);
+  const d=data.daily;
+  const W=host.clientWidth||720, H=o.height||230, L=52, R=14, T=14, B=28;
   svg.setAttribute('viewBox','0 0 '+W+' '+H);
-  svg.removeAttribute('preserveAspectRatio');
+  svg.style.height=H+'px';
   const iw=W-L-R, ih=H-T-B;
-  const max=Math.max(0,...d.map(x=>Math.max(x.commission,x.spend)));
-  const nice=max<=0?4:niceMax(max);
+  const vals=[]; for(const row of d) for(const s2 of o.series){ const v=row[s2.key]; if(v!=null) vals.push(v); }
+  const max=vals.length?Math.max(...vals):0;
+  const nice=max<=0?(o.zeroMax||4):niceMax(max);
   const step=nice/4;
-  const fmtY=(v)=>v>=1000?(v/1000).toFixed(1)+'k':(step<1?v.toFixed(1):v.toFixed(0));
   const X=i=>L+(d.length<=1?iw/2:iw*i/(d.length-1));
   const Y=v=>T+ih-(v/nice)*ih;
-  const line=(key)=>d.map((x,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(x[key]).toFixed(1)).join(' ');
   let g='';
-  // 網格與 y 軸刻度（recessive）
   for(let i=0;i<=4;i++){
     const v=nice*i/4, y=Y(v);
     g+='<line x1="'+L+'" y1="'+y.toFixed(1)+'" x2="'+(W-R)+'" y2="'+y.toFixed(1)+'" stroke="var(--line2)" stroke-width="1"/>'+
-       '<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--mut)">'+fmtY(v)+'</text>';
+       '<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="var(--mut)">'+o.fmtAxis(v,step)+'</text>';
   }
-  // x 軸日期（頭、中、尾）
   [0,Math.floor((d.length-1)/2),d.length-1].filter((v,i,a)=>a.indexOf(v)===i&&v>=0).forEach(i=>{
     g+='<text x="'+X(i).toFixed(1)+'" y="'+(H-9)+'" text-anchor="middle" font-size="10.5" fill="var(--mut)">'+(d[i]?d[i].date.slice(5):'')+'</text>';
   });
-  g+='<path d="'+line('spend')+'" fill="none" stroke="'+C_SPEND+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-  g+='<path d="'+line('commission')+'" fill="none" stroke="'+C_COMM+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-  // 末點直接標記（每點都標數字＝噪音，只標最後一點）
-  if(d.length){
-    const i=d.length-1;
-    for(const [k,c] of [['spend',C_SPEND],['commission',C_COMM]]){
-      g+='<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(d[i][k]).toFixed(1)+'" r="4.5" fill="'+c+'" stroke="var(--slot)" stroke-width="2"/>';
-    }
+  // 折線：null 值＝斷點（無曝光的日子不能畫成 0%）
+  for(const s2 of o.series){
+    let path='', open=false, last=-1;
+    d.forEach((row,i)=>{
+      const v=row[s2.key];
+      if(v==null){ open=false; return; }
+      path+=(open?'L':'M')+X(i).toFixed(1)+' '+Y(v).toFixed(1)+' '; open=true; last=i;
+    });
+    if(path) g+='<path d="'+path.trim()+'" fill="none" stroke="'+s2.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+    // 只標最後一個有值的點（每點都標數字＝噪音）
+    if(last>=0) g+='<circle cx="'+X(last).toFixed(1)+'" cy="'+Y(d[last][s2.key]).toFixed(1)+'" r="4.5" fill="'+s2.color+'" stroke="var(--slot)" stroke-width="2"/>';
   }
-  if(max<=0){
-    g+='<text x="'+(L+iw/2)+'" y="'+(T+ih/2)+'" text-anchor="middle" font-size="12.5" fill="var(--mut)">這段期間尚無花費與佣金數據</text>';
-  }
-  g+='<line id="cross" x1="0" y1="'+T+'" x2="0" y2="'+(T+ih)+'" stroke="var(--ink)" stroke-width="1" opacity="0"/>';
+  if(max<=0) g+='<text x="'+(L+iw/2)+'" y="'+(T+ih/2)+'" text-anchor="middle" font-size="12.5" fill="var(--mut)">'+o.emptyText+'</text>';
+  g+='<line class="cross" x1="0" y1="'+T+'" x2="0" y2="'+(T+ih)+'" stroke="var(--ink)" stroke-width="1" opacity="0"/>';
   svg.innerHTML=g;
 
-  // hover：十字線 + tooltip
-  const tip=$('#tip'), cross=svg.querySelector('#cross');
+  const cross=svg.querySelector('.cross');
   svg.onmousemove=(e)=>{
     const rect=svg.getBoundingClientRect();
-    const x=e.clientX-rect.left;
-    let i=Math.round((x-L)/(iw/Math.max(1,d.length-1)));
+    let i=Math.round((e.clientX-rect.left-L)/(iw/Math.max(1,d.length-1)));
     i=Math.max(0,Math.min(d.length-1,i));
     const row=d[i]; if(!row) return;
     cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity','.25');
-    tip.innerHTML='<b>'+row.date+'</b>'+
-      '<div class="r"><span>佣金</span><span>'+money(row.commission)+'</span></div>'+
-      '<div class="r"><span>花費</span><span>'+money(row.spend)+'</span></div>'+
-      '<div class="r"><span>點擊</span><span>'+nf(row.click)+'</span></div>'+
-      '<div class="r"><span>訂單</span><span>'+nf(row.orders)+'</span></div>';
+    tip.innerHTML='<b>'+row.date+'</b>'+o.tipRows(row).map(([k,v])=>'<div class="r"><span>'+k+'</span><span>'+v+'</span></div>').join('');
     tip.style.opacity='1';
     const tw=tip.offsetWidth;
     tip.style.left=Math.min(Math.max(0,X(i)-tw/2),W-tw)+'px';
     tip.style.top='8px';
   };
   svg.onmouseleave=()=>{ tip.style.opacity='0'; cross.setAttribute('opacity','0'); };
+}
+
+function drawCharts(){
+  renderPlot({
+    svg:'#svg', host:'#plot', tip:'#tip',
+    series:[{key:'spend',color:C_SPEND},{key:'commission',color:C_COMM}],
+    fmtAxis:(v,step)=>v>=1000?(v/1000).toFixed(1)+'k':(step<1?v.toFixed(1):v.toFixed(0)),
+    emptyText:'這段期間尚無花費與佣金數據',
+    tipRows:(r)=>[['佣金',money(r.commission)],['花費',money(r.spend)],['點擊',nf(r.click)],['訂單',nf(r.orders)]],
+  });
+  renderPlot({
+    svg:'#svg2', host:'#plot2', tip:'#tip2', height:180,
+    series:[{key:'ctr',color:C_CTR}],
+    zeroMax:0.02, // 沒資料時軸給 0~2%，才不會出現 0/0/0/0 的假刻度
+    fmtAxis:(v,step)=>(v*100).toFixed(step*100<1?2:1)+'%', // 小數位由刻度間距決定，整條軸才會一致
+    emptyText:'這段期間尚無曝光，算不出 CTR',
+    tipRows:(r)=>[['CTR',pct(r.ctr)],['點擊',nf(r.click)],['曝光',nf(r.imp)]],
+  });
+  document.querySelector('#ctr-note').textContent='整體 '+pct(data.totals.ctr);
 }
 
 function niceMax(v){
@@ -264,7 +292,7 @@ $('#btn-sync').onclick=async()=>{
   b.disabled=false; b.textContent='立即同步';
   load(); loadLogs();
 };
-window.addEventListener('resize',()=>{ if(data) drawChart(); });
+window.addEventListener('resize',()=>{ if(data) drawCharts(); });
 load(); loadLogs();
 `;
 

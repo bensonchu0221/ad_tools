@@ -12,6 +12,7 @@ export interface DailyRow {
   spend: number;       // R 廣告花費
   imp: number;
   click: number;       // R 點擊
+  ctr: number | null;  // 點擊 ÷ 曝光；無曝光時 null（畫圖時斷點，不是 0）
   commission: number;  // Coupang 淨佣金（已扣取消）
   coupangClick: number;
   orders: number;
@@ -28,6 +29,7 @@ export interface ProductRow {
   active: boolean;
   imp: number;
   click: number;
+  ctr: number | null; // 點擊 ÷ 曝光；無曝光時 null
   spend: number;
   orders: number;
   gmv: number;
@@ -39,7 +41,7 @@ export interface StatsResult {
   range: { sd: string; ed: string };
   campaignId: number | null;
   running: number;
-  totals: { spend: number; imp: number; click: number; commission: number; gmv: number; orders: number; roi: number | null; dayBudget: number };
+  totals: { spend: number; imp: number; click: number; ctr: number | null; commission: number; gmv: number; orders: number; roi: number | null; dayBudget: number };
   daily: DailyRow[];
   products: ProductRow[];
   warnings: string[];
@@ -69,6 +71,16 @@ export function enumDays(sd: string, ed: string): string[] {
 export function normDate(v: string | number): string {
   const s = String(v ?? '').replace(/-/g, '');
   return s.length === 8 ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : String(v ?? '');
+}
+
+/** CTR＝點擊 ÷ 曝光。**無曝光回 null 不是 0**——0% 會讓「還沒開始跑」與「跑了沒人點」混為一談。 */
+export function ctrOf(imp: number, click: number): number | null {
+  return imp > 0 ? click / imp : null;
+}
+
+/** 商品排序鍵：CTR 高者在前，無 CTR（無曝光）沉底；同 CTR 再比佣金、花費。 */
+export function compareByCtr(a: { ctr: number | null; commission: number; spend: number }, b: { ctr: number | null; commission: number; spend: number }): number {
+  return (b.ctr ?? -1) - (a.ctr ?? -1) || b.commission - a.commission || b.spend - a.spend;
 }
 
 /** 從 subId 反解 productId（不是我們發的就回 null）。 */
@@ -111,10 +123,10 @@ export async function buildStats(days = 7): Promise<StatsResult> {
 
   // ---- 聚合 ----
   const dayMap = new Map<string, DailyRow>();
-  for (const d of enumDays(sd, ed)) dayMap.set(d, { date: d, spend: 0, imp: 0, click: 0, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
+  for (const d of enumDays(sd, ed)) dayMap.set(d, { date: d, spend: 0, imp: 0, click: 0, ctr: null, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
   const touch = (d: string) => {
     const k = normDate(d);
-    if (!dayMap.has(k)) dayMap.set(k, { date: k, spend: 0, imp: 0, click: 0, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
+    if (!dayMap.has(k)) dayMap.set(k, { date: k, spend: 0, imp: 0, click: 0, ctr: null, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
     return dayMap.get(k)!;
   };
 
@@ -130,12 +142,12 @@ export async function buildStats(days = 7): Promise<StatsResult> {
       landingUrl: p.landingUrl ?? '',
       dayBudget: p.dayBudget,
       active: p.active,
-      imp: 0, click: 0, spend: 0, orders: 0, gmv: 0, commission: 0, roi: null,
+      imp: 0, click: 0, ctr: null, spend: 0, orders: 0, gmv: 0, commission: 0, roi: null,
     });
   }
   const prod = (pid: string): ProductRow => {
     if (!prodMap.has(pid)) {
-      prodMap.set(pid, { productId: pid, groupId: 0, title: '', imageUrl: '', landingUrl: '', dayBudget: 0, active: false, imp: 0, click: 0, spend: 0, orders: 0, gmv: 0, commission: 0, roi: null });
+      prodMap.set(pid, { productId: pid, groupId: 0, title: '', imageUrl: '', landingUrl: '', dayBudget: 0, active: false, imp: 0, click: 0, ctr: null, spend: 0, orders: 0, gmv: 0, commission: 0, roi: null });
     }
     return prodMap.get(pid)!;
   };
@@ -182,8 +194,15 @@ export async function buildStats(days = 7): Promise<StatsResult> {
   }
 
   const daily = [...dayMap.values()].sort((a, b) => a.date.localeCompare(b.date));
-  const products = [...prodMap.values()].sort((a, b) => b.commission - a.commission || b.spend - a.spend);
-  for (const p of products) p.roi = p.spend > 0 ? p.commission / p.spend : null;
+  for (const d of daily) d.ctr = ctrOf(d.imp, d.click);
+
+  const products = [...prodMap.values()];
+  for (const p of products) {
+    p.ctr = ctrOf(p.imp, p.click);
+    p.roi = p.spend > 0 ? p.commission / p.spend : null;
+  }
+  // 使用者指定：清單以 CTR 高者在上
+  products.sort(compareByCtr);
 
   const sum = (f: (d: DailyRow) => number) => daily.reduce((s, d) => s + f(d), 0);
   const spend = sum((d) => d.spend), commissionTotal = sum((d) => d.commission);
@@ -193,7 +212,7 @@ export async function buildStats(days = 7): Promise<StatsResult> {
     campaignId: running.campaignId,
     running: running.products.filter((p) => p.active && p.hasCreative).length,
     totals: {
-      spend, imp: sum((d) => d.imp), click: sum((d) => d.click),
+      spend, imp: sum((d) => d.imp), click: sum((d) => d.click), ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
       commission: commissionTotal, gmv: sum((d) => d.gmv), orders: sum((d) => d.orders),
       roi: spend > 0 ? commissionTotal / spend : null,
       dayBudget: running.products.reduce((s, p) => s + p.dayBudget, 0),
