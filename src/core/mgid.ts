@@ -88,11 +88,67 @@ const normDay = (d: any): string => {
 };
 
 // ISO8601 邊界（statistics-reports 的 dateFrom/dateTo）。
-// ⚠️ 用台北時區偏移 +08:00：MGID 的 day 維度是帳戶(台北)本地日，用 UTC 'Z' 邊界會滲入相鄰日
-// （實測 dateTo=...T23:59:59Z 會多回隔天列），與 D/R 的台北單日語意不一致、且會讓「重抓昨天」寫入隔天列。
-const TW_OFFSET = '+08:00';
-const isoFrom = (ymd: string) => `${ymd}T00:00:00.000${TW_OFFSET}`;
-const isoTo = (ymd: string) => `${ymd}T23:59:59.999${TW_OFFSET}`;
+// ⚠️ day 維度是「帳戶本地日」，邊界偏移必須用該帳戶自己的時區：用 UTC 'Z' 會滲入相鄰日
+// （實測 dateTo=...T23:59:59Z 會多回隔天列），而寫死 +08:00 對非台北帳同樣會切在人家的日中間
+// ——實測帳號 859153(America/Los_Angeles) 單查 2026-07-30 用 +08:00 邊界會回 07-29＋07-30 兩天，
+// 用 -07:00 才只回 07-30。時區來源＝GET /clients/{id} 的 timezone 欄（一帳查一次、快取）。
+const FALLBACK_TZ = 'Asia/Taipei'; // 查不到時區時的預設（28 帳中 25 帳是台北）
+
+/** 某瞬間在 tz 的 UTC 偏移（分鐘，東為正）。純函式，poc 可測。 */
+export function tzOffsetMinutes(tz: string, at: Date): number {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const p: Record<string, string> = {};
+  for (const { type, value } of dtf.formatToParts(at)) p[type] = value;
+  const asUTC = Date.UTC(
+    Number(p.year), Number(p.month) - 1, Number(p.day),
+    Number(p.hour) % 24, Number(p.minute), Number(p.second)
+  );
+  return Math.round((asUTC - at.getTime()) / 60000);
+}
+
+/** 把「帳戶本地日的某時刻」組成帶正確偏移的 ISO8601。純函式，poc 可測。
+ * 兩段逼近：先用 UTC 當該地時間猜偏移，再用逼近後的瞬間校一次 → 夏令時間切換日也對
+ * （如 America/Los_Angeles 夏天 -07:00、冬天 -08:00，同一支帳號跨季抓取會自動換）。 */
+export function zonedIso(ymd: string, hms: string, tz: string): string {
+  const naive = Date.parse(`${ymd}T${hms}Z`);
+  let off = tzOffsetMinutes(tz, new Date(naive));
+  off = tzOffsetMinutes(tz, new Date(naive - off * 60000));
+  const sign = off >= 0 ? '+' : '-';
+  const abs = Math.abs(off);
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const mm = String(abs % 60).padStart(2, '0');
+  return `${ymd}T${hms}${sign}${hh}:${mm}`;
+}
+
+const isoFrom = (ymd: string, tz: string) => zonedIso(ymd, '00:00:00.000', tz);
+const isoTo = (ymd: string, tz: string) => zonedIso(ymd, '23:59:59.999', tz);
+
+// 帳戶時區快取（一帳一次 GET /clients/{id}）。時區極少變動，instance 生命週期內快取即可。
+const tzCache = new Map<string, string>();
+
+function isValidTz(tz: string): boolean {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
+}
+
+/** 取該帳戶時區（IANA）。任何失敗都退回 FALLBACK_TZ，不讓時區查詢中斷報表抓取。 */
+export async function getClientTimezone(client: MgidClient): Promise<string> {
+  const hit = tzCache.get(client.apiClientId);
+  if (hit) return hit;
+  let tz = FALLBACK_TZ;
+  try {
+    const j = await get(`${BASE}/clients/${client.apiClientId}`, client.token);
+    const v = String(j?.timezone ?? '').trim();
+    if (v && isValidTz(v)) tz = v;
+  } catch {
+    // 查不到就用預設；報表本身還是要抓得下去
+  }
+  tzCache.set(client.apiClientId, tz);
+  return tz;
+}
 
 // YYYY-MM-DD 加 n 天（純 UTC 字串運算）
 function addDays(ymd: string, n: number): string {
@@ -244,14 +300,14 @@ async function fetchZeroClickTeaserRaw(
 
 /** 抓單一視窗、單一維度組的 statistics-reports 全部列（offset 分頁）。 */
 async function fetchStatWindow(
-  client: MgidClient, sd: string, ed: string, dimensions: string[], metrics: string[]
+  client: MgidClient, sd: string, ed: string, dimensions: string[], metrics: string[], tz: string
 ): Promise<any[]> {
   const rows: any[] = [];
   let offset = 0;
   while (true) {
     const q = new URLSearchParams();
-    q.set('filters[dateRange][dateFrom]', isoFrom(sd));
-    q.set('filters[dateRange][dateTo]', isoTo(ed));
+    q.set('filters[dateRange][dateFrom]', isoFrom(sd, tz));
+    q.set('filters[dateRange][dateTo]', isoTo(ed, tz));
     metrics.forEach((m) => q.append('metrics[]', m));
     dimensions.forEach((d) => q.append('dimensions[]', d));
     q.set('limit', String(PAGE_LIMIT));
@@ -339,6 +395,8 @@ async function fetchTeaserById(
 export async function fetchMgidReport(
   client: MgidClient, startDate: string, endDate: string
 ): Promise<MgidReportRow[]> {
+  // 邊界偏移用帳戶自己的時區（day 是帳戶本地日；一帳查一次、快取）
+  const tz = await getClientTimezone(client);
   const [campName, teaserIdx] = await Promise.all([
     fetchCampaignNameMap(client),
     fetchTeaserIndex(client),
@@ -347,7 +405,7 @@ export async function fetchMgidReport(
   // 先把各視窗原始列收齊，才能一次找出「/teasers 清單查無」的 teaserId 補打回填（每帳號通常僅數筆）。
   const allRaw: any[] = [];
   for (const w of reportWindows(startDate, endDate)) {
-    const winRaw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS]);
+    const winRaw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'campaignId', 'teaserId'], [...BASE_METRICS, ...CONV_METRICS], tz);
     allRaw.push(...winRaw);
     // ⚠️ statistics-reports 會「整個排除區間內 0 click 的 campaign」（連 imp 都不回；後台 UI 看得到，
     // 實證 poc/verify_mgid_zero_click_campaign.mts）。用 campaigns-stat（不排除零點擊）範圍前檢找出缺席 campaign。
@@ -423,13 +481,55 @@ export async function fetchMgidDeviceReport(
   client: MgidClient, startDate: string, endDate: string
 ): Promise<MgidDeviceRow[]> {
   const out: MgidDeviceRow[] = [];
+  const tz = await getClientTimezone(client); // 同 fetchMgidReport：邊界用帳戶時區
   for (const w of reportWindows(startDate, endDate)) {
     const raw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'deviceType'],
-      ['impressions', 'clicks', 'spent', 'conversionsInterest', 'conversionsDecision', 'conversionsBuy']);
+      ['impressions', 'clicks', 'spent', 'conversionsInterest', 'conversionsDecision', 'conversionsBuy'], tz);
     for (const r of raw) {
       out.push({
         date: normDay(r.day),
         device: deviceBucket(r.deviceType),
+        imp: Number(r.impressions) || 0,
+        click: Number(r.clicks) || 0,
+        spend: amt(r.spent),
+        conv_interest: Number(r.conversionsInterest) || 0,
+        conv_decision: Number(r.conversionsDecision) || 0,
+        conv_buy: Number(r.conversionsBuy) || 0,
+      });
+    }
+  }
+  return out;
+}
+
+/** day×source 媒體報表列（tool#5）。source＝API 原名，不在這裡合併 MSN。 */
+export interface MgidSourceRow {
+  date: string;
+  source: string;
+  imp: number;
+  click: number;
+  spend: number;
+  conv_interest: number;
+  conv_decision: number;
+  conv_buy: number;
+}
+
+const SOURCE_METRICS = [
+  'impressions', 'clicks', 'spent',
+  'conversionsInterest', 'conversionsDecision', 'conversionsBuy',
+];
+
+/** 抓 day×source。金額攤平、日期正規化。不合併 MSN、不抓 ctr。 */
+export async function fetchMgidSourceReport(
+  client: MgidClient, startDate: string, endDate: string
+): Promise<MgidSourceRow[]> {
+  const tz = await getClientTimezone(client);
+  const out: MgidSourceRow[] = [];
+  for (const w of reportWindows(startDate, endDate)) {
+    const raw = await fetchStatWindow(client, w.sd, w.ed, ['day', 'source'], SOURCE_METRICS, tz);
+    for (const r of raw) {
+      out.push({
+        date: normDay(r.day),
+        source: String(r.source ?? ''),
         imp: Number(r.impressions) || 0,
         click: Number(r.clicks) || 0,
         spend: amt(r.spent),

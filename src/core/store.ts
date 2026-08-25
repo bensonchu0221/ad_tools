@@ -1224,6 +1224,268 @@ export async function saveQuickLinks(email: string, overlay: QuickLinkOverlay): 
   );
 }
 
+// ---------- MGID 媒體報表 raw + 排程佇列（tool#5） ----------
+
+export interface MgidSourceRawInput {
+  date: string;
+  source: string;
+  imp: number;
+  click: number;
+  spend: number;
+  conv_interest: number;
+  conv_decision: number;
+  conv_buy: number;
+}
+
+export type MgidSourceJobStatus = 'queued' | 'running' | 'success' | 'failed';
+
+export interface MgidSourceJobRow {
+  id: number;
+  batchDate: string;
+  apiClientId: string;
+  clientName: string;
+  status: MgidSourceJobStatus;
+  phase: string | null;
+  attemptCount: number;
+  message: string | null;
+}
+
+const MGID_SOURCE_LOCK = 'ad_tools:mgidsource:global';
+const MGID_SOURCE_TIMEOUT_MIN = 10;
+let mgidSourceSchemaReady = false;
+
+async function ensureMgidSourceSchema(p: mysql.Pool): Promise<void> {
+  if (mgidSourceSchemaReady) return;
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS mgid_source_raw (
+      api_client_id VARCHAR(64)  NOT NULL,
+      dt            DATE         NOT NULL,
+      source        VARCHAR(255) NOT NULL,
+      imp           BIGINT       NOT NULL DEFAULT 0,
+      click         BIGINT       NOT NULL DEFAULT 0,
+      spend         DECIMAL(16,4) NOT NULL DEFAULT 0,
+      conv_interest BIGINT       NOT NULL DEFAULT 0,
+      conv_decision BIGINT       NOT NULL DEFAULT 0,
+      conv_buy      BIGINT       NOT NULL DEFAULT 0,
+      synced_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (api_client_id, dt, source),
+      INDEX idx_acct_dt (api_client_id, dt)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS mgid_source_jobs (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      batch_date DATE NOT NULL,
+      api_client_id VARCHAR(64) NOT NULL,
+      client_name VARCHAR(255) NOT NULL,
+      status ENUM('queued','running','success','failed') NOT NULL DEFAULT 'queued',
+      phase VARCHAR(255) NULL,
+      attempt_count INT NOT NULL DEFAULT 0,
+      message TEXT NULL,
+      queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME NULL,
+      heartbeat_at DATETIME NULL,
+      finished_at DATETIME NULL,
+      UNIQUE KEY uniq_batch_acct (batch_date, api_client_id),
+      INDEX idx_status_id (status, id)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  mgidSourceSchemaReady = true;
+}
+
+export async function hasMgidSourceRaw(apiClientId: string): Promise<boolean> {
+  const p = getPool();
+  if (!p) return false;
+  await ensureMgidSourceSchema(p);
+  const [rows] = await p.query(
+    `SELECT 1 AS ok FROM mgid_source_raw WHERE api_client_id = ? LIMIT 1`,
+    [apiClientId]
+  );
+  return (rows as any[]).length > 0;
+}
+
+export async function mgidSourceSyncedRange(apiClientId: string): Promise<{ min: string; max: string } | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureMgidSourceSchema(p);
+  const [rows] = await p.query(
+    `SELECT DATE_FORMAT(MIN(dt),'%Y-%m-%d') AS mn, DATE_FORMAT(MAX(dt),'%Y-%m-%d') AS mx
+     FROM mgid_source_raw WHERE api_client_id = ?`,
+    [apiClientId]
+  );
+  const r = (rows as any[])[0];
+  if (!r?.mn || !r?.mx) return null;
+  return { min: r.mn, max: r.mx };
+}
+
+export async function listMgidSourceRaw(
+  apiClientId: string, sd: string, ed: string
+): Promise<MgidSourceRawInput[]> {
+  const p = getPool();
+  if (!p) return [];
+  await ensureMgidSourceSchema(p);
+  const [rows] = await p.query(
+    `SELECT DATE_FORMAT(dt,'%Y-%m-%d') AS dt, source, imp, click, spend,
+            conv_interest, conv_decision, conv_buy
+     FROM mgid_source_raw
+     WHERE api_client_id = ? AND dt BETWEEN ? AND ?
+     ORDER BY dt, source`,
+    [apiClientId, sd, ed]
+  );
+  return (rows as any[]).map((r) => ({
+    date: r.dt,
+    source: r.source,
+    imp: Number(r.imp) || 0,
+    click: Number(r.click) || 0,
+    spend: Number(r.spend) || 0,
+    conv_interest: Number(r.conv_interest) || 0,
+    conv_decision: Number(r.conv_decision) || 0,
+    conv_buy: Number(r.conv_buy) || 0,
+  }));
+}
+
+/** 視窗取代：刪該帳 [sd,ed] 再插入。失敗則整段 rollback。 */
+export async function replaceMgidSourceWindow(
+  apiClientId: string, sd: string, ed: string, rows: MgidSourceRawInput[]
+): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureMgidSourceSchema(p);
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(
+      `DELETE FROM mgid_source_raw WHERE api_client_id = ? AND dt BETWEEN ? AND ?`,
+      [apiClientId, sd, ed]
+    );
+    const CHUNK = 200;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const slice = rows.slice(i, i + CHUNK);
+      const ph = slice.map(() => '(?,?,?,?,?,?,?,?,?,NOW())').join(',');
+      const params = slice.flatMap((r) => [
+        apiClientId, r.date, r.source.slice(0, 255),
+        r.imp, r.click, r.spend, r.conv_interest, r.conv_decision, r.conv_buy,
+      ]);
+      await conn.query(
+        `INSERT INTO mgid_source_raw
+          (api_client_id, dt, source, imp, click, spend, conv_interest, conv_decision, conv_buy, synced_at)
+         VALUES ${ph}`,
+        params
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function enqueueMgidSourceBatch(
+  batchDate: string,
+  accounts: { apiClientId: string; clientName: string }[]
+): Promise<{ total: number; created: number }> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await ensureMgidSourceSchema(p);
+  if (!accounts.length) return { total: 0, created: 0 };
+  const ph = accounts.map(() => `(?, ?, ?, 'queued')`).join(',');
+  const params = accounts.flatMap((a) => [batchDate, a.apiClientId, a.clientName]);
+  const [res] = await p.query(
+    `INSERT IGNORE INTO mgid_source_jobs (batch_date, api_client_id, client_name, status) VALUES ${ph}`,
+    params
+  );
+  return { total: accounts.length, created: Number((res as any).affectedRows ?? 0) };
+}
+
+export async function claimNextMgidSourceJob(): Promise<MgidSourceJobRow | null> {
+  const p = getPool();
+  if (!p) return null;
+  await ensureMgidSourceSchema(p);
+  await p.query(
+    `UPDATE mgid_source_jobs SET status='failed', phase='執行逾時',
+       message='執行超過 ${MGID_SOURCE_TIMEOUT_MIN} 分鐘',
+       finished_at=NOW()
+     WHERE status='running'
+       AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL ${MGID_SOURCE_TIMEOUT_MIN} MINUTE`
+  );
+  const [res] = await p.query(
+    `UPDATE mgid_source_jobs SET status='running', phase='開始執行…',
+       attempt_count=attempt_count+1, started_at=NOW(), heartbeat_at=NOW(), finished_at=NULL
+     WHERE status='queued'
+       AND NOT EXISTS (
+         SELECT 1 FROM (SELECT 1 FROM mgid_source_jobs WHERE status='running' LIMIT 1) AS active
+       )
+     ORDER BY id ASC LIMIT 1`
+  );
+  if (Number((res as any).affectedRows ?? 0) === 0) return null;
+  const [rows] = await p.query(
+    `SELECT id, DATE_FORMAT(batch_date,'%Y-%m-%d') AS batch_date, api_client_id, client_name,
+            status, phase, attempt_count, message
+     FROM mgid_source_jobs WHERE status='running' ORDER BY started_at DESC, id DESC LIMIT 1`
+  );
+  const r = (rows as any[])[0];
+  return r ? {
+    id: Number(r.id), batchDate: r.batch_date, apiClientId: String(r.api_client_id),
+    clientName: r.client_name, status: r.status, phase: r.phase, attemptCount: Number(r.attempt_count),
+    message: r.message,
+  } : null;
+}
+
+export async function markMgidSourceJobPhase(id: number, phase: string): Promise<void> {
+  const p = getPool();
+  if (!p) return;
+  await p.query(
+    `UPDATE mgid_source_jobs SET phase=?, heartbeat_at=NOW() WHERE id=? AND status='running'`,
+    [phase.slice(0, 255), id]
+  );
+}
+
+export async function markMgidSourceJobDone(id: number, message: string): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE mgid_source_jobs SET status='success', phase='完成', message=?, heartbeat_at=NOW(), finished_at=NOW() WHERE id=?`,
+    [message, id]
+  );
+}
+
+export async function requeueMgidSourceJob(id: number, message: string): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE mgid_source_jobs SET status='queued', phase='等待其他任務完成', message=?,
+       started_at=NULL, heartbeat_at=NULL WHERE id=? AND status='running'`,
+    [message, id]
+  );
+}
+
+export async function markMgidSourceJobFailed(id: number, error: string): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  await p.query(
+    `UPDATE mgid_source_jobs SET status='failed', message=?, heartbeat_at=NOW(), finished_at=NOW() WHERE id=?`,
+    [error, id]
+  );
+}
+
+export async function withMgidSourceLock<T>(work: () => Promise<T>): Promise<T> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const conn = await p.getConnection();
+  let locked = false;
+  try {
+    const [rows] = await conn.query(`SELECT GET_LOCK(?, 0) AS acquired`, [MGID_SOURCE_LOCK]);
+    locked = Number((rows as any[])[0]?.acquired ?? 0) === 1;
+    if (!locked) throw new Error('已有 MGID 媒體報表任務執行中，請稍候再試');
+    return await work();
+  } finally {
+    if (locked) await conn.query(`SELECT RELEASE_LOCK(?)`, [MGID_SOURCE_LOCK]);
+    conn.release();
+  }
+}
+
 // ---------- R 帳戶管理 token（共用庫 nexus.r_account_tokens） ----------
 // 這張表由 CMP（r_bulk_upload）建立與維護，UI 在該站 /admin/accounts；本工具只讀。
 // 業務鍵＝登入 email（R 管理 API 換發 token 要 email + raw token 兩者）。

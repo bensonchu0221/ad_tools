@@ -4,11 +4,12 @@
 import { FAVICON_DATA_URI } from './favicon.js';
 import { FONT_FACES } from './fonts-face.js';
 
-// 頂部工具分頁（只放三個內部工具；logo 回首頁）。新增工具時在這裡加一筆。
+// 頂部工具分頁（logo 回首頁）。新增工具時在這裡加一筆。
 const NAV: { key: string; label: string; href: string }[] = [
   { key: 'adpreview', label: '廣告預覽', href: '/tools/adpreview' },
   { key: 'weeklyreport', label: '整合週報', href: '/tools/weeklyreport' },
   { key: 'adstream', label: 'Report Hub', href: '/tools/adstream' },
+  { key: 'mgidsource', label: 'MGID 媒體', href: '/tools/mgidsource' },
   { key: 'coupangads', label: '酷澎聯盟', href: '/tools/coupangads' },
 ];
 

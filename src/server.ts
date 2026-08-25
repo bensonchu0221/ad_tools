@@ -14,6 +14,7 @@ import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.
 import { registerTokens } from './tools/tokens/route.js';
 import { registerAdstreamLab } from './tools/adstream-lab/route.js'; // 視覺重新設計實驗頁，先不上首頁選單，僅供直接網址訪問
 import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.js';
+import { registerMgidSource, BASE_PATH as MGIDSOURCE } from './tools/mgidsource/route.js';
 import { registerCoupangAds, BASE_PATH as COUPANGADS } from './tools/coupangads/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
@@ -42,6 +43,7 @@ const TOOLS: Tool[] = [
   { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 7 SHEETS' },
   { name: 'Report Hub', desc: '多 D／R／MGID 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' },
   { name: '資源看板', desc: 'GCP Redis／Cloud SQL 用量即時監看，記憶體爆掉前先看到', href: GCPWATCH, icon: ICON.gauge, code: 'GCP WATCH', tag: 'MONITOR · LIVE' },
+  { name: 'MGID 媒體報表', desc: '廣告主角度看各媒體 source 成效，每日同步 raw', href: MGIDSOURCE, icon: ICON.chart, code: 'MGID SOURCE', tag: 'MEDIA · DAILY' },
   { name: '酷澎聯盟投放', desc: 'Coupang 聯盟商品自動上架 R 平台投放，收益與花費即時對照', href: COUPANGADS, icon: ICON.bag, code: 'COUPANG ADS', tag: 'AUTO · 30 MIN' }
   // 站外工具與快捷連結統一在 slotboard.ts 的 QUICK_LINKS 維護
 ];
@@ -112,6 +114,7 @@ await registerAdstream(app);
 await registerTokens(app);
 await registerAdstreamLab(app);
 await registerGcpWatch(app);
+await registerMgidSource(app);
 registerCoupangAds(app);
 
 const port = Number(process.env.PORT ?? 8080);
