@@ -1223,3 +1223,18 @@ export async function saveQuickLinks(email: string, overlay: QuickLinkOverlay): 
     [email, json]
   );
 }
+
+// ---------- R 帳戶管理 token（共用庫 nexus.r_account_tokens） ----------
+// 這張表由 CMP（r_bulk_upload）建立與維護，UI 在該站 /admin/accounts；本工具只讀。
+// 業務鍵＝登入 email（R 管理 API 換發 token 要 email + raw token 兩者）。
+
+export async function getRAccountToken(email: string): Promise<string | null> {
+  const p = getPool();
+  if (!p) return null;
+  const [rows] = await p.query(
+    `SELECT token FROM ${TOKENS_DB}.r_account_tokens WHERE LOWER(email) = LOWER(?) LIMIT 1`,
+    [email]
+  );
+  const r = (rows as any[])[0];
+  return r ? r.token : null;
+}
