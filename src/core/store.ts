@@ -1566,8 +1566,8 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
       day_budget      INT          NULL,
       active          TINYINT      NOT NULL DEFAULT 1,
       summary_status  INT          NULL,
-      assigned_at     DATETIME     NULL,
-      last_changed_at DATETIME     NULL,
+      assigned_at     DATETIME     NULL COMMENT '一律存 UTC（DB 的 NOW()）',
+      last_changed_at DATETIME     NULL COMMENT '一律存 UTC；覆蓋優先序靠它排，混到台北時間會差 8 小時',
       synced_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uniq_slot_no (slot_no),
       INDEX idx_product (product_id),
@@ -1637,7 +1637,11 @@ async function coupangPool(): Promise<mysql.Pool> {
 
 const num = (v: any): number | null => (v === null || v === undefined ? null : Number(v));
 
-/** MySQL DATETIME 不吃 ISO 的 'T'/'Z'（會回 Incorrect datetime value）→ 寫入前一律正規化。 */
+/**
+ * MySQL DATETIME 不吃 ISO 的 'T'/'Z'（會回 Incorrect datetime value）→ 寫入前一律正規化。
+ * ⚠️ 這兩欄一律存 **UTC**（DB 的 NOW() 就是 UTC）。外部來源（如 R 回的 create_time 是台北時間）
+ *    要先自己減 8 小時再寫，否則跟程式寫的值混在一起，覆蓋優先序會差 8 小時。
+ */
 export function toMysqlDatetime(v: string | Date | null | undefined): string | null {
   if (!v) return null;
   if (v instanceof Date) return v.toISOString().slice(0, 19).replace('T', ' ');
