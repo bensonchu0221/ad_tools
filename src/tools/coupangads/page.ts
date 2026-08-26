@@ -42,9 +42,10 @@ const STYLE = `
   .day.selected{background:var(--ink);color:#fff;border-radius:4px}
   .cal-error{min-height:18px;margin-top:8px;font-size:11.5px;color:var(--accent)}
   .spacer{flex:1}
-  .btn{background:var(--ink);color:#fff;border:0;border-radius:5px;padding:7px 15px;font:inherit;font-size:12.5px;cursor:pointer}
+  .btn{display:inline-flex;align-items:center;background:var(--ink);color:#fff;border:0;border-radius:5px;padding:7px 15px;font:inherit;font-size:12.5px;line-height:1.5;text-decoration:none;cursor:pointer}
   .btn.ghost{background:var(--slot);color:var(--ink);border:1px solid var(--line)}
   .btn[disabled]{opacity:.5;cursor:default}
+  .btn[aria-disabled="true"]{opacity:.5;pointer-events:none}
   .panel{background:var(--slot);border:1px solid var(--line);border-radius:6px;padding:18px}
   .lg{display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:8px}
   .lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
@@ -115,6 +116,7 @@ const BODY = `
       <input type="hidden" name="ed" id="ed">
       <div class="spacer"></div>
       <span class="loading-state" id="loading-state"><span class="spin"></span>載入資料中…</span>
+      <a class="btn ghost" id="btn-download" aria-disabled="true" download>下載 raw data (CSV)</a>
       <button type="button" class="btn ghost" id="btn-reload">重新整理</button>
       <button type="button" class="btn" id="btn-sync">立即同步</button>
     </div>
@@ -172,7 +174,7 @@ const BODY = `
 
 const SCRIPT = `
 const C_SPEND=${JSON.stringify(C_SPEND)}, C_CTR=${JSON.stringify(C_CTR)};
-let days=7, data=null, pfilter='on', rangeMode='days';
+let data=null, pfilter='on';
 let selectedStart='', selectedEnd='', draftStart='', draftEnd='', calendarBase=null, pickingEnd=false;
 const $=(s)=>document.querySelector(s);
 const nf=(n,d=0)=>Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -184,14 +186,26 @@ function setLoading(on){
   $('#stats-content').classList.toggle('is-loading',on);
   $('#stats-content').setAttribute('aria-busy',String(on));
   [...$('#stats-form').querySelectorAll('button')].forEach(b=>b.disabled=on);
+  $('#btn-download').setAttribute('aria-disabled',String(on||!selectedStart));
 }
 
-async function load(){
+function setSelectedRange(sd,ed){
+  selectedStart=sd; selectedEnd=ed;
+  $('#sd').value=sd; $('#ed').value=ed;
+  $('#date-start').textContent=sd;
+  $('#date-end').textContent=ed;
+  $('#btn-download').href='/tools/coupangads/api/raw.csv?'+new URLSearchParams({sd,ed});
+}
+
+function selectedDateParams(){
+  return selectedStart&&selectedEnd
+    ? new URLSearchParams({sd:selectedStart,ed:selectedEnd})
+    : new URLSearchParams({days:'7'});
+}
+
+async function load(params=selectedDateParams()){
   setLoading(true);
   try{
-    const params = rangeMode==='range'
-      ? new URLSearchParams({sd:selectedStart,ed:selectedEnd})
-      : new URLSearchParams({days:String(days)});
     const r=await fetch('/tools/coupangads/api/stats?'+params);
     if(!r.ok){ const j=await r.json().catch(()=>null); throw new Error(j&&j.error?j.error:'HTTP '+r.status); }
     data=await r.json();
@@ -213,10 +227,7 @@ function render(){
     ['訂單 / GMV','',nf(t.orders)+' 筆',money(t.gmv)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
-  selectedStart=data.range.sd; selectedEnd=data.range.ed;
-  $('#sd').value=selectedStart; $('#ed').value=selectedEnd;
-  $('#date-start').textContent=selectedStart;
-  $('#date-end').textContent=selectedEnd;
+  setSelectedRange(data.range.sd,data.range.ed);
   $('#pcount').textContent='（'+data.range.sd+' ~ '+data.range.ed+'）';
   const fb=$('#pfilter').children;
   fb[0].textContent='投放中 '+data.products.filter(p=>p.active).length;
@@ -386,12 +397,10 @@ function chooseDate(key){
     $('#cal-error').textContent='日期區間最多 90 天，請重新選擇迄日。';
     return;
   }
-  selectedStart=sd; selectedEnd=ed; rangeMode='range';
-  $('#sd').value=sd; $('#ed').value=ed;
-  $('#date-start').textContent=sd; $('#date-end').textContent=ed;
+  setSelectedRange(sd,ed);
   [...$('#days').children].forEach(button=>button.classList.remove('on'));
   closeCalendar();
-  $('#stats-form').requestSubmit();
+  load(new URLSearchParams({sd,ed}));
 }
 
 async function loadLogs(){
@@ -412,17 +421,17 @@ $('#pfilter').addEventListener('click',(e)=>{
 $('#days').addEventListener('click',(e)=>{
   const b=e.target.closest('button'); if(!b) return;
   [...$('#days').children].forEach(x=>x.classList.toggle('on',x===b));
-  days=Number(b.dataset.d); rangeMode='days'; closeCalendar();
-  $('#stats-form').requestSubmit();
+  closeCalendar();
+  load(new URLSearchParams({days:b.dataset.d}));
 });
-$('#stats-form').addEventListener('submit',(e)=>{ e.preventDefault(); load(); });
+$('#stats-form').addEventListener('submit',(e)=>e.preventDefault());
 $('#date-trigger').onclick=()=>$('#calendar').classList.contains('open')?closeCalendar():openCalendar();
 $('#months').addEventListener('click',(e)=>{ const b=e.target.closest('.day'); if(b&&!b.disabled) chooseDate(b.dataset.date); });
 $('#cal-prev').onclick=()=>{ calendarBase=addMonths(calendarBase,-1); renderCalendar(); };
 $('#cal-next').onclick=()=>{ calendarBase=addMonths(calendarBase,1); renderCalendar(); };
 document.addEventListener('click',(e)=>{ if(!$('#date-range').contains(e.target)) closeCalendar(); });
 document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') closeCalendar(); });
-$('#btn-reload').onclick=()=>{ load(); loadLogs(); };
+$('#btn-reload').onclick=()=>{ load(selectedDateParams()); loadLogs(); };
 $('#btn-sync').onclick=async()=>{
   if(!confirm('立即同步會依 reco 最新清單輪替：換掉已下架商品的素材、暫停不在清單的廣告。換過素材的要重新審核才會曝光。確定執行？')) return;
   const b=$('#btn-sync'); b.disabled=true; b.textContent='同步中…';
@@ -435,7 +444,7 @@ $('#btn-sync').onclick=async()=>{
   load(); loadLogs();
 };
 window.addEventListener('resize',()=>{ if(data) drawCharts(); });
-load(); loadLogs();
+load(new URLSearchParams({days:'7'})); loadLogs();
 `;
 
 export function coupangAdsPage(): string {
