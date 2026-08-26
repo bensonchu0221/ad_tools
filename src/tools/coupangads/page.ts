@@ -403,6 +403,13 @@ function chooseDate(key){
   load(new URLSearchParams({sd,ed}));
 }
 
+function handleCalendarClick(e){
+  // 第一次選日期會重畫月曆並移除原按鈕；阻止事件冒泡，避免 document 誤判為點到日曆外而關閉。
+  e.stopPropagation();
+  const b=e.target.closest('.day');
+  if(b&&!b.disabled) chooseDate(b.dataset.date);
+}
+
 async function loadLogs(){
   try{
     const r=await fetch('/tools/coupangads/api/runs');
@@ -426,7 +433,7 @@ $('#days').addEventListener('click',(e)=>{
 });
 $('#stats-form').addEventListener('submit',(e)=>e.preventDefault());
 $('#date-trigger').onclick=()=>$('#calendar').classList.contains('open')?closeCalendar():openCalendar();
-$('#months').addEventListener('click',(e)=>{ const b=e.target.closest('.day'); if(b&&!b.disabled) chooseDate(b.dataset.date); });
+$('#months').addEventListener('click',handleCalendarClick);
 $('#cal-prev').onclick=()=>{ calendarBase=addMonths(calendarBase,-1); renderCalendar(); };
 $('#cal-next').onclick=()=>{ calendarBase=addMonths(calendarBase,1); renderCalendar(); };
 document.addEventListener('click',(e)=>{ if(!$('#date-range').contains(e.target)) closeCalendar(); });
