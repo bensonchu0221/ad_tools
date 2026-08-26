@@ -34,9 +34,28 @@ export function registerCoupangAds(app: FastifyInstance): void {
   });
 
   app.get(BASE_PATH + '/api/stats', async (req, reply) => {
-    const days = Math.min(90, Math.max(1, Number((req.query as any).days ?? 7) || 7));
+    const query = req.query as any;
+    const days = Math.min(90, Math.max(1, Number(query.days ?? 7) || 7));
+    let range: { sd: string; ed: string } | undefined;
+    if (query.sd || query.ed) {
+      const sd = String(query.sd ?? '');
+      const ed = String(query.ed ?? '');
+      const validDate = (value: string) => {
+        const time = Date.parse(value + 'T00:00:00Z');
+        return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(time)
+          && new Date(time).toISOString().slice(0, 10) === value;
+      };
+      if (!validDate(sd) || !validDate(ed)) {
+        return reply.code(400).send({ error: '起訖日格式必須為 YYYY-MM-DD' });
+      }
+      const rangeDays = (Date.parse(ed + 'T00:00:00Z') - Date.parse(sd + 'T00:00:00Z')) / 86400000 + 1;
+      if (rangeDays < 1 || rangeDays > 90) {
+        return reply.code(400).send({ error: '日期區間必須介於 1 到 90 天' });
+      }
+      range = { sd, ed };
+    }
     try {
-      reply.send(await buildStats(days));
+      reply.send(await buildStats(days, range));
     } catch (e: any) {
       app.log.error({ err: String(e?.message ?? e) }, 'coupangads stats failed');
       reply.code(500).send({ error: String(e?.message ?? e) });

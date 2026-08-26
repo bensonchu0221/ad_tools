@@ -76,8 +76,8 @@ export function compareByCtr(a: { ctr: number | null; commission: number; spend:
   return (b.ctr ?? -1) - (a.ctr ?? -1) || b.commission - a.commission || b.spend - a.spend;
 }
 
-export async function buildStats(days = 7): Promise<StatsResult> {
-  const { sd, ed } = rangeOf(days);
+export async function buildStats(days = 7, range?: { sd: string; ed: string }): Promise<StatsResult> {
+  const { sd, ed } = range ?? rangeOf(days);
   const warnings: string[] = [];
 
   const [stats, slots] = await Promise.all([listCoupangDailyStats(sd, ed), listCoupangSlots()]);
