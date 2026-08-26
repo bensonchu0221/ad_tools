@@ -91,10 +91,12 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   // 3) slot 現況：以 DB 為主，用 R 的即時狀態校正（有人在後台手動關掉時 DB 才不會過期）
   const slots = await listCoupangSlots();
   const groups = await listGroups(email, campaign.cpg_id);
+  // ⚠️ `GET /ad-groups` **只回在跑的 group**（2026-08-26 實測：47 檔暫停後清單從 67 剩 20）
+  //    → 不在清單裡就是已暫停，這樣有人在後台手動關掉時 DB 才跟得上。
   const gById = new Map(groups.map((g) => [g.group_id, g]));
   for (const s of slots) {
     const g = gById.get(s.groupId);
-    if (g) s.active = Number(g.group_status ?? 0) === 1;
+    s.active = g ? Number(g.group_status ?? 0) === 1 : false;
   }
 
   // 4) 決策（純函式）

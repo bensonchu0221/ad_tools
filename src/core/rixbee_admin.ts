@@ -110,6 +110,7 @@ export async function updateCampaign(email: string, cpgId: number, patch: Record
 
 export interface RGroup { group_id: number; group_name: string; cpg_id?: number; group_status?: number; target_info?: string }
 
+/** ⚠️ 實測只會回「在跑」的 group，暫停(status=2)的不在清單裡——判斷「是否已暫停」要用「不在清單中」。 */
 export async function listGroups(email: string, cpgId?: number): Promise<RGroup[]> {
   const q = cpgId ? `&cpg_id=${cpgId}` : '';
   const j = await req(email, 'GET', `/ad-groups?start=0&end=500${q}`);

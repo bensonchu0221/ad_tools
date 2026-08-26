@@ -1637,17 +1637,32 @@ async function coupangPool(): Promise<mysql.Pool> {
 
 const num = (v: any): number | null => (v === null || v === undefined ? null : Number(v));
 
+/** MySQL DATETIME 不吃 ISO 的 'T'/'Z'（會回 Incorrect datetime value）→ 寫入前一律正規化。 */
+export function toMysqlDatetime(v: string | Date | null | undefined): string | null {
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString().slice(0, 19).replace('T', ' ');
+  const s = String(v).trim();
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/.exec(s);
+  return m ? `${m[1]} ${m[2]}` : s.slice(0, 19);
+}
+
 export async function listCoupangSlots(): Promise<CoupangSlotRow[]> {
   const p = await coupangPool();
-  const [rows] = await p.query(`SELECT * FROM coupang_slots ORDER BY slot_no`);
+  const [rows] = await p.query(
+    `SELECT group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price,
+            day_budget, active, summary_status,
+            DATE_FORMAT(assigned_at,   '%Y-%m-%d %H:%i:%s') AS assigned_at,
+            DATE_FORMAT(last_changed_at,'%Y-%m-%d %H:%i:%s') AS last_changed_at
+       FROM coupang_slots ORDER BY slot_no`
+  );
   return (rows as any[]).map((r) => ({
     groupId: Number(r.group_id), slotNo: Number(r.slot_no),
     productId: r.product_id ?? null, crId: num(r.cr_id), mtId: num(r.mt_id),
     landingUrl: r.landing_url ?? null, title: r.title ?? null, descr: r.descr ?? null,
     price: num(r.price), dayBudget: num(r.day_budget), active: Number(r.active) === 1,
     summaryStatus: num(r.summary_status),
-    assignedAt: r.assigned_at ? new Date(r.assigned_at).toISOString() : null,
-    lastChangedAt: r.last_changed_at ? new Date(r.last_changed_at).toISOString() : null,
+    assignedAt: r.assigned_at ?? null,
+    lastChangedAt: r.last_changed_at ?? null,
   }));
 }
 
@@ -1674,8 +1689,8 @@ export async function upsertCoupangSlot(s: Partial<CoupangSlotRow> & { groupId: 
       s.groupId, s.slotNo, s.productId ?? null, s.crId ?? null, s.mtId ?? null,
       s.landingUrl ?? null, s.title ?? null, s.descr ?? null, s.price ?? null,
       s.dayBudget ?? null, s.active === false ? 0 : 1, s.summaryStatus ?? null,
-      ...(s.assignedAt === undefined ? [] : [s.assignedAt]),
-      ...(changed ? [] : [s.lastChangedAt ?? null]),
+      ...(s.assignedAt === undefined ? [] : [toMysqlDatetime(s.assignedAt)]),
+      ...(changed ? [] : [toMysqlDatetime(s.lastChangedAt)]),
     ]
   );
 }

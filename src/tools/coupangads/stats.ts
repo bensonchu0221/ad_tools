@@ -85,8 +85,8 @@ export async function buildStats(days = 7): Promise<StatsResult> {
   // 商品資料：先用 slot 上的（就是廣告上真正在跑的文案），沒有的再查商品表（已下架但期間有數據者）
   const slotByProduct = new Map<string, typeof slots[number]>();
   for (const s of slots) if (s.productId) slotByProduct.set(s.productId, s);
-  const missing = [...new Set(stats.map((r) => r.productId))].filter((id) => !slotByProduct.has(id));
-  const extra = missing.length ? await listCoupangProducts(missing) : new Map();
+  const allIds = [...new Set([...stats.map((r) => r.productId), ...slots.map((s) => s.productId).filter(Boolean) as string[]])];
+  const meta = allIds.length ? await listCoupangProducts(allIds) : new Map();
 
   const dayMap = new Map<string, DailyRow>();
   for (const d of enumDays(sd, ed)) {
@@ -96,7 +96,7 @@ export async function buildStats(days = 7): Promise<StatsResult> {
   const prod = (pid: string): ProductRow => {
     if (!prodMap.has(pid)) {
       const s = slotByProduct.get(pid);
-      const p = extra.get(pid);
+      const p = meta.get(pid);
       prodMap.set(pid, {
         productId: pid,
         slotNo: s?.slotNo ?? null,
@@ -114,9 +114,9 @@ export async function buildStats(days = 7): Promise<StatsResult> {
     return prodMap.get(pid)!;
   };
 
-  // 在跑的 slot 即使期間還沒有數據，也要出現在清單上（剛換完在等審核的就是這種）
+  // 每個 slot 都要出現在清單（即使期間沒數據）：剛換完在等審核的、以及被暫停的，都要看得到
   for (const s of slots) {
-    if (s.productId && s.active) prod(s.productId);
+    if (s.productId) prod(s.productId);
   }
 
   for (const r of stats) {

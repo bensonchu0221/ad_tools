@@ -99,6 +99,7 @@ popin 內部工具集（取代舊 dctool）。
   實測首次套用：67 檔 → 不動 19、改文案 1、暫停 47、在跑 20 檔。決策全在 `plan.ts planRotation`（純函式、42 項驗證）
 - **每檔日預算＝`floor(3000 ÷ 在跑檔數 × 2)`**（20 檔→300，帳面總和 6000 由 campaign 日預算 3000 當硬上限擋著，讓熱門商品能多吃）。**campaign 日預算每次同步都校正**——初版程式從不更新它，會卡住整體花費
 - **⚠️ 審核是阻斷式的，而且沒有 API**：使用者（平台內部人員）每天 10:00 在 R 後台審核，**審過才會開始曝光**。試過 7 個審核端點全 404（`/audits`、`/ad-creatives/{id}/audit`…；唯一非 404 的 `/ad-creatives/audit-status` 是被 `/{cr_id}` 路由接走，隨機字串回一樣的錯）。**但找到訊號**：改動 creative 當下 `summary_status` 會變 **3**（實測 4→3），故 `PENDING_REVIEW=3`，看板據此顯示「待審 N 檔」。值 1／4 的語意仍不明（兩者都有曝光）
+- **⚠️ `GET /ad-groups` 只回「在跑」的 group**（實測 47 檔暫停後清單由 67 剩 20）→ 判斷某個 slot 是否已暫停要用「不在清單中」，不能等它回 `group_status=2`；暫停中的 slot 只有 `coupang_slots` 表記得住
 - **⚠️⚠️ PUT creative 的欄位名不對稱**：`GET /ad-creatives/{id}` 回 `cr_mt`／`cr_icon`，但 PUT 要 `cr_mt_id`／`cr_icon_id`——把 GET 的物件原封 PUT 回去會回 `400 Validation Failed: cr_mt_id Required`。`rixbee_admin.updateCreative` 已內建轉換。campaign／group 則無此問題（同名）
 - **每商品一個 subId 的正解**：①不能拿 reco 回的 `productUrl` 轉 deeplink（已是 onelink）→ `rCode=400 url convert failed`，要自組 `https://www.tw.coupang.com/products/{id}`；②**`subId` 必須放 body**，放 query 一樣回 `rCode=0` 但 `landingUrl` 不含 `af_siteid` ＝靜默失效
 - **四張表**（`ad_tools` 庫，前綴 `coupang_`；2026-08-26 由「零資料表」改為建表，因為比對價格、挑最久沒換的 slot、看長期趨勢都需要歷史，R 上只有當下狀態）：

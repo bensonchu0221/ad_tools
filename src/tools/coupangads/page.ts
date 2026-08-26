@@ -105,7 +105,15 @@ const BODY = `
   </div>
 
   <div class="sec">
-    <h2>投放中的商品 <span id="pcount" class="muted"></span> <span class="muted" style="text-transform:none;letter-spacing:0">· 依 CTR 由高到低</span></h2>
+    <div class="bar" style="margin:0 0 10px">
+      <h2 style="margin:0">商品 <span id="pcount" class="muted"></span> <span class="muted" style="text-transform:none;letter-spacing:0">· 依 CTR 由高到低</span></h2>
+      <div class="spacer"></div>
+      <div class="chips" id="pfilter">
+        <button data-f="on" class="on">投放中</button>
+        <button data-f="off">已暫停</button>
+        <button data-f="all">全部</button>
+      </div>
+    </div>
     <div class="panel" style="padding:0;overflow-x:auto">
       <table class="tb" id="tbl">
         <thead><tr>
@@ -131,7 +139,7 @@ const BODY = `
 
 const SCRIPT = `
 const C_SPEND=${JSON.stringify(C_SPEND)}, C_COMM=${JSON.stringify(C_COMM)}, C_CTR=${JSON.stringify(C_CTR)};
-let days=7, data=null;
+let days=7, data=null, pfilter='on';
 const $=(s)=>document.querySelector(s);
 const nf=(n,d=0)=>Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d});
 const money=(n)=>'NT$'+nf(n,0);
@@ -161,6 +169,10 @@ function render(){
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
   $('#pcount').textContent='（'+data.range.sd+' ~ '+data.range.ed+'）';
+  const fb=$('#pfilter').children;
+  fb[0].textContent='投放中 '+data.products.filter(p=>p.active).length;
+  fb[1].textContent='已暫停 '+data.products.filter(p=>!p.active).length;
+  fb[2].textContent='全部 '+data.products.length;
   $('#chart-note').textContent=data.range.sd+' ~ '+data.range.ed;
 
   $('#review').innerHTML = data.pendingReview
@@ -171,7 +183,8 @@ function render(){
     ? '<div class="warn"><b>提醒</b><ul>'+data.warnings.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul></div>' : '';
 
   const tb=$('#tbody'); tb.innerHTML='';
-  for(const p of data.products){
+  const shown=data.products.filter(p=>pfilter==='all'||(pfilter==='on'?p.active:!p.active));
+  for(const p of shown){
     const tr=document.createElement('tr');
     tr.innerHTML=
       '<td>'+(p.imageUrl?'<img loading="lazy" src="'+esc(p.imageUrl)+'" alt="">':'')+'</td>'+
@@ -185,7 +198,7 @@ function render(){
       '<td>'+statusPill(p)+'</td>';
     tb.appendChild(tr);
   }
-  if(!data.products.length) tb.innerHTML='<tr><td colspan="13" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
+  if(!shown.length) tb.innerHTML='<tr><td colspan="13" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
   drawCharts();
 }
 
@@ -288,6 +301,11 @@ async function loadLogs(){
   }catch(e){ $('#logs').innerHTML='<span class="muted">讀取失敗：'+esc(e.message)+'</span>'; }
 }
 
+$('#pfilter').addEventListener('click',(e)=>{
+  const b=e.target.closest('button'); if(!b) return;
+  [...$('#pfilter').children].forEach(x=>x.classList.toggle('on',x===b));
+  pfilter=b.dataset.f; render();
+});
 $('#days').addEventListener('click',(e)=>{
   const b=e.target.closest('button'); if(!b) return;
   [...$('#days').children].forEach(x=>x.classList.toggle('on',x===b));
@@ -300,7 +318,7 @@ $('#btn-sync').onclick=async()=>{
   try{
     const r=await fetch('/tools/coupangads/sync',{method:'POST'});
     const j=await r.json();
-    alert(j.ok ? ('同步完成：'+j.summary+(j.result.needReview.length?('\n\n要審核的有 '+j.result.needReview.length+' 檔'):'')) : ('同步失敗：'+j.error));
+    alert(j.ok ? ('同步完成：'+j.summary+(j.result.needReview.length?('　要審核 '+j.result.needReview.length+' 檔'):'')) : ('同步失敗：'+j.error));
   }catch(e){ alert('同步失敗：'+e.message); }
   b.disabled=false; b.textContent='立即同步';
   load(); loadLogs();
