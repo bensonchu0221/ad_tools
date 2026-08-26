@@ -1,34 +1,39 @@
-// 酷澎聯盟投放（tool#6）路由：看板頁、即時統計 API、手動同步、排程 cron。
-// ⚠️ /cron 是給 Cloud Scheduler 打的（無登入 cookie）→ auth.ts 白名單已放行 path.endsWith('/cron')。
+// 酷澎聯盟投放（tool#6）路由：看板頁、統計 API、手動同步、兩支排程。
+// /cron（每天 09:50 輪替）與 /collect/cron（每 10 分鐘收成效）都在 auth.ts 白名單的 endsWith('/cron') 內。
 import type { FastifyInstance } from 'fastify';
 import { coupangAdsPage } from './page.js';
 import { buildStats } from './stats.js';
 import { syncCoupangAds, type SyncResult } from './sync.js';
-import { readAppLog } from '../../core/logging.js';
+import { collectStats } from './collect.js';
+import { listCoupangSyncRuns } from '../../core/store.js';
 
 export const BASE_PATH = '/tools/coupangads';
-export const SYNC_MARKER = 'coupangads_sync';
 
-/** 同步結果 → 一行摘要（同時給 Cloud Logging 與 UI 用）。 */
+/** 同步結果 → 一行摘要（進 coupang_sync_runs 與 UI）。 */
 export function summarize(r: SyncResult): string {
   const parts = [
-    `新建 ${r.created}`,
-    r.creativeFilled ? `補素材 ${r.creativeFilled}` : '',
-    `已在跑 ${r.existing}`,
-    r.failed ? `失敗 ${r.failed}` : '',
-    r.rebalanced ? `調整預算 ${r.rebalanced}` : '',
-    `共 ${r.totalGroups} 檔／每檔 ${r.budgetPerGroup} 元`,
-    `${(r.elapsedMs / 1000).toFixed(1)}s`,
+    '不動 ' + r.unchanged,
+    r.textUpdated ? '改文案 ' + r.textUpdated : '',
+    r.replaced ? '換商品 ' + r.replaced : '',
+    r.created ? '新開 ' + r.created : '',
+    r.paused ? '暫停 ' + r.paused : '',
+    r.failed ? '失敗 ' + r.failed : '',
+    '在跑 ' + r.activeCount + ' 檔／每檔 ' + r.budgetPerGroup + ' 元',
+    (r.elapsedMs / 1000).toFixed(1) + 's',
   ].filter(Boolean);
   return parts.join('、');
 }
+
+const twTime = (v: any) => new Intl.DateTimeFormat('zh-TW', {
+  timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+}).format(new Date(v));
 
 export function registerCoupangAds(app: FastifyInstance): void {
   app.get(BASE_PATH, async (_req, reply) => {
     reply.type('text/html').send(coupangAdsPage());
   });
 
-  app.get(`${BASE_PATH}/api/stats`, async (req, reply) => {
+  app.get(BASE_PATH + '/api/stats', async (req, reply) => {
     const days = Math.min(90, Math.max(1, Number((req.query as any).days ?? 7) || 7));
     try {
       reply.send(await buildStats(days));
@@ -38,51 +43,72 @@ export function registerCoupangAds(app: FastifyInstance): void {
     }
   });
 
-  app.get(`${BASE_PATH}/api/logs`, async (_req, reply) => {
+  app.get(BASE_PATH + '/api/runs', async (_req, reply) => {
     try {
-      const entries = (await readAppLog(SYNC_MARKER, 30, 20)).map((e) => ({
-        time: new Intl.DateTimeFormat('zh-TW', {
-          timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-        }).format(new Date(e.timestamp)),
-        text: String(e.payload?.summary ?? e.payload?.msg ?? ''),
-      }));
-      reply.send({ entries, note: entries.length ? '' : '近 30 天沒有同步紀錄（本機執行不會進 Cloud Logging）' });
+      const rows = await listCoupangSyncRuns(20);
+      reply.send({
+        entries: rows.map((r: any) => ({
+          time: twTime(r.ran_at),
+          text: [
+            '不動 ' + r.unchanged,
+            r.text_updated ? '改文案 ' + r.text_updated : '',
+            r.replaced ? '換商品 ' + r.replaced : '',
+            r.created ? '新開 ' + r.created : '',
+            r.paused ? '暫停 ' + r.paused : '',
+            r.failed ? '失敗 ' + r.failed : '',
+            '每檔 ' + r.budget_per_group + ' 元',
+          ].filter(Boolean).join('、'),
+          message: r.message ?? '',
+          trigger: r.trigger_src,
+        })),
+      });
     } catch (e: any) {
-      reply.send({ entries: [], note: `讀取 Cloud Logging 失敗：${String(e?.message ?? e)}` });
+      reply.send({ entries: [], note: String(e?.message ?? e) });
     }
   });
 
   // 手動同步（登入後可按）
-  app.post(`${BASE_PATH}/sync`, async (_req, reply) => {
+  app.post(BASE_PATH + '/sync', async (_req, reply) => {
     try {
-      const result = await syncCoupangAds();
+      const result = await syncCoupangAds({ trigger: 'manual' });
       const summary = summarize(result);
-      app.log.info({ marker: SYNC_MARKER, summary, trigger: 'manual', ...counts(result) }, 'coupangads sync');
+      app.log.info({ marker: 'coupangads_sync', summary, trigger: 'manual' }, 'coupangads sync');
       reply.send({ ok: true, summary, result });
     } catch (e: any) {
       const error = String(e?.message ?? e);
-      app.log.error({ marker: SYNC_MARKER, summary: `失敗：${error}`, trigger: 'manual' }, 'coupangads sync failed');
+      app.log.error({ marker: 'coupangads_sync', error, trigger: 'manual' }, 'coupangads sync failed');
       reply.send({ ok: false, error });
     }
   });
 
-  // 排程入口（Cloud Scheduler，每 30 分鐘）
-  app.post(`${BASE_PATH}/cron`, async (req, reply) => {
+  // 每天 09:50 的輪替
+  app.post(BASE_PATH + '/cron', async (req, reply) => {
     const key = (req.query as any).key;
     if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
     try {
-      const result = await syncCoupangAds();
+      const result = await syncCoupangAds({ trigger: 'cron' });
       const summary = summarize(result);
-      app.log.info({ marker: SYNC_MARKER, summary, trigger: 'cron', ...counts(result) }, 'coupangads sync');
+      app.log.info({ marker: 'coupangads_sync', summary, trigger: 'cron' }, 'coupangads sync');
       reply.send({ ok: true, summary });
     } catch (e: any) {
       const error = String(e?.message ?? e);
-      app.log.error({ marker: SYNC_MARKER, summary: `失敗：${error}`, trigger: 'cron' }, 'coupangads sync failed');
+      app.log.error({ marker: 'coupangads_sync', error, trigger: 'cron' }, 'coupangads sync failed');
       reply.code(500).send({ ok: false, error });
     }
   });
-}
 
-function counts(r: SyncResult) {
-  return { created: r.created, existing: r.existing, failed: r.failed, rebalanced: r.rebalanced, totalGroups: r.totalGroups };
+  // 每 10 分鐘的成效收集
+  app.post(BASE_PATH + '/collect/cron', async (req, reply) => {
+    const key = (req.query as any).key;
+    if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+    try {
+      const r = await collectStats();
+      app.log.info({ marker: 'coupangads_collect', ...r }, 'coupangads collect');
+      reply.send({ ok: true, ...r });
+    } catch (e: any) {
+      const error = String(e?.message ?? e);
+      app.log.error({ marker: 'coupangads_collect', error }, 'coupangads collect failed');
+      reply.code(500).send({ ok: false, error });
+    }
+  });
 }

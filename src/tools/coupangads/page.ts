@@ -43,6 +43,9 @@ const STYLE = `
   .pill.on{background:#EDF7F1;border-color:#BFE3CE;color:#1B7A4B}
   .pill.off{background:#FBEDEA;border-color:#F2C7BD;color:#B33A1F}
   .warn{background:#FFF7E8;border:1px solid #F0DDB4;border-radius:6px;padding:10px 13px;font-size:12.5px;margin:12px 0}
+  .rv{background:#FFF3F0;border:1px solid #F4C4B8;border-radius:6px;padding:12px 14px;font-size:13px;margin:14px 0;display:flex;align-items:center;gap:10px}
+  .rv b{font-size:15px;color:var(--accent)}
+  .pill.wait{background:#FFF6E5;border-color:#F0DDB4;color:#9A6B10}
   .warn ul{margin:4px 0 0;padding-left:18px}
   .logs{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
   .logs div{padding:5px 0;border-bottom:1px solid var(--line2)}
@@ -57,9 +60,10 @@ const BODY = `
   <div class="crumb"><a href="/">ad_tools</a> / 酷澎聯盟投放</div>
   <h1>酷澎聯盟投放</h1>
   <p class="muted" style="margin:10px 0 0;font-size:13px">
-    Coupang 聯盟商品自動上架到 R 平台投放，收益與廣告花費即時對照。每 30 分鐘自動同步新商品。
+    Coupang 聯盟商品自動上架到 R 平台投放，收益與廣告花費對照。每天 09:50 依 reco 最新清單輪替素材。
   </p>
 
+  <div id="review"></div>
   <div id="warn"></div>
 
   <div class="kpis" id="kpis"></div>
@@ -105,7 +109,7 @@ const BODY = `
     <div class="panel" style="padding:0;overflow-x:auto">
       <table class="tb" id="tbl">
         <thead><tr>
-          <th style="width:66px">素材</th><th>商品</th>
+          <th style="width:66px">素材</th><th style="width:64px">槽位</th><th>商品</th>
           <th class="n hide-s">曝光</th><th class="n">點擊</th><th class="n">CTR</th><th class="n">花費</th>
           <th class="n">訂單</th><th class="n hide-s">GMV</th><th class="n">佣金</th><th class="n">ROI</th>
           <th class="n">日預算</th><th>狀態</th>
@@ -116,12 +120,12 @@ const BODY = `
   </div>
 
   <div class="sec">
-    <h2>同步紀錄 <span class="muted" style="text-transform:none;letter-spacing:0">（來自 Cloud Logging，保留 30 天）</span></h2>
+    <h2>同步紀錄 <span class="muted" style="text-transform:none;letter-spacing:0">（每天 09:50 自動輪替）</span></h2>
     <div class="panel logs" id="logs">讀取中…</div>
   </div>
 
   <div class="foot" style="margin-top:30px">
-    R 帳戶 10222 ｜ Campaign <span id="cpg">—</span> ｜ 資料即時取自 Coupang Partners 與 R 報表 API，本工具不存任何報表資料
+    R 帳戶 10222 ｜ 成效每 10 分鐘收集一次（Coupang 佣金報表 T+1 才出，當天數字會偏低）
   </div>
 `;
 
@@ -148,7 +152,7 @@ async function load(){
 function render(){
   const t=data.totals;
   $('#kpis').innerHTML=[
-    ['投放中商品','hero',data.running+' 檔','共 '+data.products.length+' 個廣告群組'],
+    ['投放中商品','hero',data.running+' 檔',(data.pendingReview?('待審 '+data.pendingReview+' · '):'')+'暫停 '+data.paused],
     ['CTR','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
     ['聯盟淨佣金','',money(t.commission),'已扣退貨取消'],
     ['廣告花費','',money(t.spend),'日預算合計 '+money(t.dayBudget)],
@@ -156,9 +160,12 @@ function render(){
     ['訂單 / GMV','',nf(t.orders)+' 筆',money(t.gmv)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
-  $('#cpg').textContent=data.campaignId??'—';
   $('#pcount').textContent='（'+data.range.sd+' ~ '+data.range.ed+'）';
   $('#chart-note').textContent=data.range.sd+' ~ '+data.range.ed;
+
+  $('#review').innerHTML = data.pendingReview
+    ? '<div class="rv">今天換了 <b>'+data.pendingReview+'</b> 檔素材，要到 R 後台審核過才會開始曝光。</div>'
+    : '';
 
   $('#warn').innerHTML = (data.warnings&&data.warnings.length)
     ? '<div class="warn"><b>提醒</b><ul>'+data.warnings.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul></div>' : '';
@@ -168,17 +175,24 @@ function render(){
     const tr=document.createElement('tr');
     tr.innerHTML=
       '<td>'+(p.imageUrl?'<img loading="lazy" src="'+esc(p.imageUrl)+'" alt="">':'')+'</td>'+
+      '<td class="muted" style="font-size:11px">'+(p.slotNo?('slot-'+String(p.slotNo).padStart(3,'0')):'—')+'</td>'+
       '<td><div class="nm">'+(p.landingUrl?'<a href="'+esc(p.landingUrl)+'" target="_blank" rel="noopener">'+esc(p.title||p.productId)+'</a>':esc(p.title||p.productId))+'</div>'+
         '<div class="muted" style="font-size:11px">'+esc(p.productId)+'</div></td>'+
       '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n"><b>'+pct(p.ctr)+'</b></td><td class="n">'+money(p.spend)+'</td>'+
       '<td class="n">'+nf(p.orders)+'</td><td class="n hide-s">'+money(p.gmv)+'</td><td class="n">'+money(p.commission)+'</td>'+
       '<td class="n">'+(p.roi==null?'—':(p.roi*100).toFixed(0)+'%')+'</td>'+
       '<td class="n">'+money(p.dayBudget)+'</td>'+
-      '<td><span class="pill '+(p.active&&p.hasCreative!==false?'on':'off')+'">'+(p.active?'投放中':'暫停')+'</span></td>';
+      '<td>'+statusPill(p)+'</td>';
     tb.appendChild(tr);
   }
-  if(!data.products.length) tb.innerHTML='<tr><td colspan="12" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
+  if(!data.products.length) tb.innerHTML='<tr><td colspan="13" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
   drawCharts();
+}
+
+function statusPill(p){
+  if(!p.active) return '<span class="pill off">已暫停</span>';
+  if(p.pendingReview) return '<span class="pill wait">待審核</span>';
+  return '<span class="pill on">投放中</span>';
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
@@ -266,11 +280,11 @@ function niceMax(v){
 
 async function loadLogs(){
   try{
-    const r=await fetch('/tools/coupangads/api/logs');
+    const r=await fetch('/tools/coupangads/api/runs');
     const j=await r.json();
     $('#logs').innerHTML = j.entries.length
-      ? j.entries.map(e=>'<div>'+esc(e.time)+'　'+esc(e.text)+'</div>').join('')
-      : '<span class="muted">'+esc(j.note||'尚無紀錄')+'</span>';
+      ? j.entries.map(e=>'<div>'+esc(e.time)+'　'+esc(e.text)+(e.message?'　<span style="color:#B33A1F">'+esc(e.message)+'</span>':'')+'</div>').join('')
+      : '<span class="muted">'+esc(j.note||'尚無同步紀錄')+'</span>';
   }catch(e){ $('#logs').innerHTML='<span class="muted">讀取失敗：'+esc(e.message)+'</span>'; }
 }
 
@@ -281,13 +295,12 @@ $('#days').addEventListener('click',(e)=>{
 });
 $('#btn-reload').onclick=()=>{ load(); loadLogs(); };
 $('#btn-sync').onclick=async()=>{
-  if(!confirm('立即同步會把 Coupang reco 清單裡尚未投放的商品在 R 平台建成廣告（會開始花錢）。確定執行？')) return;
+  if(!confirm('立即同步會依 reco 最新清單輪替：換掉已下架商品的素材、暫停不在清單的廣告。換過素材的要重新審核才會曝光。確定執行？')) return;
   const b=$('#btn-sync'); b.disabled=true; b.textContent='同步中…';
   try{
     const r=await fetch('/tools/coupangads/sync',{method:'POST'});
     const j=await r.json();
-    alert(j.ok ? ('同步完成：新建 '+j.result.created+' 檔、已在跑 '+j.result.existing+' 檔、失敗 '+j.result.failed+' 檔（每組日預算 '+j.result.budgetPerGroup+' 元）')
-               : ('同步失敗：'+j.error));
+    alert(j.ok ? ('同步完成：'+j.summary+(j.result.needReview.length?('\n\n要審核的有 '+j.result.needReview.length+' 檔'):'')) : ('同步失敗：'+j.error));
   }catch(e){ alert('同步失敗：'+e.message); }
   b.disabled=false; b.textContent='立即同步';
   load(); loadLogs();

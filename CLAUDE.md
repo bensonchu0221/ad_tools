@@ -89,19 +89,28 @@ popin 內部工具集（取代舊 dctool）。
 - 驗證 `poc/verify_gcpwatch.mts`：111 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照／頁面字串契約）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
 
 ## 酷澎聯盟投放核心（tool#6，`/tools/coupangads`，`src/tools/coupangads/`）
-- 目的：把 Coupang 聯盟商品變成 R 平台廣告去買流量、賺聯盟佣金。**客戶指定只用 Coupang `reco` 端點**（不准 goldbox/bestcategories）。分層：`core/coupang.ts`（Coupang API）＋`core/rixbee_admin.ts`（R **管理** API，與報表側 `core/rixbee.ts` 完全兩套）→ `sync.ts`（同步邏輯）→ `stats.ts`（看板資料）→ `page.ts`／`route.ts`
-- **投放結構**：一支固定 Campaign `[Coupang] reco 自動投放`（日預算 500）→ 一商品一 AdGroup（`group_name='[Coupang] {productId}'`、CPC 1 元、落地頁各自帶 subId）→ 一 Creative（商品圖 300x250、標題＝商品名、`立即選購`、IAB1）。素材別名 `coupang_pid_{productId}`（R 帳戶內唯一＝天然去重，第二次跑不重傳）
-- **只新增不關閉**（客戶決定）：reco 清單裡沒跑過的就建，消失的維持原狀繼續投。每次同步**重新平衡日預算**＝`floor(500 / 商品數)`，值不同才 PUT（20 檔＝各 25 元、總和 500）
-- **⚠️ 每商品一個 subId 的正解（2026-08-25 實測）**：①**不能拿 reco 回的 `productUrl` 去轉 deeplink**（它已是 AppsFlyer onelink）→ `rCode=400 url convert failed`；要自己用 productId 組 `https://www.tw.coupang.com/products/{id}` 再打 `POST /deeplink`。②**`subId` 必須放 body**——放 query 也回 `rCode=0` 不報錯，但 `landingUrl` 不含 `af_siteid` ＝**靜默失效**。一次呼叫只能套一個 subId，故每商品各打一次（20 筆序列 <10s）。實測 20/20 成功且 `af_siteid=r10222_{pid}` 正確
-- **⚠️ R 管理 API 改東西＝GET 整包 → 改 → 整包 PUT（2026-08-25 打通）**：舊筆記「PUT 改 status 回 Validation Failed、建立後只能 Active」是**因為只送部分欄位**。實測 `GET /ad-groups/{id}` 回完整物件、改 `budget.day_budget` 或 `group_status` 後整包 PUT 回去 → `code:200`，回讀確認生效（166→25、Active↔暫停都成功）。封裝在 `rixbee_admin.updateGroup`／`setGroupStatus`／`setGroupDayBudget`
-- **管理 token**：一帳一組 raw token（R console 產、32 碼 hex），存**共用庫 `nexus.r_account_tokens`**（欄 email/name/token，該表由 CMP `r_bulk_upload` 建立與維護、UI 在該站 `/admin/accounts`，本工具只讀）。換發 `POST /auth/tokens` body `{account_name=登入 email, api_token=raw}`，**回的 token 只活 1 小時**（本工具快取 50 分）。帳戶 10222＝`benson@popin.cc`（2026-08-25 寫入該表 id=42）
-- **看板即時、零資料表**：`stats.ts` 一次併發抓 ①R 管理 API（在跑的 group／預算／狀態／素材縮圖）②Coupang `reports/commission`（日層佣金）＋`orders`（**含 productId/gmv/佣金率**）＋`cancels`（欄位與 orders 同構，**佣金要扣掉**）③R 報表 API（`dimensions:['day','group_id']`、花費欄 `payment_revenue`）。兩邊靠 `subId=r10222_{pid}` ↔ `group_name` 對起來。R 帳號型別走既有 `detectRUserType`（回 null＝尚未投放，只警告不擋）
-- **圖表**：佣金與花費同為台幣＝**共用一條 y 軸**（刻意不做雙軸）；**CTR 是百分比故另開第二張圖**（單系列 `#0E9F6E`），不與金額同軸。配色 `#2563EB`（佣金）／`#FF5436`（花費）／`#0E9F6E`（CTR）經 dataviz validator 驗過（三色最差 protan ΔE 9.6、normal 31.9、對比 ≥3:1 全 PASS）
-- **CTR（2026-08-25 加）**：KPI 大項、獨立折線圖、素材清單各一份，**清單預設依 CTR 由高到低排序**（`compareByCtr`：同 CTR 再比佣金、花費）。`ctrOf(imp,click)` **無曝光回 `null` 不是 0**——0% 會讓「還沒開始跑」與「跑了沒人點」混為一談；UI 顯示 `—`，折線在該日**斷點**不畫成 0
-- **排程**：Cloud Scheduler 每 30 分鐘 POST `/tools/coupangads/cron`（同步跑完才回，實測滿版 20 檔約 40s）。執行紀錄印進 stdout 帶 `marker=coupangads_sync`，UI 用 `core/logging.ts` 讀 Cloud Logging（**讀取不計費**、`_Default` 保留 30 天；Cloud Run SA 的 `roles/editor` 已含 `logging.logEntries.list`，不需改 IAM）
-- **未驗／已知取捨**：①reco 固定回同 20 筆（`limit`/`deviceId` 無效），**清單多久換一次仍未驗**，排程本身就是觀測器；②商品下架後廣告不會自動關（只新增不關閉），落地頁可能失效仍會花錢；③campaign 層日預算能否真正壓住底下 group 總和未驗（現況總和剛好 500 故看不出來）；④佣金揭露聲明（Coupang 每次回應都提醒）依使用者決定**不放進素材與落地頁**
-- 金鑰：`COUPANG_ACCESS_KEY`／`COUPANG_SECRET_KEY` 在 Secret Manager（`coupang-access-key`／`coupang-secret-key`）
-- 手動跑：`npx tsx poc/coupang_sync_run.mts [商品數] [--dry]`
+- 目的：把 Coupang 聯盟商品變成 R 平台廣告去買流量、賺聯盟佣金。**客戶指定只用 Coupang `reco` 端點**。分層：`core/coupang.ts`（Coupang API）＋`core/rixbee_admin.ts`（R **管理** API，與報表側 `core/rixbee.ts` 完全兩套）→ `plan.ts`（輪替決策純函式）→ `sync.ts`（執行）→ `collect.ts`（成效收集）→ `stats.ts`／`page.ts`／`route.ts`
+- **投放結構**：一支固定 Campaign `[Coupang] reco 自動投放`（日預算 **3000**）→ **一 slot 一 AdGroup**（`group_name='[Coupang] slot-NNN'`、CPC 1 元、各自落地頁）→ 一 Creative（商品圖 300x250、`立即選購`、IAB1）。素材別名 `coupang_pid_{productId}`（帳戶內唯一＝天然去重）
+- **⚠️ 輪替規則（2026-08-26 大改，取代最初的「只新增不關閉」）**：**每天 09:50 跑一次**，做 reco 清單與現有 slot 的差集——
+  ①**同商品、文案價格也沒變 → 完全不碰**（不換素材、不換落地頁）＝不觸發重審，繼續跑；
+  ②**同商品但價格/文案變了 → 只改 creative 文案**（素材與落地頁不動），把重審範圍壓到最小；
+  ③**新商品 → 覆蓋「最久沒換」且已不在清單的 slot**（換素材＋落地頁＋文案＋改成 slot 名），slot 不夠才開新 group；
+  ④**已不在清單、又沒被覆蓋 → 暫停**；⑤暫停過的商品回到清單 → 走覆蓋路徑重新啟用。
+  實測首次套用：67 檔 → 不動 19、改文案 1、暫停 47、在跑 20 檔。決策全在 `plan.ts planRotation`（純函式、42 項驗證）
+- **每檔日預算＝`floor(3000 ÷ 在跑檔數 × 2)`**（20 檔→300，帳面總和 6000 由 campaign 日預算 3000 當硬上限擋著，讓熱門商品能多吃）。**campaign 日預算每次同步都校正**——初版程式從不更新它，會卡住整體花費
+- **⚠️ 審核是阻斷式的，而且沒有 API**：使用者（平台內部人員）每天 10:00 在 R 後台審核，**審過才會開始曝光**。試過 7 個審核端點全 404（`/audits`、`/ad-creatives/{id}/audit`…；唯一非 404 的 `/ad-creatives/audit-status` 是被 `/{cr_id}` 路由接走，隨機字串回一樣的錯）。**但找到訊號**：改動 creative 當下 `summary_status` 會變 **3**（實測 4→3），故 `PENDING_REVIEW=3`，看板據此顯示「待審 N 檔」。值 1／4 的語意仍不明（兩者都有曝光）
+- **⚠️⚠️ PUT creative 的欄位名不對稱**：`GET /ad-creatives/{id}` 回 `cr_mt`／`cr_icon`，但 PUT 要 `cr_mt_id`／`cr_icon_id`——把 GET 的物件原封 PUT 回去會回 `400 Validation Failed: cr_mt_id Required`。`rixbee_admin.updateCreative` 已內建轉換。campaign／group 則無此問題（同名）
+- **每商品一個 subId 的正解**：①不能拿 reco 回的 `productUrl` 轉 deeplink（已是 onelink）→ `rCode=400 url convert failed`，要自組 `https://www.tw.coupang.com/products/{id}`；②**`subId` 必須放 body**，放 query 一樣回 `rCode=0` 但 `landingUrl` 不含 `af_siteid` ＝靜默失效
+- **四張表**（`ad_tools` 庫，前綴 `coupang_`；2026-08-26 由「零資料表」改為建表，因為比對價格、挑最久沒換的 slot、看長期趨勢都需要歷史，R 上只有當下狀態）：
+  `coupang_slots`（slot↔商品對映、上次換的時間、審核狀態；**覆蓋優先序就查這張**）／`coupang_products`（商品快照與價格，比對文案有無變動）／`coupang_daily_stats`（日×商品成效，看板讀它）／`coupang_sync_runs`（每次輪替做了什麼）
+- **成效收集 `collect.ts`（每 10 分鐘）**：R 報表（`dimensions:['day','group_id']`、花費欄 `payment_revenue`）＋ Coupang `commission`／`orders`／`cancels`（**佣金要扣掉取消**）→ 依 slot 對映聚到 `日×商品` upsert，回補最近 4 天（Coupang 報表 T+1 才出、退貨會回頭修正）。順便把 R 的開關/審核狀態同步回 `coupang_slots`。**R 帳號型別寫死 `direct`**（10222 實測；env `COUPANG_R_USER_TYPE` 可覆蓋）省掉每次 3 支 probe
+  - ⚠️ 粒度取捨：換素材當天，該 group 全天的量會算給「當下掛的商品」（R 報表只有日×group，拆不出時段）
+- **圖表**：佣金與花費同為台幣＝共用一條 y 軸（不做雙軸）；CTR 是百分比故另開第二張圖。配色 `#2563EB`（佣金）／`#FF5436`（花費）／`#0E9F6E`（CTR）過 dataviz validator（三色最差 protan ΔE 9.6）。清單**依 CTR 由高到低**，`ctrOf` 無曝光回 `null` 不是 0（UI 顯示 —、折線斷點）
+- **排程**：`coupangads-sync` 每天 09:50 台北 POST `/tools/coupangads/cron`；`coupangads-collect` 每 10 分鐘 POST `/tools/coupangads/collect/cron`。（初版每 30 分鐘那支已停用）
+- **⚠️ 未解：Coupang 端收不到我們的點擊**。8/25 R 花 392.67 元、393 次點擊，Coupang clicks 報表**我們的 subId 一列都沒有**（同日他自己其他來源的 58 次有記錄）。落地頁本身正常（手機 UA curl 追蹤：onelink → `link.tw.coupang.com/re2/...subid=r10222_xxx`，HTTP 200）。可能是 R 流量品質、報表延遲或追蹤未被收下，**尚未結案**
+- **reco 清單變動實測**：45 秒連打 3 次完全相同；由 67 個 group 的建立時間回推＝**每天早上 07:30 整批換 20 檔＋平時每小時換 1 檔**（不是分鐘級）。故排程定在 09:50（早上那波之後、使用者 10:00 上班審核之前）
+- 金鑰：`COUPANG_ACCESS_KEY`／`COUPANG_SECRET_KEY` 在 Secret Manager；R 管理 token 走 `nexus.r_account_tokens`（email `benson@popin.cc`），**換發的 token 只活 1 小時**
+- 驗證：`poc/verify_coupangads.mts`（42 項純函式，已做 3 個變異測試）／手動跑 `poc/coupang_sync_run.mts [--dry]`／遷移 `poc/migrate_coupang_slots.mts`
 
 ## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
 - **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
@@ -125,12 +134,13 @@ popin 內部工具集（取代舊 dctool）。
 - `/tools/adstream/worker/cron?key=...`：AdStream 單設定 worker（Cloud Scheduler `adstream-worker` 每分鐘 POST；一次原子認領一筆）
 - `/tools/mgidsource/cron?key=...`：MGID 媒體報表每日入列（建議 Scheduler 11:00 台北，錯開 AdStream）
 - `/tools/mgidsource/worker/cron?key=...`：MGID 媒體報表 worker（每分鐘認領一帳，寫 `mgid_source_raw`）
-- `/tools/coupangads/cron?key=...`：酷澎聯盟投放同步（Cloud Scheduler `coupangads-sync` 每 30 分鐘 POST）
+- `/tools/coupangads/cron?key=...`：酷澎聯盟投放輪替（Cloud Scheduler `coupangads-sync` 每天 09:50 POST）
+- `/tools/coupangads/collect/cron?key=...`：酷澎成效收集（Cloud Scheduler `coupangads-collect` 每 10 分鐘 POST）
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 待辦
 - **MGID 媒體報表（tool#5，2026-08-25）本機已驗、線上待驗**：頁面 Slot Board、compose 純函式全過、里山十二食回補 90 天 raw 可看圖表。**線上待驗**：①部署後 `/tools/mgidsource` 進得去；②Cloud Scheduler `mgid-source-daily`（台北 11:00）與 `mgid-source-worker`（每分鐘）要新建；③首次各帳 90 天回補跑完、清單帳號不再顯示尚未同步；④LA 時區兩帳（859152／859153）日期不錯日。
-- **酷澎聯盟投放（tool#6，2026-08-25）本機全鏈路已真跑、線上待驗**：R 帳戶 10222 已真的建好 Campaign 194431＋20 個 AdGroup／素材／Creative（全 Active、日預算各 25 總和 500、CPC 1、落地頁 20/20 帶對 `af_siteid`），看板本機渲染正常（KPI／折線／商品表縮圖）。**線上待驗**：①部署後 `/tools/coupangads` 進得去、Coupang 金鑰 secret 有掛上；②Cloud Scheduler `coupangads-sync` 真的每 30 分鐘跑成功（看「同步紀錄」區塊有沒有列，本機執行不會進 Cloud Logging）；③**線上 SA 讀 Cloud Logging 是否真的通**（本機是使用者憑證，scope 差異只有線上才看得到，同 gcpwatch 那個坑）；④開始有曝光後 R 報表型別偵測要能判出（現在 0 資料回 null）、花費與 ROI 有數字；⑤有人下單後確認 `orders`/`commission` 的 subId 真的分得出每商品
+- **酷澎聯盟投放（tool#6）2026-08-26 大改輪替規則＋建四張表，線上待驗**：①每天 09:50 輪替是否真的只動該動的（看「同步紀錄」的「不動 N」）；②每 10 分鐘的收集器有沒有把 `coupang_daily_stats` 寫滿；③使用者 10:00 審核後 `summary_status` 從 3 變成什麼（會確定審核狀態對照表）；④Coupang 端收不到點擊的問題要結案。舊事項：**（2026-08-25）本機全鏈路已真跑**：R 帳戶 10222 已真的建好 Campaign 194431＋20 個 AdGroup／素材／Creative（全 Active、日預算各 25 總和 500、CPC 1、落地頁 20/20 帶對 `af_siteid`），看板本機渲染正常（KPI／折線／商品表縮圖）。**線上待驗**：①部署後 `/tools/coupangads` 進得去、Coupang 金鑰 secret 有掛上；②Cloud Scheduler `coupangads-sync` 真的每 30 分鐘跑成功（看「同步紀錄」區塊有沒有列，本機執行不會進 Cloud Logging）；③**線上 SA 讀 Cloud Logging 是否真的通**（本機是使用者憑證，scope 差異只有線上才看得到，同 gcpwatch 那個坑）；④開始有曝光後 R 報表型別偵測要能判出（現在 0 資料回 null）、花費與 ROI 有數字；⑤有人下單後確認 `orders`/`commission` 的 subId 真的分得出每商品
 - **資源看板（tool#4，2026-08-17）本機全綠、線上待驗**：本機真 API 端到端過（三台 Redis／兩台 SQL 都有值、144 點趨勢、hover 正常、console 無錯）。**線上待驗**：①Cloud Run SA 打 Memorystore／sqladmin／Monitoring 三支 API 是否都通（本機是使用者憑證，線上是 SA；理論上 roles/editor 夠，但沒實跑過）；②頁面 60 秒自動更新有沒有真的動；③首頁版位卡進得去。**後續可加**：告警（Cloud Scheduler 每小時檢查 + Slack/Email，使用者這次選純看板先不做）、Cloud Run 5xx（第一版刻意不收）
 - **週報隨機調整模式（2026-07-22）本機全綠、線上端到端待驗**：離線 8 支迴歸全過（`verify_weekly_adjust`/`split_equiv`/`preview` 及既有 5 支未回歸）＋自包含頁面視覺檢視（CPC/CTR 落在區間、裝置 Tablet/Others 零花費維持 0、Raw 寬表橫向捲動）；DB 冒煙過（awaiting_adjustment/adjust_json/requeue）。**線上待驗**：①表單勾「隨機調整」跑一個小帳號短區間 → cron 觸發後佇列顯示「待調整」；②進調整頁填 CPC/CTR 生成預覽 → 7 表數字合理、Raw spend 與抓取一致；③「重抽」數字變、同參數同 seed 重現；④「產出」下載 xlsx 與預覽逐格一致、`weekly_snapshots` 無新列；⑤「再調整」覆寫同檔；⑥「重新抓取」回佇列重跑、adjust_json 預填保留；⑦刪 GCS `weekly/{id}/raw.json` 模擬逾期 → 預覽報「請按重新抓取」。⚠️ bucket lifecycle 需確認有「weekly/ 前綴 14 天」規則涵蓋 raw.json
 - **AdStream MGID 串接（2026-07-10）本機資料層已驗（真 API 抓取＋欄位對齊＋cv/imp 守恆全過），線上端到端待驗**：①在設定加 MGID 帳號＋把 conv_interest/decision/buy 拖進 cv 桶 → 跑一次確認 `m_bulk_raw_data` 有 24 欄、`integrated` 出現 platform=M 列、`device_summary` MGID 裝置有併入；②清單「訊息」欄會顯示「MGID N 列（帳號:列數）」，`MGID 0 列`＝帳號無資料或 token 問題；③重抓昨天多來源下拉新增「只重抓 MGID」。注意 4A 兩帳號(默沙東/黑松)近期 0 投放屬正常

@@ -1500,3 +1500,268 @@ export async function getRAccountToken(email: string): Promise<string | null> {
   const r = (rows as any[])[0];
   return r ? r.token : null;
 }
+
+// ---------- 酷澎聯盟投放（tool#6） ----------
+// 四張表都在本工具自管庫（連線預設 DB_NAME=ad_tools），前綴 coupang_。
+// 2026-08-26 由「零資料表」改為建表：因為新規則要比對「同商品的價格文案有沒有變」、
+// 要挑「最久沒換的 slot」、要看長期成效趨勢，這些都需要歷史，R 平台上只有當下狀態。
+
+export interface CoupangSlotRow {
+  groupId: number;
+  slotNo: number;
+  productId: string | null;
+  crId: number | null;
+  mtId: number | null;
+  landingUrl: string | null;
+  title: string | null;
+  descr: string | null;
+  price: number | null;
+  dayBudget: number | null;
+  active: boolean;
+  summaryStatus: number | null;
+  assignedAt: string | null;
+  lastChangedAt: string | null;
+}
+
+export interface CoupangProductRow {
+  productId: string;
+  name: string | null;
+  price: number | null;
+  imageUrl: string | null;
+  category: string | null;
+  isRocket: boolean;
+}
+
+export interface CoupangDailyStatRow {
+  dt: string;
+  productId: string;
+  groupId: number | null;
+  imp: number; click: number; spend: number;
+  coupangClick: number; orders: number; gmv: number; commission: number;
+}
+
+export interface CoupangSyncRunRow {
+  trigger: 'cron' | 'manual';
+  recoCount: number; unchanged: number; textUpdated: number;
+  replaced: number; created: number; paused: number; failed: number;
+  budgetPerGroup: number | null; elapsedMs: number; message: string | null;
+}
+
+let coupangSchemaReady = false;
+
+async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
+  if (coupangSchemaReady) return;
+  // slot＝R 上的一個 AdGroup；商品輪替是「換這個槽裡的素材/文案」而不是開新 group。
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_slots (
+      group_id        BIGINT       NOT NULL PRIMARY KEY,
+      slot_no         INT          NOT NULL,
+      product_id      VARCHAR(32)  NULL,
+      cr_id           BIGINT       NULL,
+      mt_id           BIGINT       NULL,
+      landing_url     TEXT         NULL,
+      title           VARCHAR(255) NULL,
+      descr           VARCHAR(255) NULL,
+      price           DECIMAL(12,2) NULL,
+      day_budget      INT          NULL,
+      active          TINYINT      NOT NULL DEFAULT 1,
+      summary_status  INT          NULL,
+      assigned_at     DATETIME     NULL,
+      last_changed_at DATETIME     NULL,
+      synced_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_slot_no (slot_no),
+      INDEX idx_product (product_id),
+      INDEX idx_changed (last_changed_at)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  // 商品快照：比對「價格/文案有沒有變」的依據，也留下出現頻率
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_products (
+      product_id    VARCHAR(32)  NOT NULL PRIMARY KEY,
+      name          VARCHAR(500) NULL,
+      price         DECIMAL(12,2) NULL,
+      image_url     TEXT         NULL,
+      category      VARCHAR(128) NULL,
+      is_rocket     TINYINT      NOT NULL DEFAULT 0,
+      first_seen_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      seen_count    INT          NOT NULL DEFAULT 1
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  // 每日成效：R 側（曝光/點擊/花費，group 粒度）＋ Coupang 側（點擊/訂單/佣金，subId=商品粒度）
+  // ⚠️ 粒度取捨：換素材當天，該 group 全天的量會算給「當下掛的商品」（R 報表只有日×group，拆不出時段）
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_daily_stats (
+      dt            DATE         NOT NULL,
+      product_id    VARCHAR(32)  NOT NULL,
+      group_id      BIGINT       NULL,
+      imp           BIGINT       NOT NULL DEFAULT 0,
+      click         BIGINT       NOT NULL DEFAULT 0,
+      spend         DECIMAL(16,4) NOT NULL DEFAULT 0,
+      coupang_click BIGINT       NOT NULL DEFAULT 0,
+      orders        INT          NOT NULL DEFAULT 0,
+      gmv           DECIMAL(16,2) NOT NULL DEFAULT 0,
+      commission    DECIMAL(16,2) NOT NULL DEFAULT 0,
+      synced_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (dt, product_id),
+      INDEX idx_dt (dt)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_sync_runs (
+      id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+      ran_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      trigger_src      VARCHAR(16) NOT NULL,
+      reco_count       INT NOT NULL DEFAULT 0,
+      unchanged        INT NOT NULL DEFAULT 0,
+      text_updated     INT NOT NULL DEFAULT 0,
+      replaced         INT NOT NULL DEFAULT 0,
+      created          INT NOT NULL DEFAULT 0,
+      paused           INT NOT NULL DEFAULT 0,
+      failed           INT NOT NULL DEFAULT 0,
+      budget_per_group INT NULL,
+      elapsed_ms       INT NULL,
+      message          TEXT NULL,
+      INDEX idx_ran (ran_at)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  coupangSchemaReady = true;
+}
+
+async function coupangPool(): Promise<mysql.Pool> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定（酷澎聯盟投放需要資料庫）');
+  await ensureCoupangSchema(p);
+  return p;
+}
+
+const num = (v: any): number | null => (v === null || v === undefined ? null : Number(v));
+
+export async function listCoupangSlots(): Promise<CoupangSlotRow[]> {
+  const p = await coupangPool();
+  const [rows] = await p.query(`SELECT * FROM coupang_slots ORDER BY slot_no`);
+  return (rows as any[]).map((r) => ({
+    groupId: Number(r.group_id), slotNo: Number(r.slot_no),
+    productId: r.product_id ?? null, crId: num(r.cr_id), mtId: num(r.mt_id),
+    landingUrl: r.landing_url ?? null, title: r.title ?? null, descr: r.descr ?? null,
+    price: num(r.price), dayBudget: num(r.day_budget), active: Number(r.active) === 1,
+    summaryStatus: num(r.summary_status),
+    assignedAt: r.assigned_at ? new Date(r.assigned_at).toISOString() : null,
+    lastChangedAt: r.last_changed_at ? new Date(r.last_changed_at).toISOString() : null,
+  }));
+}
+
+/** 下一個可用的 slot 序號（開新 group 時用）。 */
+export async function nextCoupangSlotNo(): Promise<number> {
+  const p = await coupangPool();
+  const [rows] = await p.query(`SELECT COALESCE(MAX(slot_no), 0) + 1 AS n FROM coupang_slots`);
+  return Number((rows as any[])[0].n);
+}
+
+/** upsert 一個 slot。changed=true 代表這次真的動了素材/文案，會推進 last_changed_at。 */
+export async function upsertCoupangSlot(s: Partial<CoupangSlotRow> & { groupId: number; slotNo: number }, changed = false): Promise<void> {
+  const p = await coupangPool();
+  await p.query(
+    `INSERT INTO coupang_slots
+       (group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price, day_budget, active, summary_status, assigned_at, last_changed_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,${s.assignedAt === undefined ? 'NOW()' : '?'}, ${changed ? 'NOW()' : 'COALESCE(?, NOW())'})
+     ON DUPLICATE KEY UPDATE
+       slot_no=VALUES(slot_no), product_id=VALUES(product_id), cr_id=VALUES(cr_id), mt_id=VALUES(mt_id),
+       landing_url=VALUES(landing_url), title=VALUES(title), descr=VALUES(descr), price=VALUES(price),
+       day_budget=VALUES(day_budget), active=VALUES(active), summary_status=VALUES(summary_status)
+       ${changed ? ', assigned_at=VALUES(assigned_at), last_changed_at=NOW()' : ''}`,
+    [
+      s.groupId, s.slotNo, s.productId ?? null, s.crId ?? null, s.mtId ?? null,
+      s.landingUrl ?? null, s.title ?? null, s.descr ?? null, s.price ?? null,
+      s.dayBudget ?? null, s.active === false ? 0 : 1, s.summaryStatus ?? null,
+      ...(s.assignedAt === undefined ? [] : [s.assignedAt]),
+      ...(changed ? [] : [s.lastChangedAt ?? null]),
+    ]
+  );
+}
+
+/** 只更新從 R 撈回來的即時狀態（不動商品對映）——給每 10 分鐘的 worker 用。 */
+export async function updateCoupangSlotStatus(groupId: number, active: boolean, summaryStatus: number | null, dayBudget: number | null): Promise<void> {
+  const p = await coupangPool();
+  await p.query(
+    `UPDATE coupang_slots SET active=?, summary_status=?, day_budget=? WHERE group_id=?`,
+    [active ? 1 : 0, summaryStatus, dayBudget, groupId]
+  );
+}
+
+export async function upsertCoupangProducts(list: CoupangProductRow[]): Promise<void> {
+  if (!list.length) return;
+  const p = await coupangPool();
+  for (const x of list) {
+    await p.query(
+      `INSERT INTO coupang_products (product_id, name, price, image_url, category, is_rocket)
+       VALUES (?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         name=VALUES(name), price=VALUES(price), image_url=VALUES(image_url),
+         category=VALUES(category), is_rocket=VALUES(is_rocket),
+         last_seen_at=NOW(), seen_count=seen_count+1`,
+      [x.productId, x.name, x.price, x.imageUrl, x.category, x.isRocket ? 1 : 0]
+    );
+  }
+}
+
+export async function listCoupangProducts(ids: string[]): Promise<Map<string, CoupangProductRow>> {
+  const out = new Map<string, CoupangProductRow>();
+  if (!ids.length) return out;
+  const p = await coupangPool();
+  const [rows] = await p.query(
+    `SELECT * FROM coupang_products WHERE product_id IN (${ids.map(() => '?').join(',')})`, ids
+  );
+  for (const r of rows as any[]) {
+    out.set(String(r.product_id), {
+      productId: String(r.product_id), name: r.name ?? null, price: num(r.price),
+      imageUrl: r.image_url ?? null, category: r.category ?? null, isRocket: Number(r.is_rocket) === 1,
+    });
+  }
+  return out;
+}
+
+export async function upsertCoupangDailyStats(rows: CoupangDailyStatRow[]): Promise<void> {
+  if (!rows.length) return;
+  const p = await coupangPool();
+  for (const r of rows) {
+    await p.query(
+      `INSERT INTO coupang_daily_stats (dt, product_id, group_id, imp, click, spend, coupang_click, orders, gmv, commission)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         group_id=VALUES(group_id), imp=VALUES(imp), click=VALUES(click), spend=VALUES(spend),
+         coupang_click=VALUES(coupang_click), orders=VALUES(orders), gmv=VALUES(gmv), commission=VALUES(commission)`,
+      [r.dt, r.productId, r.groupId, r.imp, r.click, r.spend, r.coupangClick, r.orders, r.gmv, r.commission]
+    );
+  }
+}
+
+export async function listCoupangDailyStats(sd: string, ed: string): Promise<CoupangDailyStatRow[]> {
+  const p = await coupangPool();
+  const [rows] = await p.query(
+    `SELECT * FROM coupang_daily_stats WHERE dt BETWEEN ? AND ? ORDER BY dt`, [sd, ed]
+  );
+  return (rows as any[]).map((r) => ({
+    dt: new Date(r.dt).toISOString().slice(0, 10),
+    productId: String(r.product_id), groupId: num(r.group_id),
+    imp: Number(r.imp), click: Number(r.click), spend: Number(r.spend),
+    coupangClick: Number(r.coupang_click), orders: Number(r.orders),
+    gmv: Number(r.gmv), commission: Number(r.commission),
+  }));
+}
+
+export async function insertCoupangSyncRun(r: CoupangSyncRunRow): Promise<void> {
+  const p = await coupangPool();
+  await p.query(
+    `INSERT INTO coupang_sync_runs
+       (trigger_src, reco_count, unchanged, text_updated, replaced, created, paused, failed, budget_per_group, elapsed_ms, message)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [r.trigger, r.recoCount, r.unchanged, r.textUpdated, r.replaced, r.created, r.paused, r.failed, r.budgetPerGroup, r.elapsedMs, r.message]
+  );
+}
+
+export async function listCoupangSyncRuns(limit = 20): Promise<any[]> {
+  const p = await coupangPool();
+  const [rows] = await p.query(`SELECT * FROM coupang_sync_runs ORDER BY id DESC LIMIT ?`, [limit]);
+  return rows as any[];
+}

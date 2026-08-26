@@ -92,6 +92,20 @@ export async function createCampaign(email: string, input: {
   return id;
 }
 
+/** 取單筆 campaign 完整物件。 */
+export async function getCampaign(email: string, cpgId: number): Promise<any> {
+  const j = await req(email, 'GET', `/ad-campaigns/${cpgId}`);
+  if (!j?.data) fail(j, `讀取 Campaign ${cpgId}`);
+  return j.data;
+}
+
+/** 修改 campaign（同 group：GET 整包 → 合併 → PUT）。日預算是整體花費的硬上限，一定要校正。 */
+export async function updateCampaign(email: string, cpgId: number, patch: Record<string, any>): Promise<void> {
+  const cur = await getCampaign(email, cpgId);
+  const j = await req(email, 'PUT', `/ad-campaigns/${cpgId}`, { ...cur, ...patch });
+  if (j?.code !== 200) fail(j, `更新 Campaign ${cpgId}`);
+}
+
 // ---------- AdGroup ----------
 
 export interface RGroup { group_id: number; group_name: string; cpg_id?: number; group_status?: number; target_info?: string }
@@ -203,6 +217,31 @@ export async function createCreative(email: string, input: {
   const id = j?.data?.cr_id;
   if (!id) fail(j, '建立 Creative');
   return id;
+}
+
+/** 取單筆 creative 完整物件。 */
+export async function getCreative(email: string, crId: number): Promise<any> {
+  const j = await req(email, 'GET', `/ad-creatives/${crId}`);
+  if (!j?.data) fail(j, `讀取 Creative ${crId}`);
+  return j.data;
+}
+
+/**
+ * 修改 creative（換素材／改標題描述）：GET 整包 → 合併 → PUT。
+ * ⚠️⚠️ **GET 與 PUT 的欄位名不對稱**：GET 回 `cr_mt`／`cr_icon`，PUT 卻要 `cr_mt_id`／`cr_icon_id`。
+ * 直接把 GET 的物件 PUT 回去會回 `400 Validation Failed: cr_mt_id Required`（2026-08-26 實測）。
+ * ⚠️ 改動會讓 `summary_status` 變 3（待審）→ 平台審過才恢復投放，所以「沒變的東西不要改」。
+ */
+export async function updateCreative(email: string, crId: number, patch: Record<string, any>): Promise<void> {
+  const cur = await getCreative(email, crId);
+  const body = {
+    ...cur,
+    cr_mt_id: Number(cur.cr_mt),          // 欄位名轉換，別省
+    cr_icon_id: Number(cur.cr_icon ?? 0),
+    ...patch,
+  };
+  const j = await req(email, 'PUT', `/ad-creatives/${crId}`, body);
+  if (j?.code !== 200) fail(j, `更新 Creative ${crId}`);
 }
 
 export async function listCreatives(email: string, groupId?: number): Promise<any[]> {
