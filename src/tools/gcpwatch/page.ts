@@ -191,7 +191,7 @@ const STYLE = `
   .hud-demo-label{font-family:var(--mono);font-size:9px;letter-spacing:.15em;color:var(--mut);margin:0 0 7px 5%}
   .hud-prototype{position:relative;width:100%;color:#01D7EB}
   .hud-prototype-1{aspect-ratio:480/300}
-  .hud-prototype-2{aspect-ratio:480/220}
+  .hud-prototype-2{aspect-ratio:480/287}
   .hud-prototype-frame{position:absolute;inset:0;display:block;width:100%;height:100%;overflow:visible;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .hud-prototype .hud-solid{fill:currentColor}
@@ -238,12 +238,6 @@ const STYLE = `
     letter-spacing:.08em;color:var(--mut);white-space:nowrap}
   .hud-prototype-stat b{display:block;margin-top:1px;font-family:var(--mono);font-size:clamp(7px,2vw,9.5px);
     font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  /* Demo 2 高度較短，壓縮資料列的垂直節奏，但不縮小主要讀值。 */
-  .hud-prototype-2 .hud-prototype-main{margin-top:7px}
-  .hud-prototype-2 .hud-prototype-chart svg{height:34px}
-  .hud-prototype-2 .hud-prototype-stats{gap:3px 10px;padding-top:4px}
-  .hud-prototype-2 .hud-prototype-stat span,.hud-prototype-2 .hud-prototype-stat b{line-height:1.2}
-
   /* 開機序列：只有首次繪製時逐格亮起，60 秒自動更新不重播（每分鐘閃一次很煩） */
   @keyframes rise{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
   .boot{animation:rise .5s cubic-bezier(.2,.75,.25,1) backwards;animation-delay:calc(var(--i,0) * 45ms)}
@@ -731,47 +725,45 @@ export function renderGcpWatch(vm: DashboardVM): string {
         </div>
       </div>
       <div class="hud-demo">
-        <div class="hud-demo-label">DEMO 02 · HAND-DRAWN 220</div>
+        <div class="hud-demo-label">DEMO 02 · HAND-DRAWN 287</div>
         <div class="hud-prototype hud-prototype-2" aria-hidden="true">
-          <svg class="hud-prototype-frame" width="480" height="220" viewBox="0 0 480 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <svg class="hud-prototype-frame" width="480" height="287" viewBox="0 0 480 287" fill="none" xmlns="http://www.w3.org/2000/svg">
             <g class="hud-solid">
               <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
               <path d="M80.887 7.5L86 10.4697H139H222.5H239.5L236.5 7.5H210.5L206.5 3.5H158.5L154.5 7.5H80.887Z"/>
               <path d="M447 3.5H452L465.5 17V22L447 3.5Z"/>
-              <path d="M24.134 206H48.5L61 213.217H58L48 207.5H26L24.134 206Z" stroke="currentColor"/>
-              <path d="M457.5 206L411 206L401 216H403.5L412 207.5H435L436.5 209H452.5L454 207.5H456L457.5 206Z" stroke="currentColor"/>
-              <path d="M479 169L476.5 166.5V188.5L469.5 195.5V199.5L479 190V169Z"/>
-              <path d="M397 217L408.5 205.5H405.5L397 214V217Z"/>
-              <path d="M53.1173 205.5L72.4414 216.657L70 212.428L58 205.5H53.1173Z"/>
-              <path d="M0.5 185L9 194.25L9 190.5L3 184.5V164.557L0.5 167.057V185Z"/>
+              <path d="M24.134 273H48.5L61 280.217H58L48 274.5H26L24.134 273Z" stroke="currentColor"/>
+              <path d="M457.5 273H411L401 283H403.5L412 274.5H435L436.5 276H452.5L454 274.5H456L457.5 273Z" stroke="currentColor"/>
+              <path d="M479 236L476.5 233.5V255.5L469.5 262.5V266.5L479 257V236Z"/>
+              <path d="M397 284L408.5 272.5H405.5L397 281V284Z"/>
+              <path d="M53.1173 272.5L72.4414 283.657L70 279.428L58 272.5H53.1173Z"/>
+              <path d="M0.5 252L9 261.25L9 257.5L3 251.5V231.557L0.5 234.057V252Z"/>
               <path d="M8.5 6.5H5.5L1 11L3 12L8.5 6.5Z"/>
               <path d="M1 11V67L3 69V12L1 11Z"/>
-              <path d="M13 168V79L10.5 76.5V163.093L13 168Z"/>
+              <path d="M13 236V79L10.5 76.5V150.5L13 153.5V236Z"/>
             </g>
             <g class="hud-lines">
               <path d="M447 0.500001L389.419 0.5L382 6.5H336"/>
               <path d="M139 10.4697H86L74 3.5H10M86 10.4697H366M86 10.4697L80.887 7.5H154.5L158.5 3.5H206.5L210.5 7.5H236.5L239.5 10.4697H222.5M222.5 10.4697L219 14H200.5L199 12.5H141L139 10.4697M222.5 10.4697H139"/>
-              <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V123"/>
-              <path d="M72.4414 216.657L76.5 219H395L410 204H465L479 190V169L469.5 159.5M479 169L476.5 166.5V188.5L469.5 195.5V199.5L479 190M0.5 185L17.5 203.5H49.6532L53.1173 205.5M3 164.557V184.5L9 190.5L9 194.25L0.5 185V167.057L3 164.557ZM7.5 160.057L3 164.557M3 164.5V164.557M53 205.5H53.1173M72.5 216.758L72.4414 216.657M53.1173 205.5L72.4414 216.657M53.1173 205.5H58L70 212.428L72.4414 216.657M397 217V214L405.5 205.5H408.5L397 217Z"/>
-              <path d="M3 69L1 67V11L5.5 6.5H18.5M5.5 6.5H8.5L3 12M1 11L3 12M3 12V69M3 69L10.5 76.5M10.5 76.5L13 79V168L10.5 163.093V76.5Z"/>
+              <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V234"/>
+              <path d="M72.4414 283.657L76.5 286H395L410 271H465L479 257V236L469.5 226.5M479 236L476.5 233.5V255.5L469.5 262.5V266.5L479 257M0.5 252L17.5 270.5H49.6532L53.1173 272.5M3 231.557V251.5L9 257.5L9 261.25L0.5 252V234.057L3 231.557ZM7.5 227.057L3 231.557M3 231.5V231.557M53 272.5H53.1173M72.5 283.758L72.4414 283.657M53.1173 272.5L72.4414 283.657M53.1173 272.5H58L70 279.428L72.4414 283.657M397 284V281L405.5 272.5H408.5L397 284Z"/>
+              <path d="M3 69L1 67V11L5.5 6.5H18.5M5.5 6.5H8.5L3 12M1 11L3 12M3 12V69M3 69L10.5 76.5M10.5 76.5L13 79V236V153.5L10.5 150.5V76.5Z"/>
+              <path d="M7.5 78.5L1.5 72.5V77.5L7.5 83.5V78.5Z"/>
+              <path d="M7.5 86.5L1.5 80.5V85.5L7.5 91.5V86.5Z"/>
+              <path d="M7.5 94.5L1.5 88.5V93.5L7.5 99.5V94.5Z"/>
+              <path d="M7.5 102.5L1.5 96.5V101.5L7.5 107.5V102.5Z"/>
+              <path d="M7.5 110.5L1.5 104.5V109.5L7.5 115.5V110.5Z"/>
+              <path d="M7.5 118.5L1.5 112.5V117.5L7.5 123.5V118.5Z"/>
             </g>
             <g class="hud-runway">
-              <path style="--i:0" d="M479.5 99L469.5 89V82.5L479.5 92.5V99Z"/>
-              <path style="--i:1" d="M479.5 108.5L469.5 98.5V92L479.5 102V108.5Z"/>
-              <path style="--i:2" d="M479.5 118L469.5 108V101.5L479.5 111.5V118Z"/>
-              <path style="--i:3" d="M479.5 127.5L469.5 117.5V111L479.5 121V127.5Z"/>
-              <path style="--i:4" d="M479.5 137L469.5 127V120.5L479.5 130.5V137Z"/>
-              <path style="--i:5" d="M479.5 146.5L469.5 136.5V130L479.5 140V146.5Z"/>
-              <path style="--i:6" d="M479.5 156L469.5 146V139.5L479.5 149.5V156Z"/>
-              <path style="--i:7" d="M479.5 165.5L469.5 155.5V149L479.5 159V165.5Z"/>
-            </g>
-            <g class="hud-runway">
-              <path style="--i:0" d="M7.5 78.5L1.5 72.5V77.5L7.5 83.5V78.5Z"/>
-              <path style="--i:1" d="M7.5 86.5L1.5 80.5V85.5L7.5 91.5V86.5Z"/>
-              <path style="--i:2" d="M7.5 94.5L1.5 88.5V93.5L7.5 99.5V94.5Z"/>
-              <path style="--i:3" d="M7.5 102.5L1.5 96.5V101.5L7.5 107.5V102.5Z"/>
-              <path style="--i:4" d="M7.5 110.5L1.5 104.5V109.5L7.5 115.5V110.5Z"/>
-              <path style="--i:5" d="M7.5 118.5L1.5 112.5V117.5L7.5 123.5V118.5Z"/>
+              <path style="--i:0" d="M479.5 166L469.5 156V149.5L479.5 159.5V166Z"/>
+              <path style="--i:1" d="M479.5 175.5L469.5 165.5V159L479.5 169V175.5Z"/>
+              <path style="--i:2" d="M479.5 185L469.5 175V168.5L479.5 178.5V185Z"/>
+              <path style="--i:3" d="M479.5 194.5L469.5 184.5V178L479.5 188V194.5Z"/>
+              <path style="--i:4" d="M479.5 204L469.5 194V187.5L479.5 197.5V204Z"/>
+              <path style="--i:5" d="M479.5 213.5L469.5 203.5V197L479.5 207V213.5Z"/>
+              <path style="--i:6" d="M479.5 223L469.5 213V206.5L479.5 216.5V223Z"/>
+              <path style="--i:7" d="M479.5 231.5L469.5 221.5V215L479.5 225V231.5Z"/>
             </g>
           </svg>
           ${prototypeData}
