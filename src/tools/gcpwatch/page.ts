@@ -185,18 +185,24 @@ const STYLE = `
   .note-cost b{color:var(--ink)}
 
   /* 手刻 HUD 原型：幾何留在 SVG，底色、縮放與發光由 CSS 負責。 */
-  .hud-prototype{position:relative;width:min(480px,100%);aspect-ratio:480/300;margin:36px auto 8px;color:#01D7EB}
+  .hud-prototypes{display:grid;grid-template-columns:repeat(2,minmax(0,480px));justify-content:center;
+    align-items:start;gap:18px;margin:36px auto 8px}
+  .hud-demo{min-width:0}
+  .hud-demo-label{font-family:var(--mono);font-size:9px;letter-spacing:.15em;color:var(--mut);margin:0 0 7px 5%}
+  .hud-prototype{position:relative;width:100%;color:#01D7EB}
+  .hud-prototype-1{aspect-ratio:480/300}
+  .hud-prototype-2{aspect-ratio:480/220}
   .hud-prototype-frame{position:absolute;inset:0;display:block;width:100%;height:100%;overflow:visible;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .hud-prototype .hud-solid{fill:currentColor}
   .hud-prototype .hud-lines{fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:miter}
   .hud-prototype .hud-lines path{vector-effect:non-scaling-stroke}
-  /* 跑道燈：原貌是空心線框，依序填滿發光後復原。8 秒週期＝約 3 秒追光＋約 5 秒靜止。 */
+  /* 跑道燈：原貌是空心線框，依序填滿發光後復原。5 秒週期＝約 3 秒追光＋約 2 秒靜止。 */
   .hud-runway path{fill:transparent;stroke:currentColor;vector-effect:non-scaling-stroke;
-    animation:runwayLight 8s ease-in-out infinite;animation-delay:calc(var(--i) * .3s)}
+    animation:runwayLight 5s ease-in-out infinite;animation-delay:calc(var(--i) * .3s)}
   @keyframes runwayLight{
-    0%,10%,100%{fill:transparent;filter:none}
-    4%{fill:currentColor;filter:drop-shadow(0 0 2px currentColor) drop-shadow(0 0 7px currentColor)}
+    0%,16%,100%{fill:transparent;filter:none}
+    6%{fill:currentColor;filter:drop-shadow(0 0 2px currentColor) drop-shadow(0 0 7px currentColor)}
   }
   .hud-prototype-data{position:absolute;inset:7% 7% 7% 5%;display:flex;flex-direction:column;pointer-events:none}
   .hud-prototype-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
@@ -232,6 +238,11 @@ const STYLE = `
     letter-spacing:.08em;color:var(--mut);white-space:nowrap}
   .hud-prototype-stat b{display:block;margin-top:1px;font-family:var(--mono);font-size:clamp(7px,2vw,9.5px);
     font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Demo 2 高度較短，壓縮資料列的垂直節奏，但不縮小主要讀值。 */
+  .hud-prototype-2 .hud-prototype-main{margin-top:7px}
+  .hud-prototype-2 .hud-prototype-chart svg{height:34px}
+  .hud-prototype-2 .hud-prototype-stats{gap:3px 10px;padding-top:4px}
+  .hud-prototype-2 .hud-prototype-stat span,.hud-prototype-2 .hud-prototype-stat b{line-height:1.2}
 
   /* 開機序列：只有首次繪製時逐格亮起，60 秒自動更新不重播（每分鐘閃一次很煩） */
   @keyframes rise{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
@@ -246,6 +257,7 @@ const STYLE = `
     .console .sys{border-right:0;padding-right:0;width:100%}
     .r-val b{font-size:30px}
   }
+  @media(max-width:1040px){.hud-prototypes{grid-template-columns:minmax(0,480px)}}
 `;
 
 const RENDER_JS = `
@@ -518,35 +530,40 @@ const RENDER_JS = `
       if(key.indexOf('newsscope')>=0){ card=cards[i]; break; }
     }
     if(!card&&cards.length) card=cards[0];
-    var data=document.getElementById('hud-prototype-data');
-    data.style.display=card?'flex':'none';
+    var demos=document.querySelectorAll('.hud-prototype');
+    for(var d=0;d<demos.length;d++){
+      demos[d].querySelector('[data-hud="data"]').style.display=card?'flex':'none';
+    }
     if(!card) return;
-    var put=function(id,value){document.getElementById(id).textContent=value||'—';};
-    put('hud-prototype-name',card.name);
-    put('hud-prototype-meta',card.meta);
-    put('hud-prototype-state-text',card.levelLabel);
-    put('hud-prototype-value',card.value);
-    put('hud-prototype-caption',card.caption);
-    put('hud-prototype-trend',card.trend||'24h —');
-    var state=document.getElementById('hud-prototype-state');
-    state.className='hud-prototype-state '+lvClass(card.level);
-    state.querySelector('i').className='led '+lvClass(card.level);
-    document.getElementById('hud-prototype-value').className='hud-prototype-value '+lvClass(card.level);
-    var trace=document.getElementById('hud-prototype-trace');
-    trace.setAttribute('d',card.path||'');
-    trace.setAttribute('class','hud-prototype-trace '+lvClass(card.level));
-    var risks=document.getElementById('hud-prototype-risks'); risks.innerHTML='';
-    (card.risks||[]).forEach(function(r){
-      risks.appendChild(el('div','hud-prototype-risk '+lvClass(r.level),'[!] '+r.text));
-    });
-    risks.style.display=(card.risks||[]).length?'grid':'none';
-    var stats=document.getElementById('hud-prototype-stats'); stats.innerHTML='';
-    (card.stats||[]).forEach(function(s){
-      var item=el('div','hud-prototype-stat');
-      item.appendChild(el('span',null,s.label));
-      item.appendChild(el('b',s.level?lvClass(s.level):null,s.value));
-      stats.appendChild(item);
-    });
+    for(var h=0;h<demos.length;h++){
+      var host=demos[h];
+      var put=function(role,value){host.querySelector('[data-hud="'+role+'"]').textContent=value||'—';};
+      put('name',card.name);
+      put('meta',card.meta);
+      put('state-text',card.levelLabel);
+      put('value',card.value);
+      put('caption',card.caption);
+      put('trend',card.trend||'24h —');
+      var state=host.querySelector('[data-hud="state"]');
+      state.className='hud-prototype-state '+lvClass(card.level);
+      state.querySelector('i').className='led '+lvClass(card.level);
+      host.querySelector('[data-hud="value"]').className='hud-prototype-value '+lvClass(card.level);
+      var trace=host.querySelector('[data-hud="trace"]');
+      trace.setAttribute('d',card.path||'');
+      trace.setAttribute('class','hud-prototype-trace '+lvClass(card.level));
+      var risks=host.querySelector('[data-hud="risks"]'); risks.innerHTML='';
+      (card.risks||[]).forEach(function(r){
+        risks.appendChild(el('div','hud-prototype-risk '+lvClass(r.level),'[!] '+r.text));
+      });
+      risks.style.display=(card.risks||[]).length?'grid':'none';
+      var stats=host.querySelector('[data-hud="stats"]'); stats.innerHTML='';
+      (card.stats||[]).forEach(function(s){
+        var item=el('div','hud-prototype-stat');
+        item.appendChild(el('span',null,s.label));
+        item.appendChild(el('b',s.level?lvClass(s.level):null,s.value));
+        stats.appendChild(item);
+      });
+    }
   }
 
   function render(vm){
@@ -611,6 +628,36 @@ const RENDER_JS = `
 
 export function renderGcpWatch(vm: DashboardVM): string {
   const bootstrap = JSON.stringify(vm).replace(/</g, '\\u003c');
+  // 兩個 HUD demo 共用同一份資料骨架；前端以 data-hud 角色填值，避免複製 id 與更新邏輯。
+  const prototypeData = `
+    <div class="hud-prototype-data" data-hud="data">
+      <div class="hud-prototype-head">
+        <div class="hud-prototype-title">
+          <div class="hud-prototype-name" data-hud="name">—</div>
+          <div class="hud-prototype-meta" data-hud="meta">—</div>
+        </div>
+        <span class="hud-prototype-state lv-none" data-hud="state">
+          <i class="led lv-none"></i><span data-hud="state-text">—</span>
+        </span>
+      </div>
+      <div class="hud-prototype-main">
+        <div class="hud-prototype-reading">
+          <div class="hud-prototype-value lv-none" data-hud="value">—</div>
+          <div class="hud-prototype-caption" data-hud="caption">—</div>
+        </div>
+        <div class="hud-prototype-chart">
+          <div class="hud-prototype-chart-head"><span>MEMORY · 24H</span><span data-hud="trend">—</span></div>
+          <svg viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none">
+            <line class="grid" x1="0" x2="${SPARK_W}" y1="12" y2="12"/>
+            <line class="grid" x1="0" x2="${SPARK_W}" y1="24" y2="24"/>
+            <line class="grid" x1="0" x2="${SPARK_W}" y1="36" y2="36"/>
+            <path class="hud-prototype-trace lv-none" data-hud="trace"/>
+          </svg>
+        </div>
+      </div>
+      <div class="hud-prototype-risks" data-hud="risks"></div>
+      <div class="hud-prototype-stats" data-hud="stats"></div>
+    </div>`;
   const body = `
     <div class="crumb"><a href="/">首頁</a> / 資源看板</div>
     <div class="hd">
@@ -641,7 +688,10 @@ export function renderGcpWatch(vm: DashboardVM): string {
       Redis 淘汰政策未自訂時＝Memorystore 預設 <b>volatile-lru</b>（官方文件），
       只淘汰有 TTL 的 key；沒設 TTL 的 key 塞滿記憶體時 Redis 無 key 可逐出 → 寫入被拒（OOM），
       而此時「逐出 key」仍是 0，所以本頁同時看使用率與無 TTL 佔比。</p>
-    <div class="hud-prototype" aria-hidden="true">
+    <div class="hud-prototypes" aria-label="HUD 版型比較">
+      <div class="hud-demo">
+        <div class="hud-demo-label">DEMO 01 · EXTENDED</div>
+        <div class="hud-prototype hud-prototype-1" aria-hidden="true">
       <svg class="hud-prototype-frame" width="480" height="300" viewBox="0 0 480 300" fill="none" xmlns="http://www.w3.org/2000/svg">
         <g class="hud-solid">
           <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
@@ -677,33 +727,55 @@ export function renderGcpWatch(vm: DashboardVM): string {
           <path style="--i:7" d="M479.5 122.5L469.5 112.5V106L479.5 116V122.5Z"/>
         </g>
       </svg>
-      <div class="hud-prototype-data" id="hud-prototype-data">
-        <div class="hud-prototype-head">
-          <div class="hud-prototype-title">
-            <div class="hud-prototype-name" id="hud-prototype-name">—</div>
-            <div class="hud-prototype-meta" id="hud-prototype-meta">—</div>
-          </div>
-          <span class="hud-prototype-state lv-none" id="hud-prototype-state">
-            <i class="led lv-none"></i><span id="hud-prototype-state-text">—</span>
-          </span>
+          ${prototypeData}
         </div>
-        <div class="hud-prototype-main">
-          <div class="hud-prototype-reading">
-            <div class="hud-prototype-value lv-none" id="hud-prototype-value">—</div>
-            <div class="hud-prototype-caption" id="hud-prototype-caption">—</div>
-          </div>
-          <div class="hud-prototype-chart">
-            <div class="hud-prototype-chart-head"><span>MEMORY · 24H</span><span id="hud-prototype-trend">—</span></div>
-            <svg viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none">
-              <line class="grid" x1="0" x2="${SPARK_W}" y1="12" y2="12"/>
-              <line class="grid" x1="0" x2="${SPARK_W}" y1="24" y2="24"/>
-              <line class="grid" x1="0" x2="${SPARK_W}" y1="36" y2="36"/>
-              <path class="hud-prototype-trace lv-none" id="hud-prototype-trace"/>
-            </svg>
-          </div>
+      </div>
+      <div class="hud-demo">
+        <div class="hud-demo-label">DEMO 02 · HAND-DRAWN 220</div>
+        <div class="hud-prototype hud-prototype-2" aria-hidden="true">
+          <svg class="hud-prototype-frame" width="480" height="220" viewBox="0 0 480 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <g class="hud-solid">
+              <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
+              <path d="M80.887 7.5L86 10.4697H139H222.5H239.5L236.5 7.5H210.5L206.5 3.5H158.5L154.5 7.5H80.887Z"/>
+              <path d="M447 3.5H452L465.5 17V22L447 3.5Z"/>
+              <path d="M24.134 206H48.5L61 213.217H58L48 207.5H26L24.134 206Z" stroke="currentColor"/>
+              <path d="M457.5 206L411 206L401 216H403.5L412 207.5H435L436.5 209H452.5L454 207.5H456L457.5 206Z" stroke="currentColor"/>
+              <path d="M479 169L476.5 166.5V188.5L469.5 195.5V199.5L479 190V169Z"/>
+              <path d="M397 217L408.5 205.5H405.5L397 214V217Z"/>
+              <path d="M53.1173 205.5L72.4414 216.657L70 212.428L58 205.5H53.1173Z"/>
+              <path d="M0.5 185L9 194.25L9 190.5L3 184.5V164.557L0.5 167.057V185Z"/>
+              <path d="M8.5 6.5H5.5L1 11L3 12L8.5 6.5Z"/>
+              <path d="M1 11V67L3 69V12L1 11Z"/>
+              <path d="M13 168V79L10.5 76.5V163.093L13 168Z"/>
+            </g>
+            <g class="hud-lines">
+              <path d="M447 0.500001L389.419 0.5L382 6.5H336"/>
+              <path d="M139 10.4697H86L74 3.5H10M86 10.4697H366M86 10.4697L80.887 7.5H154.5L158.5 3.5H206.5L210.5 7.5H236.5L239.5 10.4697H222.5M222.5 10.4697L219 14H200.5L199 12.5H141L139 10.4697M222.5 10.4697H139"/>
+              <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V123"/>
+              <path d="M72.4414 216.657L76.5 219H395L410 204H465L479 190V169L469.5 159.5M479 169L476.5 166.5V188.5L469.5 195.5V199.5L479 190M0.5 185L17.5 203.5H49.6532L53.1173 205.5M3 164.557V184.5L9 190.5L9 194.25L0.5 185V167.057L3 164.557ZM7.5 160.057L3 164.557M3 164.5V164.557M53 205.5H53.1173M72.5 216.758L72.4414 216.657M53.1173 205.5L72.4414 216.657M53.1173 205.5H58L70 212.428L72.4414 216.657M397 217V214L405.5 205.5H408.5L397 217Z"/>
+              <path d="M3 69L1 67V11L5.5 6.5H18.5M5.5 6.5H8.5L3 12M1 11L3 12M3 12V69M3 69L10.5 76.5M10.5 76.5L13 79V168L10.5 163.093V76.5Z"/>
+            </g>
+            <g class="hud-runway">
+              <path style="--i:0" d="M479.5 99L469.5 89V82.5L479.5 92.5V99Z"/>
+              <path style="--i:1" d="M479.5 108.5L469.5 98.5V92L479.5 102V108.5Z"/>
+              <path style="--i:2" d="M479.5 118L469.5 108V101.5L479.5 111.5V118Z"/>
+              <path style="--i:3" d="M479.5 127.5L469.5 117.5V111L479.5 121V127.5Z"/>
+              <path style="--i:4" d="M479.5 137L469.5 127V120.5L479.5 130.5V137Z"/>
+              <path style="--i:5" d="M479.5 146.5L469.5 136.5V130L479.5 140V146.5Z"/>
+              <path style="--i:6" d="M479.5 156L469.5 146V139.5L479.5 149.5V156Z"/>
+              <path style="--i:7" d="M479.5 165.5L469.5 155.5V149L479.5 159V165.5Z"/>
+            </g>
+            <g class="hud-runway">
+              <path style="--i:0" d="M7.5 78.5L1.5 72.5V77.5L7.5 83.5V78.5Z"/>
+              <path style="--i:1" d="M7.5 86.5L1.5 80.5V85.5L7.5 91.5V86.5Z"/>
+              <path style="--i:2" d="M7.5 94.5L1.5 88.5V93.5L7.5 99.5V94.5Z"/>
+              <path style="--i:3" d="M7.5 102.5L1.5 96.5V101.5L7.5 107.5V102.5Z"/>
+              <path style="--i:4" d="M7.5 110.5L1.5 104.5V109.5L7.5 115.5V110.5Z"/>
+              <path style="--i:5" d="M7.5 118.5L1.5 112.5V117.5L7.5 123.5V118.5Z"/>
+            </g>
+          </svg>
+          ${prototypeData}
         </div>
-        <div class="hud-prototype-risks" id="hud-prototype-risks"></div>
-        <div class="hud-prototype-stats" id="hud-prototype-stats"></div>
       </div>
     </div>
     <footer>popin ad-ops · ${vm.project} · asia-east1</footer>
