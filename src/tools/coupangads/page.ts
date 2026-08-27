@@ -151,7 +151,7 @@ const BODY = `
       <div class="panel" style="padding:0;overflow-x:auto">
         <table class="tb" id="tbl">
           <thead><tr>
-            <th style="width:66px">素材</th><th style="width:64px">槽位</th><th>商品</th>
+            <th style="width:66px">素材</th><th style="width:74px">Group</th><th>商品</th>
             <th class="n hide-s">曝光</th><th class="n">點擊</th><th class="n">CTR</th><th class="n">花費</th>
             <th class="n">訂單</th><th class="n hide-s">GMV</th><th class="n">佣金</th>
             <th class="n">日預算</th><th>狀態</th>
@@ -248,7 +248,7 @@ function render(){
     const tr=document.createElement('tr');
     tr.innerHTML=
       '<td>'+(p.imageUrl?'<img loading="lazy" src="'+esc(p.imageUrl)+'" alt="">':'')+'</td>'+
-      '<td class="muted" style="font-size:11px">'+(p.slotNo?('slot-'+String(p.slotNo).padStart(3,'0')):'—')+'</td>'+
+      '<td class="muted" style="font-size:11px">'+(p.groupId?esc(String(p.groupId)):'—')+'</td>'+
       '<td><div class="nm">'+(p.landingUrl?'<a href="'+esc(p.landingUrl)+'" target="_blank" rel="noopener">'+esc(p.title||p.productId)+'</a>':esc(p.title||p.productId))+'</div>'+
         '<div class="muted" style="font-size:11px">'+esc(p.productId)+'</div></td>'+
       '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n"><b>'+pct(p.ctr)+'</b></td><td class="n">'+money(p.spend)+'</td>'+

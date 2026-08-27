@@ -90,13 +90,15 @@ popin 內部工具集（取代舊 dctool）。
 
 ## 酷澎聯盟投放核心（tool#6，`/tools/coupangads`，`src/tools/coupangads/`）
 - 目的：把 Coupang 聯盟商品變成 R 平台廣告去買流量、賺聯盟佣金。**客戶指定只用 Coupang `reco` 端點**。分層：`core/coupang.ts`（Coupang API）＋`core/rixbee_admin.ts`（R **管理** API，與報表側 `core/rixbee.ts` 完全兩套）→ `plan.ts`（輪替決策純函式）→ `sync.ts`（執行）→ `collect.ts`（成效收集）→ `stats.ts`／`page.ts`／`route.ts`
-- **投放結構**：一支固定 Campaign `[Coupang] reco 自動投放`（日預算 **3000**）→ **一 slot 一 AdGroup**（`group_name='[Coupang] slot-NNN'`、CPC 1 元、各自落地頁）→ 一 Creative（商品圖 300x250、`立即選購`、IAB1）。素材別名 `coupang_pid_{productId}`（帳戶內唯一＝天然去重）
-- **⚠️ 輪替規則（2026-08-26 大改，取代最初的「只新增不關閉」）**：**每天 09:50 跑一次**，做 reco 清單與現有 slot 的差集——
-  ①**同商品、文案價格也沒變 → 完全不碰**（不換素材、不換落地頁）＝不觸發重審，繼續跑；
-  ②**同商品但價格/文案變了 → 只改 creative 文案**（素材與落地頁不動），把重審範圍壓到最小；
-  ③**新商品 → 覆蓋「最久沒換」且已不在清單的 slot**（換素材＋落地頁＋文案＋改成 slot 名），slot 不夠才開新 group；
-  ④**已不在清單、又沒被覆蓋 → 暫停**；⑤暫停過的商品回到清單 → 走覆蓋路徑重新啟用。
-  實測首次套用：67 檔 → 不動 19、改文案 1、暫停 47、在跑 20 檔。決策全在 `plan.ts planRotation`（純函式、42 項驗證）
+- **投放結構**：Campaign `[Coupang] reco 自動投放`（可多支、全域日預算 **3000** 按在跑檔數分攤）→ **一商品一 AdGroup、永久對映**（`group_name='[Coupang] pid-{productId}'`、CPC 1 元、各自落地頁）→ 一 Creative（商品圖 300x250、`立即選購`、IAB1）。素材別名 `coupang_pid_{productId}`（帳戶內唯一＝天然去重）。⚠️ 2026-08-26～27 之間曾用過 `slot-NNN` 複用命名，R 上的舊 group 名字會在下次被更新時自動改成 pid 命名
+- **⚠️⚠️ 輪替規則（2026-08-27 定案：group ↔ 商品永久對映，取代 8/26 的「slot 複用」）**：**一個 group 建立後就綁死一個商品，永遠不改掛別的商品**，輪替只剩「啟用／暫停」。這是為了根除重複計數——slot 複用會讓 R 報表的 `day × group` 數字需要時間邊界才知道算給誰，回補時就會算錯（見下）。規則：
+  ①**reco 裡、還開著、文案沒變 → 完全不動**（不重審）；
+  ②**同商品但價格/文案變了 → 只改 creative 文案**（素材與落地頁不動）；
+  ③**舊商品回到 reco → 重啟它自己那個 group**（`group_status` 2→1），素材/落地頁/subId 原封不動 ⇒ **文案沒變就免重審、開啟即有量**（這是永久對映最大的紅利）；
+  ④**全新商品 → 建新 group**（絕不覆蓋既有 group）；⑤**不在 reco 又還開著 → 暫停**（已停的不重複下指令）。
+  決策全在 `plan.ts planRotation`（純函式，`GroupView`／`CampaignView` 進、`keep/retext/reactivate/create/pause` 出）。2026-08-27 實測 dry-run：reco 20 檔 → 不動 15、新開 5、暫停 5、重啟 0。
+- **⚠️ campaign 容量與預算分攤（2026-08-27）**：`MAX_GROUPS_PER_CAMPAIGN=300`，滿了 `sync.ts` 自動開新 campaign（`campaignNameOf`：第一支沿用原名、之後 `... #2`，R 撞名回 409 故要序號）。**多支 campaign 不能每支都給 3000**（總花費上限會變成 3000×N）→ `allocateCampaignBudgets` 依各 campaign「在跑檔數」比例分攤，最大餘數法補整數、總和剛好 3000；沒有在跑 group 的 campaign 不分配也不去動它。`coupang_slots` 加 `cpg_id` 欄（舊列由 R 的 group 清單回填一次）。**R 官方沒有公開 group 數量上限**（文件 mhtml 無 schema、也沒去問 Broadciel）；實測參考值：`direct` token 底下 44 個 campaign，正常廣告主一支約 10 個 group，我們的 194431 已經 54 個是全場最大 ⇒ 300 是自己設的安全閥，不是平台限制。
+- **⚠️ R 清單 API 的分頁與狀態過濾（2026-08-27 實測，修掉一個地雷）**：`/ad-groups`／`/ad-creatives` **單頁上限 500 筆**（`end=501` 就回 `400 Validation Failed`），回應帶 `data.total` 可翻頁；`start` 是絕對位移、超過總數回空。原本 `rixbee_admin.ts` 寫死 `end=500` **且沒有分頁**，creative 只增不減 ⇒ 過 500 筆會**靜默截斷**、讓 sync 誤判「這個商品沒有素材」而重複建立。已改 `listAll()` 自動翻頁。另**更正舊筆記**：`GET /ad-groups` 不是「查不到暫停的」，它只是**預設濾 active**——帶 `group_status=2` 就查得到（實測 total=47）；`group_status=1,2` 這種逗號列表不吃會回 400，要分兩次查（`listGroupsAll`）。
 - **每檔日預算＝`floor(3000 ÷ 在跑檔數 × 2)`**（20 檔→300，帳面總和 6000 由 campaign 日預算 3000 當硬上限擋著，讓熱門商品能多吃）。**campaign 日預算每次同步都校正**——初版程式從不更新它，會卡住整體花費
 - **⚠️ 審核是阻斷式的，而且沒有 API**：使用者（平台內部人員）每天 10:00 在 R 後台審核，**審過才會開始曝光**。試過 7 個審核端點全 404（`/audits`、`/ad-creatives/{id}/audit`…；唯一非 404 的 `/ad-creatives/audit-status` 是被 `/{cr_id}` 路由接走，隨機字串回一樣的錯）。**但找到訊號**：改動 creative 當下 `summary_status` 會變 **3**（實測 4→3），故 `PENDING_REVIEW=3`，看板據此顯示「待審 N 檔」。值 1／4 的語意仍不明（兩者都有曝光）
 - **⚠️ `GET /ad-groups` 只回「在跑」的 group**（實測 47 檔暫停後清單由 67 剩 20）→ 判斷某個 slot 是否已暫停要用「不在清單中」，不能等它回 `group_status=2`。**但 `GET /ad-creatives` 回全部**（含暫停 group 的，實測仍是 67 筆）——兩支清單的過濾行為不一致，別假設一樣
@@ -104,7 +106,7 @@ popin 內部工具集（取代舊 dctool）。
 - **⚠️⚠️ PUT creative 的欄位名不對稱**：`GET /ad-creatives/{id}` 回 `cr_mt`／`cr_icon`，但 PUT 要 `cr_mt_id`／`cr_icon_id`——把 GET 的物件原封 PUT 回去會回 `400 Validation Failed: cr_mt_id Required`。`rixbee_admin.updateCreative` 已內建轉換。campaign／group 則無此問題（同名）
 - **每商品一個 subId 的正解**：①不能拿 reco 回的 `productUrl` 轉 deeplink（已是 onelink）→ `rCode=400 url convert failed`，要自組 `https://www.tw.coupang.com/products/{id}`；②**`subId` 必須放 body**，放 query 一樣回 `rCode=0` 但 `landingUrl` 不含 `af_siteid` ＝靜默失效
 - **四張表**（`ad_tools` 庫，前綴 `coupang_`；2026-08-26 由「零資料表」改為建表，因為比對價格、挑最久沒換的 slot、看長期趨勢都需要歷史，R 上只有當下狀態）：
-  `coupang_slots`（slot↔商品對映、上次換的時間、審核狀態；**覆蓋優先序就查這張**）／`coupang_products`（商品快照與價格，比對文案有無變動）／`coupang_daily_stats`（日×商品成效，看板讀它）／`coupang_sync_runs`（每次輪替做了什麼）
+  `coupang_slots`（**group↔商品永久對映**、所屬 `cpg_id`、`product_since`、審核狀態；表名沿用 slot 是歷史包袱，語意已是「一 group 一商品」）／`coupang_products`（商品快照與價格，比對文案有無變動）／`coupang_daily_stats`（日×商品成效，看板讀它）／`coupang_sync_runs`（每次輪替做了什麼）
 - **⚠️ 曝光崩掉事故（2026-08-26～27 查證，兩件事）**：
   ①**每檔日預算被自己的公式砍死**——初版是「campaign 日預算 500 ÷ 在跑檔數，每次同步都重算」，而初版排程只新增不關閉、每小時多一檔，檔數長到 67 → 每檔只剩 `floor(500/67)=7` 元。CPC 1 元＝一天最多 7 次點擊，R 還把 7 元 pacing 攤到 24 小時（每小時 0.3 元）⇒ 幾乎標不到量。實證每組花費分佈：8/25 有 21/30 組卡死在 15.99~18.98（＝當時 `floor(500/N)=16~17` 的上限）、8/26 最高就是 7.99（＝7 元上限）、54 組裡 24 組整天掛 0。R 真值 8/25 149,173 曝光／392.70 元（30 組、只跑 12 小時，campaign 12:04 才建）vs 8/26 60,189 曝光／107.94 元（54 組、整天）⇒ **每小時口徑差 5 倍**。2026-08-27 修：`plan.ts` 加 `MIN_GROUP_BUDGET=50` 下限（`budgetPerGroup` 由 `Math.max(1,…)` 改 `Math.max(50,…)`）——預算再怎麼分攤都不該低到「不可能出量」，寧可少開幾檔。
   ②**看板數字本身被灌水 60%**（見下 collect.ts 重複計數）。

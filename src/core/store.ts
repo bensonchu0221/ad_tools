@@ -1508,7 +1508,9 @@ export async function getRAccountToken(email: string): Promise<string | null> {
 
 export interface CoupangSlotRow {
   groupId: number;
+  cpgId: number | null;
   slotNo: number;
+  /** ⚠️ 建立後永不改變（group ↔ 商品永久對映，見 plan.ts 檔頭）。 */
   productId: string | null;
   crId: number | null;
   mtId: number | null;
@@ -1546,7 +1548,7 @@ export interface CoupangDailyStatRow {
 export interface CoupangSyncRunRow {
   trigger: 'cron' | 'manual';
   recoCount: number; unchanged: number; textUpdated: number;
-  replaced: number; created: number; paused: number; failed: number;
+  reactivated: number; created: number; paused: number; failed: number;
   budgetPerGroup: number | null; elapsedMs: number; message: string | null;
 }
 
@@ -1558,6 +1560,7 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
   await p.query(`
     CREATE TABLE IF NOT EXISTS coupang_slots (
       group_id        BIGINT       NOT NULL PRIMARY KEY,
+      cpg_id          BIGINT       NULL COMMENT '所屬 campaign；一支最多 300 個 group，滿了開新的',
       slot_no         INT          NOT NULL,
       product_id      VARCHAR(32)  NULL,
       cr_id           BIGINT       NULL,
@@ -1642,6 +1645,26 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
                    COMMENT '一律存 UTC；只在 product_id 真的變動時才推進（成效歸屬邊界）'`);
     await p.query(`UPDATE coupang_slots SET product_since = COALESCE(assigned_at, last_changed_at)`);
   }
+  // 2026-08-27：group ↔ 商品改永久對映後，group 會累積 → 一支 campaign 最多 300 個，滿了開新的，
+  // 所以要知道每個 group 屬於哪支 campaign。既有列全是第一支 campaign。
+  const [cpgCol] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+      WHERE table_schema = ? AND table_name = 'coupang_slots' AND column_name = 'cpg_id'`,
+    [dbName]
+  );
+  if (((cpgCol as any[])[0]?.c ?? 0) === 0) {
+    await p.query(`ALTER TABLE coupang_slots ADD COLUMN cpg_id BIGINT NULL
+                   COMMENT '所屬 campaign；一支最多 300 個 group，滿了開新的'`);
+  }
+  const [runCol] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+      WHERE table_schema = ? AND table_name = 'coupang_sync_runs' AND column_name = 'reactivated'`,
+    [dbName]
+  );
+  if (((runCol as any[])[0]?.c ?? 0) === 0) {
+    await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reactivated INT NOT NULL DEFAULT 0
+                   COMMENT '重啟舊 group 的檔數（舊制的 replaced 欄留著給歷史紀錄）'`);
+  }
   coupangSchemaReady = true;
 }
 
@@ -1670,7 +1693,7 @@ export function toMysqlDatetime(v: string | Date | null | undefined): string | n
 export async function listCoupangSlots(): Promise<CoupangSlotRow[]> {
   const p = await coupangPool();
   const [rows] = await p.query(
-    `SELECT group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price,
+    `SELECT group_id, cpg_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price,
             day_budget, active, summary_status,
             DATE_FORMAT(assigned_at,   '%Y-%m-%d %H:%i:%s') AS assigned_at,
             DATE_FORMAT(last_changed_at,'%Y-%m-%d %H:%i:%s') AS last_changed_at,
@@ -1678,7 +1701,7 @@ export async function listCoupangSlots(): Promise<CoupangSlotRow[]> {
        FROM coupang_slots ORDER BY slot_no`
   );
   return (rows as any[]).map((r) => ({
-    groupId: Number(r.group_id), slotNo: Number(r.slot_no),
+    groupId: Number(r.group_id), cpgId: num(r.cpg_id), slotNo: Number(r.slot_no),
     productId: r.product_id ?? null, crId: num(r.cr_id), mtId: num(r.mt_id),
     landingUrl: r.landing_url ?? null, title: r.title ?? null, descr: r.descr ?? null,
     price: num(r.price), dayBudget: num(r.day_budget), active: Number(r.active) === 1,
@@ -1701,23 +1724,31 @@ export async function upsertCoupangSlot(s: Partial<CoupangSlotRow> & { groupId: 
   const p = await coupangPool();
   await p.query(
     `INSERT INTO coupang_slots
-       (group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price, day_budget, active, summary_status, assigned_at, last_changed_at, product_since)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,${s.assignedAt === undefined ? 'NOW()' : '?'}, ${changed ? 'NOW()' : 'COALESCE(?, NOW())'}, NOW())
+       (group_id, cpg_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price, day_budget, active, summary_status, assigned_at, last_changed_at, product_since)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,${s.assignedAt === undefined ? 'NOW()' : '?'}, ${changed ? 'NOW()' : 'COALESCE(?, NOW())'}, NOW())
      ON DUPLICATE KEY UPDATE
        -- 商品沒變就保留原值：只改文案/價格不算換商品，成效歸屬邊界不能跟著跳
        product_since=IF(product_id <=> VALUES(product_id), product_since, NOW()),
-       slot_no=VALUES(slot_no), product_id=VALUES(product_id), cr_id=VALUES(cr_id), mt_id=VALUES(mt_id),
+       cpg_id=COALESCE(VALUES(cpg_id), cpg_id), slot_no=VALUES(slot_no),
+       -- group ↔ 商品永久對映：product_id 只在「原本是空的」時候寫入，之後一律保留舊值
+       product_id=COALESCE(product_id, VALUES(product_id)), cr_id=VALUES(cr_id), mt_id=VALUES(mt_id),
        landing_url=VALUES(landing_url), title=VALUES(title), descr=VALUES(descr), price=VALUES(price),
        day_budget=VALUES(day_budget), active=VALUES(active), summary_status=VALUES(summary_status)
        ${changed ? ', assigned_at=VALUES(assigned_at), last_changed_at=NOW()' : ''}`,
     [
-      s.groupId, s.slotNo, s.productId ?? null, s.crId ?? null, s.mtId ?? null,
+      s.groupId, s.cpgId ?? null, s.slotNo, s.productId ?? null, s.crId ?? null, s.mtId ?? null,
       s.landingUrl ?? null, s.title ?? null, s.descr ?? null, s.price ?? null,
       s.dayBudget ?? null, s.active === false ? 0 : 1, s.summaryStatus ?? null,
       ...(s.assignedAt === undefined ? [] : [toMysqlDatetime(s.assignedAt)]),
       ...(changed ? [] : [toMysqlDatetime(s.lastChangedAt)]),
     ]
   );
+}
+
+/** 回填 group 屬於哪支 campaign（舊資料沒有這欄，從 R 的 group 清單補回來）。 */
+export async function setCoupangSlotCampaign(groupId: number, cpgId: number): Promise<void> {
+  const p = await coupangPool();
+  await p.query(`UPDATE coupang_slots SET cpg_id=? WHERE group_id=? AND cpg_id IS NULL`, [cpgId, groupId]);
 }
 
 /** 只更新從 R 撈回來的即時狀態（不動商品對映）——給每 10 分鐘的 worker 用。 */
@@ -1825,9 +1856,9 @@ export async function insertCoupangSyncRun(r: CoupangSyncRunRow): Promise<void> 
   const p = await coupangPool();
   await p.query(
     `INSERT INTO coupang_sync_runs
-       (trigger_src, reco_count, unchanged, text_updated, replaced, created, paused, failed, budget_per_group, elapsed_ms, message)
+       (trigger_src, reco_count, unchanged, text_updated, reactivated, created, paused, failed, budget_per_group, elapsed_ms, message)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-    [r.trigger, r.recoCount, r.unchanged, r.textUpdated, r.replaced, r.created, r.paused, r.failed, r.budgetPerGroup, r.elapsedMs, r.message]
+    [r.trigger, r.recoCount, r.unchanged, r.textUpdated, r.reactivated, r.created, r.paused, r.failed, r.budgetPerGroup, r.elapsedMs, r.message]
   );
 }
 

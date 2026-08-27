@@ -110,14 +110,39 @@ export async function updateCampaign(email: string, cpgId: number, patch: Record
 
 export interface RGroup { group_id: number; group_name: string; cpg_id?: number; group_status?: number; target_info?: string }
 
-/** ⚠️ 實測只會回「在跑」的 group，暫停(status=2)的不在清單裡——判斷「是否已暫停」要用「不在清單中」。 */
-export async function listGroups(email: string, cpgId?: number): Promise<RGroup[]> {
-  const q = cpgId ? `&cpg_id=${cpgId}` : '';
-  const j = await req(email, 'GET', `/ad-groups?start=0&end=500${q}`);
-  const d = j?.data;
-  const rows = (Array.isArray(d) ? d : d?.data ?? []) as RGroup[];
+/**
+ * 清單分頁：**單頁上限 500 筆**（2026-08-27 實測 `end=501` 就回 400 Validation Failed），
+ * 回應帶 `data.total` → 靠它翻頁。原本寫死 `end=500` 不分頁，筆數一過 500 會**靜默截斷**。
+ */
+const PAGE = 500;
+async function listAll(email: string, endpoint: string, query = ''): Promise<any[]> {
+  const out: any[] = [];
+  for (let start = 0; ; start += PAGE) {
+    const j = await req(email, 'GET', `${endpoint}?start=${start}&end=${start + PAGE}${query}`);
+    const d = j?.data;
+    const rows = (Array.isArray(d) ? d : d?.data ?? []) as any[];
+    out.push(...rows);
+    const total = Number(d?.total ?? out.length);
+    if (!rows.length || out.length >= total) return out;
+  }
+}
+
+/**
+ * ⚠️ **預設只回「在跑」的 group**（實測 47 檔暫停後清單從 67 剩 20）。
+ * 但這不是「查不到暫停的」——帶 `status: 2` 就查得到（2026-08-27 實測 total=47）；
+ * `group_status=1,2` 這種逗號列表不吃，會回 400，要分兩次查。
+ */
+export async function listGroups(email: string, cpgId?: number, status?: 1 | 2): Promise<RGroup[]> {
+  const q = (cpgId ? `&cpg_id=${cpgId}` : '') + (status ? `&group_status=${status}` : '');
+  const rows = (await listAll(email, '/ad-groups', q)) as RGroup[];
   // API 是否真的吃 cpg_id 過濾不確定，這裡再本地過濾一次保險
   return cpgId ? rows.filter((r) => !r.cpg_id || Number(r.cpg_id) === cpgId) : rows;
+}
+
+/** 在跑的＋暫停的一起拿（要判斷「這個 group 現在開著沒」就用這支）。 */
+export async function listGroupsAll(email: string, cpgId?: number): Promise<RGroup[]> {
+  const [live, paused] = [await listGroups(email, cpgId, 1), await listGroups(email, cpgId, 2)];
+  return [...live, ...paused];
 }
 
 export async function createGroup(email: string, input: {
@@ -245,9 +270,7 @@ export async function updateCreative(email: string, crId: number, patch: Record<
   if (j?.code !== 200) fail(j, `更新 Creative ${crId}`);
 }
 
+/** ⚠️ 與 `/ad-groups` 不同，這支**會回全部**（含暫停 group 的）。已分頁，不會在 500 筆時靜默截斷。 */
 export async function listCreatives(email: string, groupId?: number): Promise<any[]> {
-  const q = groupId ? `&group_id=${groupId}` : '';
-  const j = await req(email, 'GET', `/ad-creatives?start=0&end=500${q}`);
-  const d = j?.data;
-  return (Array.isArray(d) ? d : d?.data ?? []) as any[];
+  return listAll(email, '/ad-creatives', groupId ? `&group_id=${groupId}` : '');
 }

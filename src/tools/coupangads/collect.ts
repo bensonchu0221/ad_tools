@@ -97,12 +97,20 @@ export interface StatOwnership {
   own: boolean;
 }
 
-/** 回補視窗內每個 (日期 × group) 該由誰持有 R 數字。純函式，重複計數的第二道防線。 */
+/**
+ * 回補視窗內每個 (日期 × group) 該由誰持有 R 數字。純函式，重複計數的第二道防線。
+ *
+ * 只掃「商品是在視窗內才綁上去」的 group：綁定時間早於視窗起日，代表視窗內每一天都是同一個商品，
+ * 不可能有第二個商品持有這些天的數字 ⇒ 掃了也是白掃。這個過濾很重要——掃描是每個
+ * (日期×group) 兩條 SQL，group↔商品改永久對映後 group 只增不減，不過濾的話成本會一路惡化。
+ */
 export function planStatOwnership(days: string[], slots: SlotMapping[]): StatOwnership[] {
+  const start = days.length ? days.reduce((a, b) => (a < b ? a : b)) : '';
   const out: StatOwnership[] = [];
   for (const s of slots) {
     if (!s.productId) continue;
     const since = twDateFromUtc(s.productSince);
+    if (since && since < start) continue; // 視窗之前就綁定＝整段視窗都屬於它，沒有模糊性
     for (const dt of days) {
       out.push({ dt, groupId: s.groupId, productId: s.productId, own: attributesToCurrentProduct(dt, since) });
     }

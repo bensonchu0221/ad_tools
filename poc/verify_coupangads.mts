@@ -1,8 +1,8 @@
 // tool#6 酷澎聯盟投放：純函式驗證（離線，不打 API、不碰 DB）。
 // 跑法：npx tsx poc/verify_coupangads.mts
 import {
-  planRotation, titleOf, descOf, budgetPerGroup, textMatches, byOldestChanged,
-  DAILY_BUDGET, MIN_GROUP_BUDGET, type SlotView,
+  planRotation, titleOf, descOf, budgetPerGroup, textMatches, allocateCampaignBudgets, campaignNameOf,
+  DAILY_BUDGET, MIN_GROUP_BUDGET, MAX_GROUPS_PER_CAMPAIGN, type GroupView, type CampaignView,
 } from '../src/tools/coupangads/plan.js';
 import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
 import {
@@ -19,11 +19,12 @@ const check = (name: string, ok: boolean, got?: unknown) => {
 
 const P = (id: number, name: string, price: number, cat = '廚房', rocket = true) =>
   ({ productId: id, productName: name, productPrice: price, productImage: 'https://img/' + id, categoryName: cat, isRocket: rocket }) as any;
-const S = (slotNo: number, productId: string | null, p?: any, changed?: string, active = true): SlotView => ({
-  groupId: 1000 + slotNo, slotNo, productId,
-  title: p ? titleOf(p) : null, descr: p ? descOf(p) : null,
-  active, lastChangedAt: changed ?? null,
+// group ↔ 商品是永久對映（建立後 productId 永不改變），所以測試用的建構子不再有「換商品」這個概念
+const G = (groupId: number, productId: string, p?: any, active = true, cpgId = 194431): GroupView => ({
+  groupId, cpgId, productId,
+  title: p ? titleOf(p) : null, descr: p ? descOf(p) : null, active,
 });
+const C = (cpgId: number, groupCount: number): CampaignView => ({ cpgId, groupCount });
 
 console.log('\n[文案：價格變動要看得出來，長度不能超過 R 的上限]');
 check('標題＝商品名', titleOf(P(1, '樂扣保溫杯', 363)) === '樂扣保溫杯');
@@ -45,68 +46,97 @@ check('舊事故重現：500 元 67 檔也不再砍到 7 元', budgetPerGroup(50
 check('下限不會反過來灌大正常值', budgetPerGroup(3000, 20) === 300);
 check('DAILY_BUDGET 是 3000', DAILY_BUDGET === 3000);
 
-console.log('\n[覆蓋優先序：最久沒換的先被覆蓋]');
-{
-  const list = [S(1, 'a', undefined, '2026-08-26T03:00'), S(2, 'b', undefined, '2026-08-24T01:00'), S(3, 'c', undefined, null)];
-  check('沒有時間的視為最舊、其餘由舊到新', list.sort(byOldestChanged).map((s) => s.slotNo).join('') === '321',
-    list.map((s) => s.slotNo));
-}
-
 console.log('\n[textMatches：同商品同文案才算沒變]');
 {
   const p = P(9, '水杯', 100);
-  check('完全相同 → true', textMatches(S(1, '9', p), p));
-  check('價格變了 → false', !textMatches(S(1, '9', p), P(9, '水杯', 120)));
-  check('名稱變了 → false', !textMatches(S(1, '9', p), P(9, '水杯 新包裝', 100)));
-  check('空 slot → false', !textMatches(S(1, null), p));
+  check('完全相同 → true', textMatches(G(1, '9', p), p));
+  check('價格變了 → false', !textMatches(G(1, '9', p), P(9, '水杯', 120)));
+  check('名稱變了 → false', !textMatches(G(1, '9', p), P(9, '水杯 新包裝', 100)));
+  check('沒有文案紀錄 → false', !textMatches(G(1, '9'), p));
 }
 
-console.log('\n[planRotation：同商品不動＝不觸發重審，這是整套規則的核心]');
+console.log('\n[planRotation：group↔商品永久對映，舊商品回來是「重啟」不是「覆蓋」]');
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
-  const slots = [S(1, '1', ps[0], '2026-08-25T00:00'), S(2, '2', ps[1], '2026-08-25T00:00')];
-  const r = planRotation(slots, ps);
-  check('全部同商品同價 → 全 keep、零改動', r.keep.length === 2 && r.retext.length === 0 && r.replace.length === 0 && r.create.length === 0 && r.pause.length === 0);
+  const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
+  const r = planRotation(gs, [C(194431, 2)], ps);
+  check('全部同商品同價 → 全 keep、零改動', r.keep.length === 2 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
   check('在跑檔數＝2、每檔 3000', r.activeCount === 2 && r.budgetPerGroup === 3000);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
-  const slots = [S(1, '1', P(1, 'A', 99), '2026-08-25T00:00'), S(2, '2', ps[1], '2026-08-25T00:00')];
-  const r = planRotation(slots, ps);
-  check('只有降價那檔進 retext，另一檔仍 keep', r.retext.length === 1 && r.retext[0].slot.slotNo === 1 && r.keep.length === 1);
-  check('retext 不會被誤放進 replace（素材不該被換）', r.replace.length === 0);
+  const gs = [G(101, '1', P(1, 'A', 99)), G(102, '2', ps[1])];
+  const r = planRotation(gs, [C(194431, 2)], ps);
+  check('只有降價那檔進 retext，另一檔仍 keep', r.retext.length === 1 && r.retext[0].group.groupId === 101 && r.keep.length === 1);
+  check('retext 只改文案、不會變成新建', r.create.length === 0);
+}
+{
+  // 這就是使用者要的核心：暫停過的商品回到 reco → 重啟它自己那個 group，素材落地頁原封不動＝免重審
+  const ps = [P(7, 'OLD', 30)];
+  const gs = [G(107, '7', ps[0], false)];
+  const r = planRotation(gs, [C(194431, 1)], ps);
+  check('舊商品回清單 → reactivate（不是 create、也不是覆蓋別人）', r.reactivate.length === 1 && r.create.length === 0);
+  check('文案沒變的重啟不需要改文案＝不重審', r.reactivate[0].retext === false);
+  check('重啟的是它自己原本那個 group', r.reactivate[0].group.groupId === 107);
+}
+{
+  const ps = [P(7, 'OLD', 55)]; // 回來時價格變了
+  const r = planRotation([G(107, '7', P(7, 'OLD', 30), false)], [C(194431, 1)], ps);
+  check('重啟且價格有變 → 一併改文案', r.reactivate.length === 1 && r.reactivate[0].retext === true);
 }
 {
   const ps = [P(1, 'A', 10), P(9, 'NEW', 50)];
-  const slots = [S(1, '1', ps[0], '2026-08-26T00:00'), S(2, '2', P(2, 'B', 20), '2026-08-20T00:00'), S(3, '3', P(3, 'C', 30), '2026-08-24T00:00')];
-  const r = planRotation(slots, ps);
-  check('新商品覆蓋「最久沒換」的閒置 slot（slot2 比 slot3 舊）', r.replace.length === 1 && r.replace[0].slot.slotNo === 2 && String(r.replace[0].product.productId) === '9');
-  check('沒被覆蓋、又不在清單的 slot3 → 暫停', r.pause.length === 1 && r.pause[0].slotNo === 3);
-  check('在跑檔數＝2（reco 那批），不含被暫停的', r.activeCount === 2);
+  const gs = [G(101, '1', ps[0]), G(102, '2', P(2, 'B', 20)), G(103, '3', P(3, 'C', 30))];
+  const r = planRotation(gs, [C(194431, 3)], ps);
+  check('全新商品 → 建新 group（絕不覆蓋既有 group）', r.create.length === 1 && String(r.create[0].product.productId) === '9');
+  check('不在清單又還開著的 → 暫停', r.pause.length === 2 && r.pause.map((g) => g.groupId).sort().join() === '102,103');
+  check('在跑檔數＝2（reco 那批）', r.activeCount === 2);
 }
 {
-  const ps = [P(1, 'A', 10), P(2, 'B', 20), P(3, 'C', 30)];
-  const slots = [S(1, '1', ps[0], '2026-08-26T00:00')];
-  const r = planRotation(slots, ps);
-  check('slot 不夠 → 其餘開新 group', r.create.length === 2 && r.replace.length === 0);
-  check('全新帳戶（零 slot）→ 全部 create', planRotation([], ps).create.length === 3);
+  const gs = [G(101, '1', P(1, 'A', 10), false), G(102, '2', P(2, 'B', 20))];
+  const r = planRotation(gs, [C(194431, 2)], []);
+  check('reco 回空 → 只暫停還開著的、不重複暫停已停的', r.pause.length === 1 && r.pause[0].groupId === 102);
+  check('reco 回空 → 不建新', r.create.length === 0 && r.activeCount === 0);
+}
+
+console.log('\n[campaign 容量：一個 campaign 最多 ' + MAX_GROUPS_PER_CAMPAIGN + ' 個 group，滿了就開新的]');
+{
+  check('上限常數是 300', MAX_GROUPS_PER_CAMPAIGN === 300);
+  const ps = [P(1, 'A', 10), P(2, 'B', 20)];
+  const r = planRotation([], [C(194431, 299)], ps);
+  check('第一檔塞進還有空位的 campaign', r.create[0].cpgId === 194431);
+  check('塞爆之後的排進新 campaign（cpgId=null）', r.create[1].cpgId === null, r.create.map((c) => c.cpgId));
+  check('要開 1 個新 campaign', r.newCampaigns === 1);
 }
 {
-  const ps = [P(1, 'A', 10)];
-  const slots = [S(1, '1', ps[0], '2026-08-26T00:00', false)]; // 商品還在清單，但槽被暫停過
-  const r = planRotation(slots, ps);
-  check('暫停過的商品回到清單 → 走 replace 重新啟用（不是 keep）', r.replace.length === 1 && r.keep.length === 0);
+  const ps = Array.from({ length: 5 }, (_, i) => P(100 + i, 'P' + i, 10));
+  const r = planRotation([], [C(1, 300), C(2, 298)], ps);
+  check('滿的 campaign 跳過、找有空位的', r.create.filter((c) => c.cpgId === 2).length === 2);
+  check('剩下的排新 campaign', r.create.filter((c) => c.cpgId === null).length === 3);
+  check('3 個排不下但一個新 campaign 裝得完', r.newCampaigns === 1);
 }
 {
-  const slots = [S(1, '1', P(1, 'A', 10), '2026-08-26T00:00'), S(2, '2', P(2, 'B', 20), '2026-08-26T00:00')];
-  const r = planRotation(slots, []);
-  check('reco 回空 → 全部暫停、不新建（避免誤刪式的空轉）', r.pause.length === 2 && r.create.length === 0);
+  const ps = Array.from({ length: 700 }, (_, i) => P(1000 + i, 'P' + i, 10));
+  const r = planRotation([], [C(1, 300)], ps);
+  check('700 檔全新 → 要開 3 個新 campaign（700/300 進位）', r.newCampaigns === 3, r.newCampaigns);
 }
+
+console.log('\n[campaign 日預算：依在跑檔數比例分攤，總和不超過 ' + DAILY_BUDGET + ']');
 {
-  const ps = [P(1, 'A', 10)];
-  const slots = [S(1, '1', ps[0], '2026-08-26T00:00'), S(2, null, undefined, '2026-08-20T00:00', false)];
-  const r = planRotation(slots, ps);
-  check('沒商品的空槽不會被誤判成要暫停（本來就沒開）', r.pause.length === 0 && r.keep.length === 1);
+  const a = allocateCampaignBudgets([{ cpgId: 1, activeCount: 15 }, { cpgId: 2, activeCount: 5 }]);
+  check('15:5 → 2250 / 750', a.map((x) => x.dayBudget).join() === '2250,750', a);
+  check('總和剛好 3000', a.reduce((s2, x) => s2 + x.dayBudget, 0) === DAILY_BUDGET);
+  const b = allocateCampaignBudgets([{ cpgId: 1, activeCount: 1 }, { cpgId: 2, activeCount: 1 }, { cpgId: 3, activeCount: 1 }]);
+  check('除不盡也不會超過總預算（最大餘數法）', b.reduce((s2, x) => s2 + x.dayBudget, 0) === DAILY_BUDGET, b);
+  check('沒有在跑 group 的 campaign 不分預算（也不去動它）', allocateCampaignBudgets([{ cpgId: 1, activeCount: 0 }, { cpgId: 2, activeCount: 4 }]).length === 1);
+  check('全部都沒在跑 → 不下任何指令', allocateCampaignBudgets([{ cpgId: 1, activeCount: 0 }]).length === 0);
+}
+
+console.log('\n[campaign 命名：第一支沿用原名，之後加序號]');
+{
+  check('第 1 支＝原名', campaignNameOf(1) === '[Coupang] reco 自動投放');
+  check('第 2 支加 #2', campaignNameOf(2) === '[Coupang] reco 自動投放 #2');
+  check('名稱不重複（R 撞名回 409）', campaignNameOf(2) !== campaignNameOf(3));
 }
 
 console.log('\n[CTR 與排序]');
@@ -175,7 +205,7 @@ console.log('\n[一個 (日期×group) 只能有一個商品持有 R 數字]');
   // 但 09:40 那次已經用 A 寫過一列 → 不清掉 A 的 R 欄位，看板當天就是 A+B 兩份。
   const slots: SlotMapping[] = [
     { groupId: 213713, productId: 'B', productSince: '2026-08-27 01:50:00' },
-    { groupId: 213717, productId: 'C', productSince: '2026-08-20 04:11:00' },
+    { groupId: 213717, productId: 'C', productSince: '2026-08-25 04:11:00' },
   ];
   const own = planStatOwnership(['2026-08-25', '2026-08-26', '2026-08-27'], slots);
   const at = (dt: string, gid: number) => own.find((o) => o.dt === dt && o.groupId === gid);
@@ -189,13 +219,23 @@ console.log('\n[一個 (日期×group) 只能有一個商品持有 R 數字]');
 
   const noProduct = planStatOwnership(['2026-08-27'], [{ groupId: 9, productId: null, productSince: null }]);
   check('slot 上沒商品就不下指令', noProduct.length === 0, noProduct);
+
+  // 成本控制：group↔商品永久對映後，回補視窗內「換過商品」的 group 幾乎不存在 →
+  // 早就綁定好的 group 不必每 10 分鐘掃一次（掃描是每個 日期×group 兩條 SQL，會隨 group 數惡化）
+  const old2: SlotMapping[] = [{ groupId: 5, productId: 'X', productSince: '2026-07-01 00:00:00' }];
+  check('商品早在視窗之前就綁定 → 不下任何清理指令（省掉整片 SQL）',
+    planStatOwnership(['2026-08-25', '2026-08-26', '2026-08-27'], old2).length === 0);
+  check('視窗內綁定的才掃（兩個 group × 三天）', planStatOwnership(['2026-08-25', '2026-08-26', '2026-08-27'], slots).length === 6);
+  check('視窗外的 group 完全不進掃描清單',
+    planStatOwnership(['2026-08-25', '2026-08-26', '2026-08-27'], [...slots, ...old2]).length === 6);
 }
 
 console.log('\n[同步摘要]');
 {
-  const base: any = { campaignId: 1, recoCount: 20, unchanged: 20, textUpdated: 0, replaced: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
+  const base: any = { campaignId: 1, campaignIds: [1], recoCount: 20, unchanged: 20, textUpdated: 0, reactivated: 0, created: 0, newCampaigns: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
   check('什麼都沒動時不出現雜訊欄位', summarize(base) === '不動 20、在跑 20 檔／每檔 300 元、1.2s', summarize(base));
-  check('有換商品會列出', summarize({ ...base, replaced: 3 }).includes('換商品 3'));
+  check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
+  check('要開新 campaign 會列出（300 個 group 的安全閥）', summarize({ ...base, created: 5, newCampaigns: 1 }).includes('新 campaign 1'));
   check('有暫停會列出', summarize({ ...base, paused: 45 }).includes('暫停 45'));
 }
 
