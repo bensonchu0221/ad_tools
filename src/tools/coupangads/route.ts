@@ -58,12 +58,12 @@ const csvCell = (value: unknown): string => {
   return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
 };
 
-/** 原始收集表逐列輸出；加 BOM 讓 Excel 直接開啟時可正確辨識 UTF-8。 */
+/** 原始收集表逐列輸出；加 BOM 讓 Excel 直接開啟時可正確辨識 UTF-8。
+ *  一列＝日期 × 商品 × 裝置（device 為 PC/Mobile/Tablet/Others），丟進樞紐分析可直接按裝置切。 */
 export function rawStatsCsv(rows: CoupangDailyStatRow[]): string {
-  const header = ['dt', 'product_id', 'group_id', 'imp', 'click', 'spend', 'coupang_click', 'orders', 'gmv', 'commission'];
+  const header = ['dt', 'product_id', 'group_id', 'device', 'imp', 'click', 'spend'];
   const body = rows.map((row) => [
-    row.dt, row.productId, row.groupId, row.imp, row.click, row.spend,
-    row.coupangClick, row.orders, row.gmv, row.commission,
+    row.dt, row.productId, row.groupId, row.device, row.imp, row.click, row.spend,
   ].map(csvCell).join(','));
   return '\uFEFF' + [header.join(','), ...body].join('\r\n') + '\r\n';
 }

@@ -1,9 +1,14 @@
-// 每小時 :30 的成效收集：R 報表（曝光/點擊/花費）＋ Coupang 聯盟報表（點擊/訂單/佣金）→ coupang_daily_stats。
+// 每小時 :30 的成效收集：R 報表（日 × group × 裝置的曝光/點擊/花費）→ coupang_daily_stats。
 // ⚠️ 排程對齊 R：**R 報表是全平台每小時批次更新（實測約每小時 :20）**，抓再密也只會拿到同一批數字，
 //    所以 2026-08-27 由每 10 分鐘改成每小時 :30（留 ~10 分鐘餘裕）。
 // 看板改讀這張表＝秒開，也不受 API 保留期與延遲影響。
-// 兩邊粒度不同：R 是 group×日、Coupang 是 subId(=商品)×日 → 用 slots 表的 group↔商品對映接起來。
+// R 是 group 粒度、我們要商品粒度 → 用 slots 表的 group↔商品永久對映接起來。
 // 換素材當天該 group 全天的量會算給「當下掛的商品」（R 報表拆不出時段），這是刻意的取捨。
+//
+// ⚠️ 2026-08-27 移除 Coupang 聯盟報表（commission/orders/cancels）：實測從上線到現在
+// coupangClick/orders/gmv/commission **一路都是 0**（Coupang 端收不到我們的點擊，見 CLAUDE.md
+// 那條未結案的記錄），留著只是每次多打三支 API、還讓看板與 CSV 掛著永遠是 0 的欄位。
+// 同一次把裝置（R 的 device_type）升成維度，CSV 才切得出 PC/Mobile/Tablet/Others。
 //
 // ⚠️ 2026-08-27 修重複計數：slots 只存「當下」的對映，但每次回補都重抓最近 4 天。
 // 原本無條件把 group 的歷史數字寫到當下掛的商品名下，而舊商品那幾列不會被刪 →
@@ -17,7 +22,6 @@
 //     ② 同時讓既有髒資料在回補視窗內自己被清掉（不必另跑腳本）。
 // 邊界用 `product_since` 而不是 `last_changed_at`：後者連「只改文案/價格」也會推進（sync.ts 5b），
 // 拿來當歸屬邊界會讓前幾天的回補被誤跳過。
-import { fetchCommission, fetchOrders, fetchCancels } from '../../core/coupang.js';
 import { fetchReport } from '../../core/rixbee.js';
 import {
   listCoupangSlots, upsertCoupangDailyStats, clearForeignStatMetrics, type CoupangDailyStatRow,
@@ -32,12 +36,15 @@ const twYmd = (d: Date) => new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(d);
 
-/** 回補天數：Coupang 報表 T+1 才出、退貨還會回頭修正，所以每次都重抓最近幾天覆蓋。 */
+/** 回補天數：R 自己會回頭修正當日數字，漏跑幾次也靠這個視窗補回來，所以每次都重抓最近幾天覆蓋。 */
 export const BACKFILL_DAYS = 4;
 
-export function productIdFromSubId(subId: string, prefix: string): string | null {
-  const m = new RegExp('^' + prefix + '_([0-9]+)$').exec(String(subId ?? ''));
-  return m ? m[1] : null;
+// R device_type 代碼 → 裝置桶。口徑與整合週報一致（report.ts R_DEVICE_BUCKET）：
+// 文件(help_report) 2=Desktop、1=Mobile、5=Tablet、3=TV Device、7=Set Top Box，其餘一律 Others。
+// 帳戶 10222 實測只出現 1／2／5 三種（Mobile 佔 96% 曝光）。
+const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5': 'Tablet' };
+export function rDeviceBucket(code: unknown): string {
+  return R_DEVICE_BUCKET[String(code)] ?? 'Others';
 }
 
 export function normDate(v: string | number): string {
@@ -66,11 +73,12 @@ export interface SlotMapping {
 }
 
 export interface AttributedRow {
-  dt: string; productId: string; groupId: number;
+  dt: string; productId: string; groupId: number; device: string;
   imp: number; click: number; spend: number;
 }
 
-/** R 報表列 → (日期 × 商品) 的曝光/點擊/花費。純函式：重複計數的防線在這裡，好驗。 */
+/** R 報表列 → (日期 × 商品 × 裝置) 的曝光/點擊/花費。純函式：重複計數的防線在這裡，好驗。
+ *  同一天同一 group 的多個 device_type 代碼可能落進同一桶（如 3/7 都歸 Others），要累加不能覆蓋。 */
 export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow[] {
   const byGroup = new Map<number, { productId: string; changedTwDate: string | null }>();
   for (const s of slots) {
@@ -83,8 +91,9 @@ export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow
     if (!m) continue; // 不是本工具的 group
     const dt = normDate(r.day);
     if (!attributesToCurrentProduct(dt, m.changedTwDate)) continue; // 換商品之前的日子留給舊商品
-    const k = dt + '|' + m.productId;
-    if (!out.has(k)) out.set(k, { dt, productId: m.productId, groupId: gid, imp: 0, click: 0, spend: 0 });
+    const device = rDeviceBucket(r.device_type);
+    const k = dt + '|' + m.productId + '|' + device;
+    if (!out.has(k)) out.set(k, { dt, productId: m.productId, groupId: gid, device, imp: 0, click: 0, spend: 0 });
     const c = out.get(k)!;
     c.imp += Number(r.impression ?? 0);
     c.click += Number(r.click ?? 0);
@@ -124,7 +133,6 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
   const now = new Date();
   const ed = twYmd(now);
   const sd = twYmd(new Date(now.getTime() - (BACKFILL_DAYS - 1) * 86400000));
-  const prefix = 'r' + ACCOUNT_ID;
 
   // slot 對映（group → 當下掛的商品）＋順便把 R 的開關/審核狀態同步回 DB
   const [slots, status] = await Promise.all([
@@ -132,49 +140,21 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
     refreshSlotStatus().catch(() => ({ updated: 0, pendingReview: 0 })),
   ]);
 
-  const [rRows, commission, orders, cancels] = await Promise.all([
-    fetchReport({ userType: R_USER_TYPE, userIds: [ACCOUNT_ID], startDate: sd, endDate: ed, dimensions: ['day', 'group_id'], metrics: [] } as any).catch(() => [] as any[]),
-    fetchCommission(sd, ed).catch(() => []),
-    fetchOrders(sd, ed).catch(() => []),
-    fetchCancels(sd, ed).catch(() => []),
-  ]);
+  // 只打這一支：day × group_id × device_type。實測裝置分項加總與不帶 device 的總數守恆
+  // （poc/probe_coupang_device.mts：498,885 曝光兩邊相等，花費僅浮點進位差）。
+  const rRows = await fetchReport({
+    userType: R_USER_TYPE, userIds: [ACCOUNT_ID], startDate: sd, endDate: ed,
+    dimensions: ['day', 'group_id', 'device_type'], metrics: [],
+  } as any).catch(() => [] as any[]);
 
-  const bucket = new Map<string, CoupangDailyStatRow>();
-  const cell = (dt: string, productId: string, groupId: number | null): CoupangDailyStatRow => {
-    const k = dt + '|' + productId;
-    if (!bucket.has(k)) bucket.set(k, { dt, productId, groupId, imp: 0, click: 0, spend: 0, coupangClick: 0, orders: 0, gmv: 0, commission: 0 });
-    const c = bucket.get(k)!;
-    if (groupId && !c.groupId) c.groupId = groupId;
-    return c;
-  };
-
-  for (const a of attributeRRows(rRows as any[], slots)) {
-    const c = cell(a.dt, a.productId, a.groupId);
-    c.imp += a.imp; c.click += a.click; c.spend += a.spend;
-  }
-  for (const r of commission) {
-    const pid = productIdFromSubId(r.subId, prefix);
-    if (!pid) continue;
-    cell(normDate(r.date), pid, null).coupangClick += Number(r.click ?? 0);
-  }
-  for (const o of orders) {
-    const pid = productIdFromSubId(o.subId, prefix);
-    if (!pid) continue;
-    const c = cell(normDate(o.date), pid, null);
-    c.orders += Number(o.quantity ?? 1);
-    c.gmv += Number(o.gmv ?? 0);
-    c.commission += Number(o.commission ?? 0);
-  }
-  for (const x of cancels as any[]) {
-    const pid = productIdFromSubId(String(x.subId ?? ''), prefix);
-    if (!pid) continue;
-    const c = cell(normDate(String(x.date ?? x.orderDate ?? '')), pid, null);
-    c.orders -= Number(x.quantity ?? 1);
-    c.gmv -= Number(x.gmv ?? 0);
-    c.commission -= Number(x.commission ?? 0);
-  }
-
-  const rows = [...bucket.values()];
+  // 全零的裝置列不寫（R 對沒跑到的裝置也會回一列）：group 只增不減，每次回補 4 天 ×
+  // 每個 group × 4 個裝置，全寫進去就是一堆永遠是 0 的列，還會被下面的清理再刪一次。
+  const rows: CoupangDailyStatRow[] = attributeRRows(rRows as any[], slots)
+    .filter((a) => a.imp !== 0 || a.click !== 0 || a.spend !== 0)
+    .map((a) => ({
+      dt: a.dt, productId: a.productId, device: a.device, groupId: a.groupId,
+      imp: a.imp, click: a.click, spend: a.spend,
+    }));
   await upsertCoupangDailyStats(rows);
   // 先寫再掃：中途掛掉頂多多留一次髒列，下次跑就會清掉（反過來先清後寫會留下空窗）
   const cleared = await clearForeignStatMetrics(planStatOwnership(enumDays(sd, ed), slots));

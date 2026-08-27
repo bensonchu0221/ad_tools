@@ -6,10 +6,10 @@ import {
 } from '../src/tools/coupangads/plan.js';
 import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
 import {
-  productIdFromSubId, twDateFromUtc, attributesToCurrentProduct, attributeRRows, planStatOwnership,
+  rDeviceBucket, twDateFromUtc, attributesToCurrentProduct, attributeRRows, planStatOwnership,
   type SlotMapping,
 } from '../src/tools/coupangads/collect.js';
-import { summarize } from '../src/tools/coupangads/route.js';
+import { summarize, rawStatsCsv } from '../src/tools/coupangads/route.js';
 import { isInvalidToken } from '../src/core/rixbee_admin.js';
 
 let pass = 0, fail = 0;
@@ -114,22 +114,30 @@ check('無曝光 → null', ctrOf(0, 0) === null);
 check('點擊 0 但有曝光 → 0', ctrOf(1000, 0) === 0);
 {
   const rows = [
-    { productId: 'A', ctr: 0.01, commission: 0, spend: 1 },
-    { productId: 'B', ctr: null, commission: 999, spend: 1 },
-    { productId: 'C', ctr: 0.05, commission: 0, spend: 1 },
-    { productId: 'D', ctr: 0, commission: 0, spend: 1 },
-    { productId: 'E', ctr: 0.05, commission: 500, spend: 1 },
+    { productId: 'A', ctr: 0.01, spend: 1, imp: 1 },
+    { productId: 'B', ctr: null, spend: 999, imp: 1 },
+    { productId: 'C', ctr: 0.05, spend: 1, imp: 1 },
+    { productId: 'D', ctr: 0, spend: 1, imp: 1 },
+    { productId: 'E', ctr: 0.05, spend: 500, imp: 1 },
   ];
   check('CTR 高在上、無曝光沉底＝E,C,A,D,B', [...rows].sort(compareByCtr).map((r) => r.productId).join('') === 'ECADB');
+  check('同 CTR 比花費（E 花得多排前面）', [...rows].sort(compareByCtr)[0].productId === 'E');
 }
 
-console.log('\n[日期與 subId]');
+console.log('\n[日期]');
 check('YYYYMMDD → YYYY-MM-DD', normDate('20260826') === '2026-08-26');
 check('列舉含頭尾', enumDays('2026-08-20', '2026-08-26').length === 7);
 check('起訖顛倒回空', enumDays('2026-08-26', '2026-08-20').length === 0);
-check('我們的 subId', productIdFromSubId('r10222_493992735047680', 'r10222') === '493992735047680');
-check('空 subId（別人的流量）不誤認', productIdFromSubId('', 'r10222') === null);
-check('前綴相似不誤認', productIdFromSubId('r102220_123', 'r10222') === null);
+
+console.log('\n[R device_type → 裝置桶（口徑同整合週報）]');
+check('2 = Desktop → PC', rDeviceBucket(2) === 'PC');
+check('1 = Mobile', rDeviceBucket(1) === 'Mobile');
+check('5 = Tablet', rDeviceBucket(5) === 'Tablet');
+check('字串代碼也認得（API 回什麼型別都不炸）', rDeviceBucket('5') === 'Tablet');
+check('3 = TV Device → Others', rDeviceBucket(3) === 'Others');
+check('7 = Set Top Box → Others', rDeviceBucket(7) === 'Others');
+check('沒見過的代碼 → Others 不是丟掉', rDeviceBucket(99) === 'Others');
+check('缺欄位 → Others（不能變成 undefined 寫進 DB）', rDeviceBucket(undefined) === 'Others');
 
 console.log('\n[成效歸屬：換過商品的 group，舊日子不能再用新商品名義寫一次（重複計數）]');
 {
@@ -144,8 +152,8 @@ console.log('\n[成效歸屬：換過商品的 group，舊日子不能再用新�
   check('換之前的日子不算給新商品', !attributesToCurrentProduct('2026-08-26', '2026-08-27'));
   check('沒換過的 group 全部日子都算', attributesToCurrentProduct('2026-08-01', null));
 
-  const R = (day: string, gid: number, imp: number, click = 0, spend = 0) =>
-    ({ day, group_id: gid, impression: imp, click, payment_revenue: spend }) as any;
+  const R = (day: string, gid: number, imp: number, click = 0, spend = 0, device_type = 1) =>
+    ({ day, group_id: gid, device_type, impression: imp, click, payment_revenue: spend }) as any;
   // slot 1 今天 09:50(台北) 換成商品 B；8/26 那天掛的是舊商品 A
   const slots: SlotMapping[] = [
     { groupId: 213713, productId: 'B', productSince: '2026-08-27 01:50:00' },
@@ -163,9 +171,51 @@ console.log('\n[成效歸屬：換過商品的 group，舊日子不能再用新�
   check('不是本工具的 group 不收', !got.some((r) => r.groupId === 999999));
   check('總曝光＝該算的那幾列', got.reduce((s, r) => s + r.imp, 0) === 196, got);
 
-  // 迴歸：同一個 group 同一天只會產生一列（雙重計數的直接斷言）
+  // 迴歸：同一個 group 同一天同一裝置只會產生一列（雙重計數的直接斷言）
   const dup = attributeRRows([R('2026-08-27', 213713, 100), R('2026-08-27', 213713, 50)], slots);
-  check('同 group 同日多列 → 合併成一列而非兩列', dup.length === 1 && dup[0].imp === 150, dup);
+  check('同 group 同日同裝置多列 → 合併成一列而非兩列', dup.length === 1 && dup[0].imp === 150, dup);
+}
+
+console.log('\n[裝置維度：同一天同一 group 依裝置拆列，但總數要守恆]');
+{
+  const slots: SlotMapping[] = [{ groupId: 213713, productId: 'B', productSince: null }];
+  const R = (device_type: number, imp: number, click = 0, spend = 0) =>
+    ({ day: '2026-08-27', group_id: 213713, device_type, impression: imp, click, payment_revenue: spend }) as any;
+  const got = attributeRRows([R(1, 7100, 40, 39.97), R(5, 105, 1, 1), R(2, 20, 2, 2)], slots);
+  check('三種裝置拆成三列', got.length === 3, got.map((r) => r.device));
+  check('Mobile 那列數字對', got.find((r) => r.device === 'Mobile')?.imp === 7100);
+  check('Tablet 那列數字對', got.find((r) => r.device === 'Tablet')?.imp === 105);
+  check('PC 那列數字對', got.find((r) => r.device === 'PC')?.imp === 20);
+  check('曝光守恆（拆裝置不會多也不會少）', got.reduce((s, r) => s + r.imp, 0) === 7225);
+  check('點擊守恆', got.reduce((s, r) => s + r.click, 0) === 43);
+
+  // 3 與 7 都歸 Others：同桶多列必須累加，覆蓋掉就會少算
+  const others = attributeRRows([R(3, 10, 1), R(7, 5, 2)], slots);
+  check('不同代碼落進同一桶 → 累加不是覆蓋', others.length === 1 && others[0].imp === 15 && others[0].click === 3, others);
+
+  // 換商品的邊界對每個裝置列都要一致地生效
+  const boundary = attributeRRows(
+    [{ day: '2026-08-26', group_id: 9, device_type: 1, impression: 50, click: 0, payment_revenue: 0 },
+     { day: '2026-08-26', group_id: 9, device_type: 5, impression: 60, click: 0, payment_revenue: 0 },
+     { day: '2026-08-27', group_id: 9, device_type: 1, impression: 70, click: 0, payment_revenue: 0 }] as any[],
+    [{ groupId: 9, productId: 'B', productSince: '2026-08-27 01:50:00' }]
+  );
+  check('換商品前的日子：所有裝置列一起不寫', boundary.length === 1 && boundary[0].dt === '2026-08-27', boundary);
+}
+
+console.log('\n[raw CSV：長格式，一列＝日 × 商品 × 裝置]');
+{
+  const csv = rawStatsCsv([
+    { dt: '2026-08-27', productId: '4958404', groupId: 213708, device: 'Mobile', imp: 7100, click: 40, spend: 39.97 },
+    { dt: '2026-08-27', productId: '4958404', groupId: 213708, device: 'Tablet', imp: 105, click: 1, spend: 1 },
+  ]);
+  const lines = csv.replace(/^\uFEFF/, '').trim().split('\r\n');
+  check('標頭含 device 且在 group_id 之後',
+    lines[0] === 'dt,product_id,group_id,device,imp,click,spend', lines[0]);
+  check('每個裝置一列', lines.length === 3, lines.length);
+  check('裝置值寫得出來', lines[1] === '2026-08-27,4958404,213708,Mobile,7100,40,39.97', lines[1]);
+  check('Coupang 佣金/訂單欄已不存在', !lines[0].includes('commission') && !lines[0].includes('orders'));
+  check('Excel 用的 UTF-8 BOM 還在', csv.startsWith('\uFEFF'));
 }
 
 console.log('\n[一個 (日期×group) 只能有一個商品持有 R 數字]');

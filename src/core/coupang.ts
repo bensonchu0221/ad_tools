@@ -1,4 +1,8 @@
-// Coupang Partners Open API（台灣站）封裝：拉商品、轉 deeplink（帶 subId 追蹤）、查聯盟報表。
+// Coupang Partners Open API（台灣站）封裝：拉商品、轉 deeplink（帶 subId 追蹤）。
+// ⚠️ 2026-08-27 移除聯盟報表三支（reports/commission、reports/orders、reports/cancels）：
+//    我們的 subId 在 Coupang 端從頭到尾查不到任何點擊／訂單（見 CLAUDE.md 那條未結案記錄），
+//    存進 DB 的 104 列 commission/orders/gmv 全部是 0 ⇒ 每次收集白打三支 API。
+//    要重新啟用的話，git 記錄裡有原本的 fetchCommission／fetchOrders／fetchCancels。
 // 知識來源＝skill coupang-partners-api（2026-08-17 實測）＋2026-08-25 本次補測。
 // ⚠️ 台灣站 host 與韓國站不同，金鑰綁 VDC，打錯站回 403 The HMAC token is not for the target VDC.
 import crypto from 'node:crypto';
@@ -21,13 +25,6 @@ export interface DeeplinkResult {
   shortenUrl: string;
   landingUrl: string;
 }
-
-export interface CommissionRow { date: string; trackingCode: string; subId: string; commission: number; click: number }
-export interface OrderRow {
-  date: string; trackingCode: string; subId: string; productId: number; productName: string;
-  quantity: number; gmv: number; commissionRate: number; commission: number;
-}
-export interface CancelRow { date: string; subId?: string; productId?: number; commission?: number; [k: string]: any }
 
 function creds(): { ak: string; sk: string } {
   const ak = process.env.COUPANG_ACCESS_KEY ?? '';
@@ -91,25 +88,4 @@ export async function createDeeplink(productId: number | string, subId: string):
     throw new Error(`deeplink 未回填 subId=${subId}（追蹤會失效）`);
   }
   return d as DeeplinkResult;
-}
-
-/** 報表日期格式為 YYYYMMDD。 */
-export function ymdCompact(d: Date | string): string {
-  const s = typeof d === 'string' ? d : d.toISOString().slice(0, 10);
-  return s.replace(/-/g, '');
-}
-
-export async function fetchCommission(startDate: string, endDate: string): Promise<CommissionRow[]> {
-  const j = await call('GET', `${BASE}/reports/commission`, `startDate=${ymdCompact(startDate)}&endDate=${ymdCompact(endDate)}`);
-  return (Array.isArray(j.data) ? j.data : []) as CommissionRow[];
-}
-
-export async function fetchOrders(startDate: string, endDate: string): Promise<OrderRow[]> {
-  const j = await call('GET', `${BASE}/reports/orders`, `startDate=${ymdCompact(startDate)}&endDate=${ymdCompact(endDate)}`);
-  return (Array.isArray(j.data) ? j.data : []) as OrderRow[];
-}
-
-export async function fetchCancels(startDate: string, endDate: string): Promise<CancelRow[]> {
-  const j = await call('GET', `${BASE}/reports/cancels`, `startDate=${ymdCompact(startDate)}&endDate=${ymdCompact(endDate)}`);
-  return (Array.isArray(j.data) ? j.data : []) as CancelRow[];
 }

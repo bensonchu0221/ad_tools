@@ -1537,12 +1537,16 @@ export interface CoupangProductRow {
   isRocket: boolean;
 }
 
+/** 每日成效一列＝日期 × 商品 × 裝置。
+ *  2026-08-27：Coupang 聯盟報表（點擊/訂單/GMV/佣金）整組移除——實測從頭到尾都是 0
+ *  （Coupang 端收不到我們的點擊，見 CLAUDE.md），留著只是雜訊；同時把裝置升成維度。 */
 export interface CoupangDailyStatRow {
   dt: string;
   productId: string;
   groupId: number | null;
+  /** PC / Mobile / Tablet / Others（由 R 的 device_type 對照而來，口徑同整合週報）。 */
+  device: string;
   imp: number; click: number; spend: number;
-  coupangClick: number; orders: number; gmv: number; commission: number;
 }
 
 export interface CoupangSyncRunRow {
@@ -1552,10 +1556,36 @@ export interface CoupangSyncRunRow {
   budgetPerGroup: number | null; elapsedMs: number; message: string | null;
 }
 
-let coupangSchemaReady = false;
+// ⚠️ 存的是「進行中的 Promise」而不是 boolean：collectStats 的 Promise.all 會同時走兩條路徑進來，
+// 只用 boolean 的話兩邊都會看到 false → 遷移跑兩次（實測 RENAME 第二次回 ER_TABLE_EXISTS_ERROR，
+// ADD COLUMN 也會撞 duplicate column）。共用同一個 Promise 才是真的只跑一次。
+let coupangSchemaOnce: Promise<void> | null = null;
 
-async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
-  if (coupangSchemaReady) return;
+function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
+  if (!coupangSchemaOnce) {
+    coupangSchemaOnce = migrateCoupangSchema(p).catch((e) => { coupangSchemaOnce = null; throw e; });
+  }
+  return coupangSchemaOnce;
+}
+
+async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
+  const dbName = process.env.DB_NAME ?? 'ad_tools';
+  const hasColumn = async (table: string, column: string): Promise<boolean> => {
+    const [rows] = await p.query(
+      `SELECT COUNT(*) AS c FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = ? AND column_name = ?`,
+      [dbName, table, column]
+    );
+    return ((rows as any[])[0]?.c ?? 0) > 0;
+  };
+  const hasTable = async (table: string): Promise<boolean> => {
+    const [rows] = await p.query(
+      `SELECT COUNT(*) AS c FROM information_schema.tables
+        WHERE table_schema = ? AND table_name = ?`,
+      [dbName, table]
+    );
+    return ((rows as any[])[0]?.c ?? 0) > 0;
+  };
   // slot＝R 上的一個 AdGroup；商品輪替是「換這個槽裡的素材/文案」而不是開新 group。
   await p.query(`
     CREATE TABLE IF NOT EXISTS coupang_slots (
@@ -1595,22 +1625,31 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
       seen_count    INT          NOT NULL DEFAULT 1
     ) DEFAULT CHARSET=utf8mb4
   `);
-  // 每日成效：R 側（曝光/點擊/花費，group 粒度）＋ Coupang 側（點擊/訂單/佣金，subId=商品粒度）
-  // ⚠️ 粒度取捨：換素材當天，該 group 全天的量會算給「當下掛的商品」（R 報表只有日×group，拆不出時段）
+  // 2026-08-27 換結構：舊表是「日 × 商品」且含 Coupang 四欄（coupang_click/orders/gmv/commission），
+  // 新表是「日 × 商品 × 裝置」且只留 R 側三個指標。**主鍵變了不能就地 ALTER**——舊列沒有裝置維度，
+  // 留著會跟新的分裝置列並存被加總兩次，所以整張改名保留當 rollback（不刪資料）。
+  // ⚠️ 下一次收集**只重建得回「現任商品」的量**：換過商品的 group，早幾天的量屬於舊商品，
+  //    會被 product_since 邊界正確地跳過，而 R 只給 day×group 拆不出是哪個商品 ⇒ 那段會缺。
+  //    legacy 表每列都帶 group_id，正好補上那段歷史對映 → 用
+  //    `poc/backfill_coupang_device_from_legacy.mts --write` 一次性回填（實測回填後逐日與 R 全等）。
+  if (await hasTable('coupang_daily_stats') && !(await hasColumn('coupang_daily_stats', 'device'))) {
+    const legacy = (await hasTable('coupang_daily_stats_legacy'))
+      ? `coupang_daily_stats_legacy_${Date.now()}` : 'coupang_daily_stats_legacy';
+    await p.query(`RENAME TABLE coupang_daily_stats TO ${legacy}`);
+  }
+  // 每日成效：只來自 R（曝光/點擊/花費），維度＝日期 × 商品 × 裝置。
+  // ⚠️ 粒度取捨：換素材當天，該 group 全天的量會算給「當下掛的商品」（R 報表只有日×group×裝置，拆不出時段）
   await p.query(`
     CREATE TABLE IF NOT EXISTS coupang_daily_stats (
       dt            DATE         NOT NULL,
       product_id    VARCHAR(32)  NOT NULL,
+      device        VARCHAR(8)   NOT NULL COMMENT 'PC/Mobile/Tablet/Others，由 R device_type 對照',
       group_id      BIGINT       NULL,
       imp           BIGINT       NOT NULL DEFAULT 0,
       click         BIGINT       NOT NULL DEFAULT 0,
       spend         DECIMAL(16,4) NOT NULL DEFAULT 0,
-      coupang_click BIGINT       NOT NULL DEFAULT 0,
-      orders        INT          NOT NULL DEFAULT 0,
-      gmv           DECIMAL(16,2) NOT NULL DEFAULT 0,
-      commission    DECIMAL(16,2) NOT NULL DEFAULT 0,
       synced_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (dt, product_id),
+      PRIMARY KEY (dt, product_id, device),
       INDEX idx_dt (dt)
     ) DEFAULT CHARSET=utf8mb4
   `);
@@ -1634,38 +1673,21 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
   `);
   // 既有表補 product_since：last_changed_at 連「只改文案」也會動，不能當成效歸屬邊界。
   // 回填用 assigned_at（現有資料最接近「這個商品換上來的時間」的欄位）。
-  const dbName = process.env.DB_NAME ?? 'ad_tools';
-  const [cols] = await p.query(
-    `SELECT COUNT(*) AS c FROM information_schema.columns
-      WHERE table_schema = ? AND table_name = 'coupang_slots' AND column_name = 'product_since'`,
-    [dbName]
-  );
-  if (((cols as any[])[0]?.c ?? 0) === 0) {
+  if (!(await hasColumn('coupang_slots', 'product_since'))) {
     await p.query(`ALTER TABLE coupang_slots ADD COLUMN product_since DATETIME NULL
                    COMMENT '一律存 UTC；只在 product_id 真的變動時才推進（成效歸屬邊界）'`);
     await p.query(`UPDATE coupang_slots SET product_since = COALESCE(assigned_at, last_changed_at)`);
   }
   // 2026-08-27：group ↔ 商品改永久對映後，group 會累積 → 一支 campaign 最多 300 個，滿了開新的，
   // 所以要知道每個 group 屬於哪支 campaign。既有列全是第一支 campaign。
-  const [cpgCol] = await p.query(
-    `SELECT COUNT(*) AS c FROM information_schema.columns
-      WHERE table_schema = ? AND table_name = 'coupang_slots' AND column_name = 'cpg_id'`,
-    [dbName]
-  );
-  if (((cpgCol as any[])[0]?.c ?? 0) === 0) {
+  if (!(await hasColumn('coupang_slots', 'cpg_id'))) {
     await p.query(`ALTER TABLE coupang_slots ADD COLUMN cpg_id BIGINT NULL
                    COMMENT '所屬 campaign；一支最多 300 個 group，滿了開新的'`);
   }
-  const [runCol] = await p.query(
-    `SELECT COUNT(*) AS c FROM information_schema.columns
-      WHERE table_schema = ? AND table_name = 'coupang_sync_runs' AND column_name = 'reactivated'`,
-    [dbName]
-  );
-  if (((runCol as any[])[0]?.c ?? 0) === 0) {
+  if (!(await hasColumn('coupang_sync_runs', 'reactivated'))) {
     await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reactivated INT NOT NULL DEFAULT 0
                    COMMENT '重啟舊 group 的檔數（舊制的 replaced 欄留著給歷史紀錄）'`);
   }
-  coupangSchemaReady = true;
 }
 
 async function coupangPool(): Promise<mysql.Pool> {
@@ -1793,9 +1815,9 @@ export async function listCoupangProducts(ids: string[]): Promise<Map<string, Co
 }
 
 /** 一個 (日期 × group) 只能有一個商品持有 R 數字（曝光/點擊/花費）。
- *  own=true ＝這天由 productId 持有，同 (dt, group) 其他商品的 R 欄位清掉；
- *  own=false ＝這天不屬於 productId（輪替前的日子），清掉它自己被回補寫進去的 R 欄位。
- *  Coupang 側的訂單/佣金是那個商品自己賺的，一律保留；清完全零的列才刪掉。 */
+ *  own=true ＝這天由 productId 持有，同 (dt, group) 其他商品的數字清掉；
+ *  own=false ＝這天不屬於 productId（輪替前的日子），清掉它自己被回補寫進去的數字。
+ *  以 (dt, group) 為單位一次清掉該商品所有裝置列；清完全零的列直接刪掉。 */
 export async function clearForeignStatMetrics(
   cells: { dt: string; groupId: number; productId: string; own: boolean }[]
 ): Promise<number> {
@@ -1811,12 +1833,11 @@ export async function clearForeignStatMetrics(
     );
     touched += res.affectedRows;
   }
-  // 清完什麼都不剩的列（R 與 Coupang 兩側都 0）就沒有保留價值
+  // 清完什麼都不剩的列就沒有保留價值
   for (const c of cells) {
     await p.query(
       `DELETE FROM coupang_daily_stats
-        WHERE dt=? AND group_id=? AND imp=0 AND click=0 AND spend=0
-          AND coupang_click=0 AND orders=0 AND gmv=0 AND commission=0`,
+        WHERE dt=? AND group_id=? AND imp=0 AND click=0 AND spend=0`,
       [c.dt, c.groupId]
     );
   }
@@ -1828,27 +1849,29 @@ export async function upsertCoupangDailyStats(rows: CoupangDailyStatRow[]): Prom
   const p = await coupangPool();
   for (const r of rows) {
     await p.query(
-      `INSERT INTO coupang_daily_stats (dt, product_id, group_id, imp, click, spend, coupang_click, orders, gmv, commission)
-       VALUES (?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO coupang_daily_stats (dt, product_id, device, group_id, imp, click, spend)
+       VALUES (?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
-         group_id=VALUES(group_id), imp=VALUES(imp), click=VALUES(click), spend=VALUES(spend),
-         coupang_click=VALUES(coupang_click), orders=VALUES(orders), gmv=VALUES(gmv), commission=VALUES(commission)`,
-      [r.dt, r.productId, r.groupId, r.imp, r.click, r.spend, r.coupangClick, r.orders, r.gmv, r.commission]
+         group_id=VALUES(group_id), imp=VALUES(imp), click=VALUES(click), spend=VALUES(spend)`,
+      [r.dt, r.productId, r.device, r.groupId, r.imp, r.click, r.spend]
     );
   }
 }
 
 export async function listCoupangDailyStats(sd: string, ed: string): Promise<CoupangDailyStatRow[]> {
   const p = await coupangPool();
+  // ⚠️ dt 一定要讓 MySQL 直接格式化成字串。原本是 `new Date(r.dt).toISOString().slice(0,10)`，
+  // 而 mysql2 會用「行程所在時區」把 DATE 建成 Date 物件 → 在 UTC+8 的機器上 toISOString()
+  // 會倒退一天，整份看板與 CSV 的日期全部左移（線上 Cloud Run 是 UTC 才剛好看不出來）。
   const [rows] = await p.query(
-    `SELECT * FROM coupang_daily_stats WHERE dt BETWEEN ? AND ? ORDER BY dt`, [sd, ed]
+    `SELECT DATE_FORMAT(dt, '%Y-%m-%d') AS dt, product_id, device, group_id, imp, click, spend
+       FROM coupang_daily_stats WHERE dt BETWEEN ? AND ? ORDER BY dt, product_id, device`, [sd, ed]
   );
   return (rows as any[]).map((r) => ({
-    dt: new Date(r.dt).toISOString().slice(0, 10),
-    productId: String(r.product_id), groupId: num(r.group_id),
+    dt: String(r.dt),
+    productId: String(r.product_id), device: String(r.device),
+    groupId: num(r.group_id),
     imp: Number(r.imp), click: Number(r.click), spend: Number(r.spend),
-    coupangClick: Number(r.coupang_click), orders: Number(r.orders),
-    gmv: Number(r.gmv), commission: Number(r.commission),
   }));
 }
 

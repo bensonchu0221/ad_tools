@@ -1,5 +1,7 @@
 // 酷澎聯盟投放（tool#6）看板頁。Slot Board 外殼＋本頁特有樣式。
-// 資料全部即時打 API（無資料表）：進頁面就 fetch /api/stats。
+// 進頁面 fetch /api/stats（後端讀 coupang_daily_stats，每小時 :30 由收集器更新）。
+// ⚠️ 2026-08-27 移除 Coupang 聯盟報表相關欄位（訂單／GMV／佣金）：那三欄的來源 API
+//    我們的 subId 一筆都收不到，DB 裡從頭到尾都是 0 ⇒ 版面上只是三欄永遠的 0。
 import { sbPage } from '../../core/sbui.js';
 
 // 配色經 dataviz validator 驗過（light/#FFFFFF：CVD ΔE 29.1、normal 40.8、對比 ≥3:1 全 PASS）。
@@ -85,7 +87,7 @@ const BODY = `
   <div class="crumb"><a href="/">ad_tools</a> / 酷澎聯盟投放</div>
   <h1>酷澎聯盟投放</h1>
   <p class="muted" style="margin:10px 0 0;font-size:13px">
-    Coupang 聯盟商品自動上架到 R 平台投放，收益與廣告花費對照。每天 09:50 依 reco 最新清單輪替素材。
+    Coupang 聯盟商品自動上架到 R 平台投放，看曝光／點擊／花費成效。每天 09:50 依 reco 最新清單輪替素材。
   </p>
 
   <div id="review"></div>
@@ -153,7 +155,6 @@ const BODY = `
           <thead><tr>
             <th style="width:66px">素材</th><th style="width:74px">Group</th><th>商品</th>
             <th class="n hide-s">曝光</th><th class="n">點擊</th><th class="n">CTR</th><th class="n">花費</th>
-            <th class="n">訂單</th><th class="n hide-s">GMV</th><th class="n">佣金</th>
             <th class="n">日預算</th><th>狀態</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
@@ -168,7 +169,7 @@ const BODY = `
   </div>
 
   <div class="foot" style="margin-top:30px">
-    R 帳戶 10222 ｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新；Coupang 佣金報表 T+1 才出，當天數字會偏低）
+    R 帳戶 10222 ｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新，實測約每小時 :20，所以當天數字會落後一個批次）｜ 下載 CSV 可再切 PC／Mobile／Tablet／Others
   </div>
 `;
 
@@ -250,12 +251,11 @@ function render(){
       '<td><div class="nm">'+(p.landingUrl?'<a href="'+esc(p.landingUrl)+'" target="_blank" rel="noopener">'+esc(p.title||p.productId)+'</a>':esc(p.title||p.productId))+'</div>'+
         '<div class="muted" style="font-size:11px">'+esc(p.productId)+'</div></td>'+
       '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n"><b>'+pct(p.ctr)+'</b></td><td class="n">'+money(p.spend)+'</td>'+
-      '<td class="n">'+nf(p.orders)+'</td><td class="n hide-s">'+money(p.gmv)+'</td><td class="n">'+money(p.commission)+'</td>'+
       '<td class="n">'+money(p.dayBudget)+'</td>'+
       '<td>'+statusPill(p)+'</td>';
     tb.appendChild(tr);
   }
-  if(!shown.length) tb.innerHTML='<tr><td colspan="12" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
+  if(!shown.length) tb.innerHTML='<tr><td colspan="9" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
   drawCharts();
 }
 

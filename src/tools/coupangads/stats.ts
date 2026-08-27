@@ -16,10 +16,6 @@ export interface DailyRow {
   imp: number;
   click: number;
   ctr: number | null;
-  commission: number;
-  coupangClick: number;
-  orders: number;
-  gmv: number;
 }
 
 export interface ProductRow {
@@ -34,7 +30,6 @@ export interface ProductRow {
   pendingReview: boolean;
   lastChangedAt: string | null;
   imp: number; click: number; ctr: number | null; spend: number;
-  orders: number; gmv: number; commission: number; roi: number | null;
 }
 
 export interface StatsResult {
@@ -42,7 +37,7 @@ export interface StatsResult {
   running: number;
   pendingReview: number;
   paused: number;
-  totals: { spend: number; imp: number; click: number; ctr: number | null; commission: number; gmv: number; orders: number; roi: number | null; campaignBudget: number };
+  totals: { spend: number; imp: number; click: number; ctr: number | null; campaignBudget: number };
   daily: DailyRow[];
   products: ProductRow[];
   warnings: string[];
@@ -76,9 +71,9 @@ export function ctrOf(imp: number, click: number): number | null {
   return imp > 0 ? click / imp : null;
 }
 
-/** 清單排序：CTR 高者在上，無曝光沉底；同 CTR 再比佣金、花費。 */
-export function compareByCtr(a: { ctr: number | null; commission: number; spend: number }, b: { ctr: number | null; commission: number; spend: number }): number {
-  return (b.ctr ?? -1) - (a.ctr ?? -1) || b.commission - a.commission || b.spend - a.spend;
+/** 清單排序：CTR 高者在上，無曝光沉底；同 CTR 再比花費、曝光。 */
+export function compareByCtr(a: { ctr: number | null; spend: number; imp: number }, b: { ctr: number | null; spend: number; imp: number }): number {
+  return (b.ctr ?? -1) - (a.ctr ?? -1) || b.spend - a.spend || b.imp - a.imp;
 }
 
 export async function buildStats(days = 7, range?: { sd: string; ed: string }): Promise<StatsResult> {
@@ -95,7 +90,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
 
   const dayMap = new Map<string, DailyRow>();
   for (const d of enumDays(sd, ed)) {
-    dayMap.set(d, { date: d, hasData: false, spend: 0, imp: 0, click: 0, ctr: null, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
+    dayMap.set(d, { date: d, hasData: false, spend: 0, imp: 0, click: 0, ctr: null });
   }
   const prodMap = new Map<string, ProductRow>();
   const prod = (pid: string): ProductRow => {
@@ -113,7 +108,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
         active: s?.active ?? false,
         pendingReview: s?.summaryStatus === PENDING_REVIEW,
         lastChangedAt: s?.lastChangedAt ?? null,
-        imp: 0, click: 0, ctr: null, spend: 0, orders: 0, gmv: 0, commission: 0, roi: null,
+        imp: 0, click: 0, ctr: null, spend: 0,
       });
     }
     return prodMap.get(pid)!;
@@ -124,32 +119,26 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     if (s.productId) prod(s.productId);
   }
 
+  // 一列＝日 × 商品 × 裝置；看板兩個維度都不分裝置，所以這裡直接把裝置加總掉
   for (const r of stats) {
     const d = dayMap.get(r.dt);
     if (d) {
       d.hasData = true;
       d.imp += r.imp; d.click += r.click; d.spend += r.spend;
-      d.commission += r.commission; d.coupangClick += r.coupangClick;
-      d.orders += r.orders; d.gmv += r.gmv;
     }
     const p = prod(r.productId);
     p.imp += r.imp; p.click += r.click; p.spend += r.spend;
-    p.orders += r.orders; p.gmv += r.gmv; p.commission += r.commission;
   }
 
   const daily = [...dayMap.values()].sort((a, b) => a.date.localeCompare(b.date));
   for (const d of daily) d.ctr = ctrOf(d.imp, d.click);
 
   const products = [...prodMap.values()];
-  for (const p of products) {
-    p.ctr = ctrOf(p.imp, p.click);
-    p.roi = p.spend > 0 ? p.commission / p.spend : null;
-  }
+  for (const p of products) p.ctr = ctrOf(p.imp, p.click);
   products.sort(compareByCtr);
 
   const sum = (f: (d: DailyRow) => number) => daily.reduce((s, d) => s + f(d), 0);
   const spend = sum((d) => d.spend);
-  const commission = sum((d) => d.commission);
   const running = slots.filter((s) => s.active && s.productId).length;
   const pendingReview = slots.filter((s) => s.active && s.summaryStatus === PENDING_REVIEW).length;
 
@@ -163,8 +152,6 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     totals: {
       spend, imp: sum((d) => d.imp), click: sum((d) => d.click),
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
-      commission, gmv: sum((d) => d.gmv), orders: sum((d) => d.orders),
-      roi: spend > 0 ? commission / spend : null,
       // Campaign 的日預算（不是各 group 加總）：sync 每次都把它校正回 DAILY_BUDGET，
       // 所以這個常數就是 R 上那支 campaign 當下的日預算，也是整體花費的硬上限。
       campaignBudget: DAILY_BUDGET,
