@@ -185,7 +185,7 @@ const STYLE = `
   .note-cost b{color:var(--ink)}
 
   /* 手刻 HUD 原型：幾何留在 SVG，底色、縮放與發光由 CSS 負責。 */
-  .hud-prototype{position:relative;width:min(480px,100%);aspect-ratio:480/177;margin:36px auto 8px;color:#01D7EB}
+  .hud-prototype{position:relative;width:min(480px,100%);aspect-ratio:480/300;margin:36px auto 8px;color:#01D7EB}
   .hud-prototype-frame{position:absolute;inset:0;display:block;width:100%;height:100%;overflow:visible;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .hud-prototype .hud-solid{fill:currentColor}
@@ -198,10 +198,8 @@ const STYLE = `
     0%,10%,100%{fill:transparent;filter:none}
     4%{fill:currentColor;filter:drop-shadow(0 0 2px currentColor) drop-shadow(0 0 7px currentColor)}
   }
-  .hud-prototype-data{position:absolute;inset:12% 7% 9% 5%;display:grid;
-    grid-template-columns:minmax(0,.84fr) minmax(0,1.16fr);grid-template-rows:auto 1fr auto;
-    column-gap:clamp(8px,3vw,18px);pointer-events:none}
-  .hud-prototype-head{grid-column:1/-1;display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+  .hud-prototype-data{position:absolute;inset:7% 7% 7% 5%;display:flex;flex-direction:column;pointer-events:none}
+  .hud-prototype-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
   .hud-prototype-title{min-width:0}
   .hud-prototype-name{font-family:var(--disp);font-size:clamp(10px,3.2vw,15px);font-weight:700;
     line-height:1.1;color:var(--ink);letter-spacing:.01em}
@@ -210,20 +208,25 @@ const STYLE = `
   .hud-prototype-state{display:inline-flex;align-items:center;gap:5px;border:1px solid currentColor;
     padding:2px 6px;font-family:var(--mono);font-size:clamp(6px,1.8vw,8.5px);letter-spacing:.08em;white-space:nowrap}
   .hud-prototype-state .led{width:5px;height:5px}
-  .hud-prototype-reading{align-self:center;min-width:0}
+  .hud-prototype-main{display:grid;grid-template-columns:minmax(0,.84fr) minmax(0,1.16fr);
+    align-items:center;column-gap:clamp(8px,3vw,18px);margin-top:clamp(7px,2.5vw,12px)}
+  .hud-prototype-reading{min-width:0}
   .hud-prototype-value{font-family:var(--disp);font-size:clamp(25px,8vw,38px);font-weight:700;
     line-height:.95;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
   .hud-prototype-caption{font-family:var(--mono);font-size:clamp(6.5px,1.9vw,9px);color:var(--mut);
     margin-top:6px;white-space:nowrap}
-  .hud-prototype-chart{align-self:center;min-width:0;color:var(--mut)}
+  .hud-prototype-chart{min-width:0;color:var(--mut)}
   .hud-prototype-chart-head{display:flex;justify-content:space-between;gap:5px;margin-bottom:3px;
     font-family:var(--mono);font-size:clamp(5.5px,1.5vw,7.5px);letter-spacing:.06em;color:var(--mut);white-space:nowrap}
   .hud-prototype-chart svg{display:block;width:100%;height:clamp(28px,9vw,43px);overflow:visible}
   .hud-prototype-chart .grid{stroke:var(--rail);stroke-width:1;vector-effect:non-scaling-stroke}
   .hud-prototype-trace{fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;
     stroke-linejoin:round;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 3px currentColor)}
-  .hud-prototype-stats{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;
-    padding-top:6px;border-top:1px solid rgba(1,215,235,.22)}
+  .hud-prototype-risks{display:grid;gap:4px;margin-top:clamp(5px,1.8vw,8px)}
+  .hud-prototype-risk{border-left:2px solid currentColor;padding:3px 6px;background:rgba(255,255,255,.025);
+    font-size:clamp(6px,1.7vw,8px);line-height:1.35;color:var(--ink)}
+  .hud-prototype-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:clamp(4px,1.6vw,7px) 10px;
+    margin-top:auto;padding-top:clamp(5px,1.8vw,8px);border-top:1px solid rgba(1,215,235,.22)}
   .hud-prototype-stat{min-width:0}
   .hud-prototype-stat span{display:block;font-family:var(--mono);font-size:clamp(5px,1.35vw,6.5px);
     letter-spacing:.08em;color:var(--mut);white-space:nowrap}
@@ -516,24 +519,15 @@ const RENDER_JS = `
     }
     if(!card&&cards.length) card=cards[0];
     var data=document.getElementById('hud-prototype-data');
-    data.style.display=card?'grid':'none';
+    data.style.display=card?'flex':'none';
     if(!card) return;
     var put=function(id,value){document.getElementById(id).textContent=value||'—';};
-    var stat=function(label){
-      for(var j=0;j<(card.stats||[]).length;j++){
-        if(card.stats[j].label===label) return card.stats[j].value;
-      }
-      return '—';
-    };
     put('hud-prototype-name',card.name);
     put('hud-prototype-meta',card.meta);
     put('hud-prototype-state-text',card.levelLabel);
     put('hud-prototype-value',card.value);
     put('hud-prototype-caption',card.caption);
     put('hud-prototype-trend',card.trend||'24h —');
-    put('hud-prototype-system',stat('系統記憶體'));
-    put('hud-prototype-ttl',stat('無 TTL 佔比'));
-    put('hud-prototype-evicted',stat('24h 逐出 key'));
     var state=document.getElementById('hud-prototype-state');
     state.className='hud-prototype-state '+lvClass(card.level);
     state.querySelector('i').className='led '+lvClass(card.level);
@@ -541,6 +535,18 @@ const RENDER_JS = `
     var trace=document.getElementById('hud-prototype-trace');
     trace.setAttribute('d',card.path||'');
     trace.setAttribute('class','hud-prototype-trace '+lvClass(card.level));
+    var risks=document.getElementById('hud-prototype-risks'); risks.innerHTML='';
+    (card.risks||[]).forEach(function(r){
+      risks.appendChild(el('div','hud-prototype-risk '+lvClass(r.level),'[!] '+r.text));
+    });
+    risks.style.display=(card.risks||[]).length?'grid':'none';
+    var stats=document.getElementById('hud-prototype-stats'); stats.innerHTML='';
+    (card.stats||[]).forEach(function(s){
+      var item=el('div','hud-prototype-stat');
+      item.appendChild(el('span',null,s.label));
+      item.appendChild(el('b',s.level?lvClass(s.level):null,s.value));
+      stats.appendChild(item);
+    });
   }
 
   function render(vm){
@@ -636,27 +642,31 @@ export function renderGcpWatch(vm: DashboardVM): string {
       只淘汰有 TTL 的 key；沒設 TTL 的 key 塞滿記憶體時 Redis 無 key 可逐出 → 寫入被拒（OOM），
       而此時「逐出 key」仍是 0，所以本頁同時看使用率與無 TTL 佔比。</p>
     <div class="hud-prototype" aria-hidden="true">
-      <svg class="hud-prototype-frame" width="480" height="177" viewBox="0 0 480 177" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg class="hud-prototype-frame" width="480" height="300" viewBox="0 0 480 300" fill="none" xmlns="http://www.w3.org/2000/svg">
         <g class="hud-solid">
           <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
           <path d="M80.887 7.5L86 10.4697H139H222.5H239.5L236.5 7.5H210.5L206.5 3.5H158.5L154.5 7.5H80.887Z"/>
           <path d="M447 3.5H452L465.5 17V22L447 3.5Z"/>
-          <path d="M24.134 163H48.5L61 170.217L56.5 171.423L46.5 165.649H40L38.1491 167.5H31L28 164.5H25L24.134 163Z" stroke="currentColor"/>
-          <path d="M457.5 163L411 163L401 173H403.5L412 164.5H435L436.5 166H452.5L454 164.5H456L457.5 163Z" stroke="currentColor"/>
-          <path d="M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147V126Z"/>
-          <path d="M397 174L408.5 162.5H405.5L397 171V174Z"/>
-          <path d="M53.1173 162.5L72.4414 173.657L70 169.428L58 162.5H53.1173Z"/>
-          <path d="M0.5 142L9 151.25L9 147.5L3 141.5V121.557L0.5 124.057V142Z"/>
+          <g transform="translate(0 123)">
+            <path d="M24.134 163H48.5L61 170.217L56.5 171.423L46.5 165.649H40L38.1491 167.5H31L28 164.5H25L24.134 163Z" stroke="currentColor"/>
+            <path d="M457.5 163L411 163L401 173H403.5L412 164.5H435L436.5 166H452.5L454 164.5H456L457.5 163Z" stroke="currentColor"/>
+            <path d="M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147V126Z"/>
+            <path d="M397 174L408.5 162.5H405.5L397 171V174Z"/>
+            <path d="M53.1173 162.5L72.4414 173.657L70 169.428L58 162.5H53.1173Z"/>
+            <path d="M0.5 142L9 151.25L9 147.5L3 141.5V121.557L0.5 124.057V142Z"/>
+          </g>
           <path d="M8.5 6.5H5.5L1 11V14L8.5 6.5Z"/>
         </g>
         <g class="hud-lines">
           <path d="M447 0.500001L389.419 0.5L382 6.5H336"/>
           <path d="M139 10.4697H86L74 3.5H10M86 10.4697H366M86 10.4697L80.887 7.5H154.5L158.5 3.5H206.5L210.5 7.5H236.5L239.5 10.4697H222.5M222.5 10.4697L219 14H200.5L199 12.5H141L139 10.4697M222.5 10.4697H139"/>
-          <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V123"/>
-          <path d="M72.4414 173.657L76.5 176H395L410 161H465L479 147V126L469.5 116.5M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147M0.5 142L17.5 160.5H49.6532L53.1173 162.5M3 121.557V141.5L9 147.5L9 151.25L0.5 142V124.057L3 121.557ZM7.5 117.057L3 121.557M3 121.5V121.557M53 162.5H53.1173M72.5 173.758L72.4414 173.657M53.1173 162.5L72.4414 173.657M53.1173 162.5H58L70 169.428L72.4414 173.657M397 174V171L405.5 162.5H408.5L397 174Z"/>
-          <path d="M1 11V14L8.5 6.5H5.5L1 11M1 11V67L10.5 76.5V123"/>
+          <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V246"/>
+          <g transform="translate(0 123)">
+            <path d="M72.4414 173.657L76.5 176H395L410 161H465L479 147V126L469.5 116.5M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147M0.5 142L17.5 160.5H49.6532L53.1173 162.5M3 121.557V141.5L9 147.5L9 151.25L0.5 142V124.057L3 121.557ZM7.5 117.057L3 121.557M3 121.5V121.557M53 162.5H53.1173M72.5 173.758L72.4414 173.657M53.1173 162.5L72.4414 173.657M53.1173 162.5H58L70 169.428L72.4414 173.657M397 174V171L405.5 162.5H408.5L397 174Z"/>
+          </g>
+          <path d="M1 11V14L8.5 6.5H5.5L1 11M1 11V67L10.5 76.5V246"/>
         </g>
-        <g class="hud-runway">
+        <g class="hud-runway" transform="translate(0 68.5)">
           <path style="--i:0" d="M479.5 56L469.5 46V39.5L479.5 49.5V56Z"/>
           <path style="--i:1" d="M479.5 65.5L469.5 55.5V49L479.5 59V65.5Z"/>
           <path style="--i:2" d="M479.5 75L469.5 65V58.5L479.5 68.5V75Z"/>
@@ -677,24 +687,23 @@ export function renderGcpWatch(vm: DashboardVM): string {
             <i class="led lv-none"></i><span id="hud-prototype-state-text">—</span>
           </span>
         </div>
-        <div class="hud-prototype-reading">
-          <div class="hud-prototype-value lv-none" id="hud-prototype-value">—</div>
-          <div class="hud-prototype-caption" id="hud-prototype-caption">—</div>
+        <div class="hud-prototype-main">
+          <div class="hud-prototype-reading">
+            <div class="hud-prototype-value lv-none" id="hud-prototype-value">—</div>
+            <div class="hud-prototype-caption" id="hud-prototype-caption">—</div>
+          </div>
+          <div class="hud-prototype-chart">
+            <div class="hud-prototype-chart-head"><span>MEMORY · 24H</span><span id="hud-prototype-trend">—</span></div>
+            <svg viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none">
+              <line class="grid" x1="0" x2="${SPARK_W}" y1="12" y2="12"/>
+              <line class="grid" x1="0" x2="${SPARK_W}" y1="24" y2="24"/>
+              <line class="grid" x1="0" x2="${SPARK_W}" y1="36" y2="36"/>
+              <path class="hud-prototype-trace lv-none" id="hud-prototype-trace"/>
+            </svg>
+          </div>
         </div>
-        <div class="hud-prototype-chart">
-          <div class="hud-prototype-chart-head"><span>MEMORY · 24H</span><span id="hud-prototype-trend">—</span></div>
-          <svg viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none">
-            <line class="grid" x1="0" x2="${SPARK_W}" y1="12" y2="12"/>
-            <line class="grid" x1="0" x2="${SPARK_W}" y1="24" y2="24"/>
-            <line class="grid" x1="0" x2="${SPARK_W}" y1="36" y2="36"/>
-            <path class="hud-prototype-trace lv-none" id="hud-prototype-trace"/>
-          </svg>
-        </div>
-        <div class="hud-prototype-stats">
-          <div class="hud-prototype-stat"><span>SYSTEM MEMORY</span><b id="hud-prototype-system">—</b></div>
-          <div class="hud-prototype-stat"><span>NO TTL</span><b id="hud-prototype-ttl">—</b></div>
-          <div class="hud-prototype-stat"><span>EVICTED · 24H</span><b id="hud-prototype-evicted">—</b></div>
-        </div>
+        <div class="hud-prototype-risks" id="hud-prototype-risks"></div>
+        <div class="hud-prototype-stats" id="hud-prototype-stats"></div>
       </div>
     </div>
     <footer>popin ad-ops · ${vm.project} · asia-east1</footer>
