@@ -1521,6 +1521,9 @@ export interface CoupangSlotRow {
   summaryStatus: number | null;
   assignedAt: string | null;
   lastChangedAt: string | null;
+  /** 這個商品是「什麼時候換上這個 group」的（UTC）。只在 product_id 真的變動時才推進——
+   *  last_changed_at 連「只改文案」也會動，拿它當成效歸屬邊界會誤判（見 collect.ts）。 */
+  productSince: string | null;
 }
 
 export interface CoupangProductRow {
@@ -1568,6 +1571,7 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
       summary_status  INT          NULL,
       assigned_at     DATETIME     NULL COMMENT '一律存 UTC（DB 的 NOW()）',
       last_changed_at DATETIME     NULL COMMENT '一律存 UTC；覆蓋優先序靠它排，混到台北時間會差 8 小時',
+      product_since   DATETIME     NULL COMMENT '一律存 UTC；只在 product_id 真的變動時才推進（成效歸屬邊界）',
       synced_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY uniq_slot_no (slot_no),
       INDEX idx_product (product_id),
@@ -1625,6 +1629,19 @@ async function ensureCoupangSchema(p: mysql.Pool): Promise<void> {
       INDEX idx_ran (ran_at)
     ) DEFAULT CHARSET=utf8mb4
   `);
+  // 既有表補 product_since：last_changed_at 連「只改文案」也會動，不能當成效歸屬邊界。
+  // 回填用 assigned_at（現有資料最接近「這個商品換上來的時間」的欄位）。
+  const dbName = process.env.DB_NAME ?? 'ad_tools';
+  const [cols] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+      WHERE table_schema = ? AND table_name = 'coupang_slots' AND column_name = 'product_since'`,
+    [dbName]
+  );
+  if (((cols as any[])[0]?.c ?? 0) === 0) {
+    await p.query(`ALTER TABLE coupang_slots ADD COLUMN product_since DATETIME NULL
+                   COMMENT '一律存 UTC；只在 product_id 真的變動時才推進（成效歸屬邊界）'`);
+    await p.query(`UPDATE coupang_slots SET product_since = COALESCE(assigned_at, last_changed_at)`);
+  }
   coupangSchemaReady = true;
 }
 
@@ -1656,7 +1673,8 @@ export async function listCoupangSlots(): Promise<CoupangSlotRow[]> {
     `SELECT group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price,
             day_budget, active, summary_status,
             DATE_FORMAT(assigned_at,   '%Y-%m-%d %H:%i:%s') AS assigned_at,
-            DATE_FORMAT(last_changed_at,'%Y-%m-%d %H:%i:%s') AS last_changed_at
+            DATE_FORMAT(last_changed_at,'%Y-%m-%d %H:%i:%s') AS last_changed_at,
+            DATE_FORMAT(product_since,  '%Y-%m-%d %H:%i:%s') AS product_since
        FROM coupang_slots ORDER BY slot_no`
   );
   return (rows as any[]).map((r) => ({
@@ -1667,6 +1685,7 @@ export async function listCoupangSlots(): Promise<CoupangSlotRow[]> {
     summaryStatus: num(r.summary_status),
     assignedAt: r.assigned_at ?? null,
     lastChangedAt: r.last_changed_at ?? null,
+    productSince: r.product_since ?? null,
   }));
 }
 
@@ -1682,9 +1701,11 @@ export async function upsertCoupangSlot(s: Partial<CoupangSlotRow> & { groupId: 
   const p = await coupangPool();
   await p.query(
     `INSERT INTO coupang_slots
-       (group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price, day_budget, active, summary_status, assigned_at, last_changed_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,${s.assignedAt === undefined ? 'NOW()' : '?'}, ${changed ? 'NOW()' : 'COALESCE(?, NOW())'})
+       (group_id, slot_no, product_id, cr_id, mt_id, landing_url, title, descr, price, day_budget, active, summary_status, assigned_at, last_changed_at, product_since)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,${s.assignedAt === undefined ? 'NOW()' : '?'}, ${changed ? 'NOW()' : 'COALESCE(?, NOW())'}, NOW())
      ON DUPLICATE KEY UPDATE
+       -- 商品沒變就保留原值：只改文案/價格不算換商品，成效歸屬邊界不能跟著跳
+       product_since=IF(product_id <=> VALUES(product_id), product_since, NOW()),
        slot_no=VALUES(slot_no), product_id=VALUES(product_id), cr_id=VALUES(cr_id), mt_id=VALUES(mt_id),
        landing_url=VALUES(landing_url), title=VALUES(title), descr=VALUES(descr), price=VALUES(price),
        day_budget=VALUES(day_budget), active=VALUES(active), summary_status=VALUES(summary_status)
@@ -1738,6 +1759,37 @@ export async function listCoupangProducts(ids: string[]): Promise<Map<string, Co
     });
   }
   return out;
+}
+
+/** 一個 (日期 × group) 只能有一個商品持有 R 數字（曝光/點擊/花費）。
+ *  own=true ＝這天由 productId 持有，同 (dt, group) 其他商品的 R 欄位清掉；
+ *  own=false ＝這天不屬於 productId（輪替前的日子），清掉它自己被回補寫進去的 R 欄位。
+ *  Coupang 側的訂單/佣金是那個商品自己賺的，一律保留；清完全零的列才刪掉。 */
+export async function clearForeignStatMetrics(
+  cells: { dt: string; groupId: number; productId: string; own: boolean }[]
+): Promise<number> {
+  if (!cells.length) return 0;
+  const p = await coupangPool();
+  let touched = 0;
+  for (const c of cells) {
+    const [res]: any = await p.query(
+      `UPDATE coupang_daily_stats SET imp=0, click=0, spend=0
+        WHERE dt=? AND group_id=? AND product_id ${c.own ? '<>' : '='} ?
+          AND (imp<>0 OR click<>0 OR spend<>0)`,
+      [c.dt, c.groupId, c.productId]
+    );
+    touched += res.affectedRows;
+  }
+  // 清完什麼都不剩的列（R 與 Coupang 兩側都 0）就沒有保留價值
+  for (const c of cells) {
+    await p.query(
+      `DELETE FROM coupang_daily_stats
+        WHERE dt=? AND group_id=? AND imp=0 AND click=0 AND spend=0
+          AND coupang_click=0 AND orders=0 AND gmv=0 AND commission=0`,
+      [c.dt, c.groupId]
+    );
+  }
+  return touched;
 }
 
 export async function upsertCoupangDailyStats(rows: CoupangDailyStatRow[]): Promise<void> {

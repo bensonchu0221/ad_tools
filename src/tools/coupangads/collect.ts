@@ -6,11 +6,22 @@
 // ⚠️ 2026-08-27 修重複計數：slots 只存「當下」的對映，但每次回補都重抓最近 4 天。
 // 原本無條件把 group 的歷史數字寫到當下掛的商品名下，而舊商品那幾列不會被刪 →
 // 換過商品的 group，同一天的量會同時掛在新舊兩個商品上被算兩次（實證 8/25 R 只有 30 個 group
-// 卻存了 49 列、看板曝光灌水 69%）。修法＝**換商品之前的日子就不寫**（那些列在舊商品名下已經是對的）。
+// 卻存了 49 列、看板曝光灌水 69%）。
+// 修法是兩道，缺一不可：
+//   ①**換商品之前的日子不寫**（那些列在舊商品名下已經是對的）——`attributesToCurrentProduct`。
+//   ②**寫完掃一次**：一個 (日期 × group) 只能有一個商品持有 R 數字，其餘清零——`planStatOwnership`
+//     ＋ store 的 `clearForeignStatMetrics`。只有 ① 擋不住「輪替當天」：09:40 收集器已用舊商品寫過
+//     一列，09:50 換商品後 10:00 那次把當日總數寫給新商品，兩列並存 ⇒ 每天輪替都會重造髒資料。
+//     ② 同時讓既有髒資料在回補視窗內自己被清掉（不必另跑腳本）。
+// 邊界用 `product_since` 而不是 `last_changed_at`：後者連「只改文案/價格」也會推進（sync.ts 5b），
+// 拿來當歸屬邊界會讓前幾天的回補被誤跳過。
 import { fetchCommission, fetchOrders, fetchCancels } from '../../core/coupang.js';
 import { fetchReport } from '../../core/rixbee.js';
-import { listCoupangSlots, upsertCoupangDailyStats, type CoupangDailyStatRow } from '../../core/store.js';
+import {
+  listCoupangSlots, upsertCoupangDailyStats, clearForeignStatMetrics, type CoupangDailyStatRow,
+} from '../../core/store.js';
 import { ACCOUNT_ID, refreshSlotStatus } from './sync.js';
+import { enumDays } from './stats.js';
 
 /** R 帳號型別：10222 實測是 direct（4A）。env 可覆蓋，避免每次跑都花 3 支 probe。 */
 const R_USER_TYPE = (process.env.COUPANG_R_USER_TYPE ?? 'direct') as 'agency' | 'direct' | 'super';
@@ -48,7 +59,8 @@ export function attributesToCurrentProduct(day: string, changedTwDate: string | 
 export interface SlotMapping {
   groupId: number;
   productId: string | null;
-  lastChangedAt: string | null; // UTC 'YYYY-MM-DD HH:mm:ss'
+  /** 這個商品換上這個 group 的時間（UTC）。只在真的換商品時才推進，見 store.ts。 */
+  productSince: string | null;
 }
 
 export interface AttributedRow {
@@ -60,7 +72,7 @@ export interface AttributedRow {
 export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow[] {
   const byGroup = new Map<number, { productId: string; changedTwDate: string | null }>();
   for (const s of slots) {
-    if (s.productId) byGroup.set(s.groupId, { productId: s.productId, changedTwDate: twDateFromUtc(s.lastChangedAt) });
+    if (s.productId) byGroup.set(s.groupId, { productId: s.productId, changedTwDate: twDateFromUtc(s.productSince) });
   }
   const out = new Map<string, AttributedRow>();
   for (const r of rows) {
@@ -79,7 +91,26 @@ export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow
   return [...out.values()];
 }
 
-export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; pendingReview: number }> {
+export interface StatOwnership {
+  dt: string; groupId: number; productId: string;
+  /** true＝這天由這個商品持有 R 數字（其他商品要清零）；false＝這天不屬於它（清它自己）。 */
+  own: boolean;
+}
+
+/** 回補視窗內每個 (日期 × group) 該由誰持有 R 數字。純函式，重複計數的第二道防線。 */
+export function planStatOwnership(days: string[], slots: SlotMapping[]): StatOwnership[] {
+  const out: StatOwnership[] = [];
+  for (const s of slots) {
+    if (!s.productId) continue;
+    const since = twDateFromUtc(s.productSince);
+    for (const dt of days) {
+      out.push({ dt, groupId: s.groupId, productId: s.productId, own: attributesToCurrentProduct(dt, since) });
+    }
+  }
+  return out;
+}
+
+export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number }> {
   const now = new Date();
   const ed = twYmd(now);
   const sd = twYmd(new Date(now.getTime() - (BACKFILL_DAYS - 1) * 86400000));
@@ -135,5 +166,7 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
 
   const rows = [...bucket.values()];
   await upsertCoupangDailyStats(rows);
-  return { sd, ed, rows: rows.length, pendingReview: status.pendingReview };
+  // 先寫再掃：中途掛掉頂多多留一次髒列，下次跑就會清掉（反過來先清後寫會留下空窗）
+  const cleared = await clearForeignStatMetrics(planStatOwnership(enumDays(sd, ed), slots));
+  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview };
 }
