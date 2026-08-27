@@ -7,6 +7,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#4＝資源看板（GCP Watch）：GCP 專案 popinpoc1 的 Memorystore Redis／Cloud SQL 用量即時監看，唯讀 Cloud Monitoring。2026-08-17 建立（起因：Redis 用滿導致爬蟲寫不進去，事後才發現）。
 - tool#5＝MGID 媒體報表：廣告主角度看各媒體（source）成效。排程把 `day×source` raw 寫入 `mgid_source_raw`，頁面讀庫組成 MSN 合併／折線／堆積／合計／每日鑽取。不即時打 API。設計 `docs/superpowers/specs/2026-08-24-mgid-source-report-design.md`。
 - tool#6＝酷澎聯盟投放：Coupang Partners 聯盟商品（reco）自動上架到 R 平台帳戶 10222 投放，看板即時對照聯盟佣金與廣告花費。2026-08-25 建立，**零資料表**（對映靠命名規則存在 R 上、報表即時打 API、執行紀錄靠 Cloud Logging）。
+- tool#7＝FUI 面板（`/tools/fuidash`）：**視覺語言實驗頁，全部是合成假資料**，不接任何後端。2026-08-27 建立，起因是想把科幻片 HUD 那套「資訊密度＋發光訊號」在專案裡真的做一次。不上首頁導覽列（比照 `adstream-lab`），只走直接網址。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
@@ -138,6 +139,17 @@ popin 內部工具集（取代舊 dctool）。
 - 金鑰：`COUPANG_ACCESS_KEY`／`COUPANG_SECRET_KEY` 在 Secret Manager；R 管理 token 走 `nexus.r_account_tokens`（email `benson@popin.cc`），**換發的 token 只活 1 小時**
 - 驗證：`poc/verify_coupangads.mts`（42 項純函式，已做 3 個變異測試）／手動跑 `poc/coupang_sync_run.mts [--dry]`／遷移 `poc/migrate_coupang_slots.mts`
 
+## FUI 面板核心（tool#7，`/tools/fuidash`，`src/tools/fuidash/`）
+- **定位：純視覺實驗，不是看板。** 畫面上每一個數字都是 `signal.ts` 的可 seed 純函式產生的合成訊號，**沒有一格接真實資料**。因為整頁長得就像戰情室，很容易被誤讀成營運數字 ⇒ 頂部固定一條紅色 `SIMULATED FEED · NO LIVE DATA` 橫幅，poc 有斷言它必須存在（改版時不要拿掉）
+- 分層：`signal.ts`（假資料＋聲紋幾何，純函式）→ `page.ts`（STYLE／body／前端 JS）→ `route.ts`（一支 GET，無 API、無 DB、無外部呼叫）
+- **刻意不走 `sbPage()`**：Slot Board 外殼的 topbar 與 760px 內容欄會把「整面是一塊螢幕」的語言切碎。本頁自組完整 HTML，只沿用共用的 `FONT_FACES` 與 favicon；回首頁的入口放在左上角選單列（`RETURN TO ad_tools`）
+- **新增兩支自架字體**（`poc/fetch_fonts.mts` 的 `FONTS` 已加，全站仍無 CDN）：**Chakra Petch** 500/600/700＝切角方體、當面板標題；**Share Tech Mono** 400＝等寬終端字、當數據列。參考圖用的 Eurostile／Bank Gothic 都要付費授權，這兩支是 Google Fonts 上最接近的替身。⚠️ 重跑 `fetch_fonts.mts` 會把既有 5 支也重新下載（內容等價但位元組不同）→ 只想加新字體時，跑完把既有的 `git checkout --` 還原即可
+- **DATA STREAM MATRIX（聲紋）是這頁的主角**：三「束」細線疊加，每束靠 `twist` 造成跨線相位差 ⇒ 看起來像扭轉的立體絲帶。青束與琥珀束**速度一正一負**（反向流動才有交纏感），第三束淡青高頻當高光。畫法是 canvas `globalCompositeOperation='lighter'`＋每條線 stroke 兩遍（粗且淡當輝光／細且亮當芯線），比 `shadowBlur` 快很多。合計 60 條線、每條約 150 點，Path2D 建一次 stroke 兩次
+- **⚠️ 同一套數學有兩份實作**：`signal.ts` 的 `ribbonY`（後端／可離線驗證）與 `page.ts` 的 `RIBBON_FN_SRC`（內嵌給瀏覽器，動畫每幀必須在前端算）。兩份漂移的話畫面會悄悄變樣而沒人發現 ⇒ `poc/verify_fuidash.mts` 用 `new Function` 取出前端那份，跟後端在 2000+ 取樣點上比對必須**逐點完全相等**
+- 其餘 canvas：線框地球（正交投影＋背面剔除＋大圓弧＋掃描環）、極座標頻譜、環形讀數、FLOW 小折線、底部頻譜。**全部由同一個 rAF 迴圈驅動**（不是各自 rAF），分頁切到背景就停、`prefers-reduced-motion` 直接靜止在 t=8s
+- **假資料的取捨**：事件流的代號用專案真實階段名（`D_BULK_FETCH`／`M_TEASER_STAT`／`ZERO_CLICK_FILL`…）讓畫面像這個專案在跑；mainframe **離線台數固定為 2**（純機率抽樣會抽出「六台掛五台」的死機房畫面，那是隨機的正常結果但不是這頁想講的狀態）
+- 視覺檢視 `poc/preview_fuidash.mts`（起 :4601 並代供 `/fonts`，自架字體要 http 才載得到）；驗證 `poc/verify_fuidash.mts` 73 項全離線（PRNG 可重現／聲紋值域與兩份實作等值／假資料結構／頁面字串契約含 SIMULATED 標記）
+
 ## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
 - **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
 - **D 分頁**：沿用原語意——鏡像列（`source='dctool'`）唯讀、自建列（`adtools`）受保護可編輯／刪除；KPI 3 磚（總／自建／鏡像）＋來源篩選 chip。走 `store.ts addToken/updateToken/deleteToken`
@@ -165,6 +177,7 @@ popin 內部工具集（取代舊 dctool）。
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 待辦
+- **FUI 面板（tool#7，2026-08-27）本機已驗、線上待驗**：1920×1080 實測無捲軸／面板零溢出／六個 canvas 皆有尺寸／兩支新字體載入成功、console 無錯。**待驗**：①部署後 `/tools/fuidash` 進得去（走 OAuth 守衛，非白名單路徑）；②新字體 `chakra-petch-*.woff2`／`share-tech-mono-400.woff2` 有隨映像檔進到 `public/fonts/`；③**<1180px 的窄版堆疊排版尚未實際看過**（chrome resize 對最大化視窗沒生效）；④長時間開著看有無記憶體/耗電問題（rAF 常駐）。
 - **MGID 媒體報表（tool#5，2026-08-25）本機已驗、線上待驗**：頁面 Slot Board、compose 純函式全過、里山十二食回補 90 天 raw 可看圖表。**線上待驗**：①部署後 `/tools/mgidsource` 進得去；②Cloud Scheduler `mgid-source-daily`（台北 11:00）與 `mgid-source-worker`（每分鐘）要新建；③首次各帳 90 天回補跑完、清單帳號不再顯示尚未同步；④LA 時區兩帳（859152／859153）日期不錯日。
 - **酷澎聯盟投放（tool#6）2026-08-27 移除 Coupang 報表＋改存裝置維度，線上待驗**：①部署後第一次 `/tools/coupangads/collect/cron` 有沒有成功（線上 `ensureCoupangSchema` 會做改名 legacy＋建新表的遷移，只有第一次會跑）；②看板三磚 KPI 與商品表少了三欄後版面正常；③「下載 raw data (CSV)」拿到的是含 `device` 欄的長格式；④每天 09:50 輪替是否真的只動該動的（看「同步紀錄」的「不動 N」）；⑤使用者 10:00 審核後 `summary_status` 從 3 變成什麼（會確定審核狀態對照表）。⚠️ **本機已於 2026-08-27 用真 R API＋真 DB 跑過整段**（遷移→收集→legacy 回填→逐日與 R 全等 149,173／60,189／289,523），線上那次遷移應是 no-op 只差把新列寫進去。舊事項：**（2026-08-25）本機全鏈路已真跑**：R 帳戶 10222 已真的建好 Campaign 194431＋20 個 AdGroup／素材／Creative（全 Active、日預算各 25 總和 500、CPC 1、落地頁 20/20 帶對 `af_siteid`），看板本機渲染正常（KPI／折線／商品表縮圖）。**線上待驗**：①部署後 `/tools/coupangads` 進得去、Coupang 金鑰 secret 有掛上；②Cloud Scheduler `coupangads-sync` 真的每 30 分鐘跑成功（看「同步紀錄」區塊有沒有列，本機執行不會進 Cloud Logging）；③**線上 SA 讀 Cloud Logging 是否真的通**（本機是使用者憑證，scope 差異只有線上才看得到，同 gcpwatch 那個坑）；④開始有曝光後 R 報表型別偵測要能判出（現在 0 資料回 null）、花費與 ROI 有數字（⑤原「有人下單後確認 orders/commission 的 subId 分得出每商品」已隨 Coupang 報表移除而作廢）
 - **資源看板（tool#4，2026-08-17）本機全綠、線上待驗**：本機真 API 端到端過（三台 Redis／兩台 SQL 都有值、144 點趨勢、hover 正常、console 無錯）。**線上待驗**：①Cloud Run SA 打 Memorystore／sqladmin／Monitoring 三支 API 是否都通（本機是使用者憑證，線上是 SA；理論上 roles/editor 夠，但沒實跑過）；②頁面 60 秒自動更新有沒有真的動；③首頁版位卡進得去。**後續可加**：告警（Cloud Scheduler 每小時檢查 + Slack/Email，使用者這次選純看板先不做）、Cloud Run 5xx（第一版刻意不收）

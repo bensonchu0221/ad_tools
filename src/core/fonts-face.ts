@@ -10,4 +10,8 @@ export const FONT_FACES = `
 @font-face{font-family:'Noto Sans TC';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/noto-sans-tc-400.woff2') format('woff2')}
 @font-face{font-family:'Noto Sans TC';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/noto-sans-tc-500.woff2') format('woff2')}
 @font-face{font-family:'Noto Sans TC';font-style:normal;font-weight:700;font-display:swap;src:url('/fonts/noto-sans-tc-700.woff2') format('woff2')}
+@font-face{font-family:'Chakra Petch';font-style:normal;font-weight:500;font-display:swap;src:url('/fonts/chakra-petch-500.woff2') format('woff2')}
+@font-face{font-family:'Chakra Petch';font-style:normal;font-weight:600;font-display:swap;src:url('/fonts/chakra-petch-600.woff2') format('woff2')}
+@font-face{font-family:'Chakra Petch';font-style:normal;font-weight:700;font-display:swap;src:url('/fonts/chakra-petch-700.woff2') format('woff2')}
+@font-face{font-family:'Share Tech Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/share-tech-mono-400.woff2') format('woff2')}
 `;

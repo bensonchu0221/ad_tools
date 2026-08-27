@@ -13,6 +13,7 @@ import { registerWeeklyReport, BASE_PATH as WEEKLYREPORT } from './tools/weeklyr
 import { registerAdstream, BASE_PATH as ADSTREAM } from './tools/adstream/route.js';
 import { registerTokens } from './tools/tokens/route.js';
 import { registerAdstreamLab } from './tools/adstream-lab/route.js'; // 視覺重新設計實驗頁，先不上首頁選單，僅供直接網址訪問
+import { registerFuiDash } from './tools/fuidash/route.js'; // tool#7 FUI 面板：純視覺語言實驗（全假資料），不上首頁選單，僅供直接網址訪問
 import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.js';
 import { registerMgidSource, BASE_PATH as MGIDSOURCE } from './tools/mgidsource/route.js';
 import { registerCoupangAds, BASE_PATH as COUPANGADS } from './tools/coupangads/route.js';
@@ -113,6 +114,7 @@ await registerWeeklyReport(app);
 await registerAdstream(app);
 await registerTokens(app);
 await registerAdstreamLab(app);
+registerFuiDash(app);
 await registerGcpWatch(app);
 await registerMgidSource(app);
 registerCoupangAds(app);
