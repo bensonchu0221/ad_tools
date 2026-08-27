@@ -186,7 +186,7 @@ const STYLE = `
 
   /* 手刻 HUD 原型：幾何留在 SVG，底色、縮放與發光由 CSS 負責。 */
   .hud-prototype{display:flex;justify-content:center;margin:36px 0 8px;color:#01D7EB}
-  .hud-prototype svg{display:block;width:min(514px,100%);height:auto;
+  .hud-prototype svg{display:block;width:min(480px,100%);height:auto;overflow:visible;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .hud-prototype .hud-solid{fill:currentColor}
   .hud-prototype .hud-lines{fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:miter}
@@ -560,18 +560,25 @@ export function renderGcpWatch(vm: DashboardVM): string {
       只淘汰有 TTL 的 key；沒設 TTL 的 key 塞滿記憶體時 Redis 無 key 可逐出 → 寫入被拒（OOM），
       而此時「逐出 key」仍是 0，所以本頁同時看使用率與無 TTL 佔比。</p>
     <div class="hud-prototype" aria-hidden="true">
-      <svg width="514" height="210" viewBox="0 0 514 210" xmlns="http://www.w3.org/2000/svg">
-        <rect width="514" height="210" fill="#000"/>
+      <svg width="480" height="177" viewBox="0 0 480 177" fill="none" xmlns="http://www.w3.org/2000/svg">
         <g class="hud-solid">
-          <path d="M78.5 190.5H54.134L55 192H58L61 195H68.1491L70 193.149H76.5L86.5 198.923L91 197.717L78.5 190.5Z"/>
-          <path d="M441 190.5H487.5L486 192H484L482.5 193.5H466.5L465 192H442L433.5 200.5H431L441 190.5Z"/>
+          <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
+          <path d="M80.887 7.5L86 10.4697H139H222.5H239.5L236.5 7.5H210.5L206.5 3.5H158.5L154.5 7.5H80.887Z"/>
+          <path d="M447 3.5H452L465.5 17V22L447 3.5Z"/>
+          <path d="M24.134 163H48.5L61 170.217L56.5 171.423L46.5 165.649H40L38.1491 167.5H31L28 164.5H25L24.134 163Z" stroke="currentColor"/>
+          <path d="M457.5 163L411 163L401 173H403.5L412 164.5H435L436.5 166H452.5L454 164.5H456L457.5 163Z" stroke="currentColor"/>
+          <path d="M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147V126Z"/>
+          <path d="M397 174L408.5 162.5H405.5L397 171V174Z"/>
+          <path d="M53.1173 162.5L72.4414 173.657L70 169.428L58 162.5H53.1173Z"/>
+          <path d="M0.5 142L9 151.25L9 147.5L3 141.5V121.557L0.5 124.057V142Z"/>
+          <path d="M8.5 6.5H5.5L1 11V14L8.5 6.5Z"/>
         </g>
         <g class="hud-lines">
-          <path d="M477 28L419.419 28L412 34H366"/>
-          <path d="M40 31H104L116 37.9697H396M111 35H184.5L188.5 31H236.5L240.5 35H266.5L269.5 38M252.5 38L249 41.5H230.5L229 40H171L169 38"/>
-          <path d="M459 31H482L495.5 44.5V144M477 31L495.5 49.5"/>
-          <path d="M499.5 144L509 153.5V174.5L495 188.5H440L425 203.5H106.5L79.6532 188H47.5L30.5 169.5V151.557L37.5 144.557M33 149V169L39 175V178.5M83 190H88L100 196.928L102.5 201.258M506.5 151V173L499.5 180V184M427 201.5V198.5L435.5 190H438.5"/>
-          <path d="M48.5 34H35.5L31 38.5V94.5L40.5 104V150.5M38.5 34L31 41.5"/>
+          <path d="M447 0.500001L389.419 0.5L382 6.5H336"/>
+          <path d="M139 10.4697H86L74 3.5H10M86 10.4697H366M86 10.4697L80.887 7.5H154.5L158.5 3.5H206.5L210.5 7.5H236.5L239.5 10.4697H222.5M222.5 10.4697L219 14H200.5L199 12.5H141L139 10.4697M222.5 10.4697H139"/>
+          <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V123"/>
+          <path d="M72.4414 173.657L76.5 176H395L410 161H465L479 147V126L469.5 116.5M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147M0.5 142L17.5 160.5H49.6532L53.1173 162.5M3 121.557V141.5L9 147.5L9 151.25L0.5 142V124.057L3 121.557ZM7.5 117.057L3 121.557M3 121.5V121.557M53 162.5H53.1173M72.5 173.758L72.4414 173.657M53.1173 162.5L72.4414 173.657M53.1173 162.5H58L70 169.428L72.4414 173.657M397 174V171L405.5 162.5H408.5L397 174Z"/>
+          <path d="M1 11V14L8.5 6.5H5.5L1 11M1 11V67L10.5 76.5V123"/>
         </g>
       </svg>
     </div>
