@@ -211,9 +211,9 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
 }
 
 /**
- * 給 worker 用：把 R 上的即時狀態（開關、審核）同步回 DB。每 10 分鐘跑一次。
+ * 給 worker 用：把 R 上的即時狀態（開關、審核）同步回 DB。每小時 :30 跟著 collect 跑一次。
  * ⚠️ **只寫真的變了的列**：group ↔ 商品改永久對映後 group 只增不減（一天約 +20），
- * 原本無條件每個 group 一條 UPDATE，穩定狀態下等於每 10 分鐘白寫幾百上千列。
+ * 原本無條件每個 group 一條 UPDATE，穩定狀態下等於每次白寫幾百上千列。
  */
 export async function refreshSlotStatus(): Promise<{ updated: number; pendingReview: number }> {
   const { updateCoupangSlotStatus } = await import('../../core/store.js');

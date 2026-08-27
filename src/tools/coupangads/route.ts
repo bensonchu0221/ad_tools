@@ -1,5 +1,5 @@
 // 酷澎聯盟投放（tool#6）路由：看板頁、統計 API、手動同步、兩支排程。
-// /cron（每天 09:50 輪替）與 /collect/cron（每 10 分鐘收成效）都在 auth.ts 白名單的 endsWith('/cron') 內。
+// /cron（每天 09:50 輪替）與 /collect/cron（每小時 :30 收成效）都在 auth.ts 白名單的 endsWith('/cron') 內。
 import type { FastifyInstance } from 'fastify';
 import { coupangAdsPage } from './page.js';
 import { buildStats, rangeOf } from './stats.js';
@@ -154,7 +154,7 @@ export function registerCoupangAds(app: FastifyInstance): void {
     }
   });
 
-  // 每 10 分鐘的成效收集
+  // 每小時 :30 的成效收集（對齊 R 報表的每小時批次更新）
   app.post(BASE_PATH + '/collect/cron', async (req, reply) => {
     const key = (req.query as any).key;
     if (!process.env.DIAG_KEY || key !== process.env.DIAG_KEY) return reply.code(404).send('not found');

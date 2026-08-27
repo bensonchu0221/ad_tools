@@ -1,5 +1,6 @@
-// 看板資料：改讀 coupang_daily_stats / coupang_slots（每 10 分鐘由 collect.ts 更新），不再即時打外部 API。
-// 好處是秒開、不受 Coupang 報表 T+1 延遲與 API 保留期影響；代價是最多 10 分鐘的資料延遲。
+// 看板資料：改讀 coupang_daily_stats / coupang_slots（每小時 :30 由 collect.ts 更新），不再即時打外部 API。
+// 好處是秒開、不受 Coupang 報表 T+1 延遲與 API 保留期影響；代價是資料延遲——但主要延遲來自 R
+// 自己（全平台每小時批次更新，實測約 :20），抓再密也拿不到更新的數字。
 import {
   listCoupangDailyStats, listCoupangSlots, listCoupangProducts,
 } from '../../core/store.js';
@@ -151,7 +152,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const running = slots.filter((s) => s.active && s.productId).length;
   const pendingReview = slots.filter((s) => s.active && s.summaryStatus === PENDING_REVIEW).length;
 
-  if (!stats.length) warnings.push('這段期間還沒有收集到成效資料（收集器每 10 分鐘跑一次）');
+  if (!stats.length) warnings.push('這段期間還沒有收集到成效資料（收集器每小時 :30 跑一次）');
 
   return {
     range: { sd, ed },

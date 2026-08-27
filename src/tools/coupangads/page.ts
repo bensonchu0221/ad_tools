@@ -168,7 +168,7 @@ const BODY = `
   </div>
 
   <div class="foot" style="margin-top:30px">
-    R 帳戶 10222 ｜ 成效每 10 分鐘收集一次（Coupang 佣金報表 T+1 才出，當天數字會偏低）
+    R 帳戶 10222 ｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新；Coupang 佣金報表 T+1 才出，當天數字會偏低）
   </div>
 `;
 
