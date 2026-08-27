@@ -7,6 +7,9 @@ import { PENDING_REVIEW } from './sync.js';
 
 export interface DailyRow {
   date: string;
+  /** 這天在 coupang_daily_stats 有沒有列。沒有＝那天根本還沒開始投，
+   *  跟「有投但花 0 元」是兩回事——圖表要斷線，不能畫成一條貼底的 0 元線。 */
+  hasData: boolean;
   spend: number;
   imp: number;
   click: number;
@@ -90,7 +93,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
 
   const dayMap = new Map<string, DailyRow>();
   for (const d of enumDays(sd, ed)) {
-    dayMap.set(d, { date: d, spend: 0, imp: 0, click: 0, ctr: null, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
+    dayMap.set(d, { date: d, hasData: false, spend: 0, imp: 0, click: 0, ctr: null, commission: 0, coupangClick: 0, orders: 0, gmv: 0 });
   }
   const prodMap = new Map<string, ProductRow>();
   const prod = (pid: string): ProductRow => {
@@ -122,6 +125,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   for (const r of stats) {
     const d = dayMap.get(r.dt);
     if (d) {
+      d.hasData = true;
       d.imp += r.imp; d.click += r.click; d.spend += r.spend;
       d.commission += r.commission; d.coupangClick += r.coupangClick;
       d.orders += r.orders; d.gmv += r.gmv;

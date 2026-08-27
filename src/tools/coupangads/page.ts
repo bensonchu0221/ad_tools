@@ -293,20 +293,43 @@ function drawCharts(){
        '<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="'+C_SPEND+'">'+moneyAxis(spendValue,spendStep)+'</text>'+
        '<text x="'+(W-R+8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="start" font-size="10.5" fill="'+C_CTR+'">'+(ctrValue*100).toFixed(ctrStep*100<1?2:1)+'%</text>';
   }
-  [0,Math.floor((d.length-1)/2),d.length-1].filter((v,i,a)=>a.indexOf(v)===i&&v>=0).forEach(i=>{
-    g+='<text x="'+X(i).toFixed(1)+'" y="'+(H-9)+'" text-anchor="middle" font-size="10.5" fill="var(--mut)">'+(d[i]?d[i].date.slice(5):'')+'</text>';
+  // X 軸：每天都畫刻度；文字擠不下就退成「只有日」，再擠不下才隔天標（不硬塞成一團黑）
+  const per=d.length>1?iw/(d.length-1):iw;
+  const mode=per>=38?'md':(per>=18?'d':'thin');
+  const step=mode==='thin'?Math.ceil(38/Math.max(1,per)):1;
+  d.forEach((row,i)=>{
+    const x=X(i);
+    g+='<line x1="'+x.toFixed(1)+'" y1="'+(T+ih)+'" x2="'+x.toFixed(1)+'" y2="'+(T+ih+4)+'" stroke="var(--line)" stroke-width="1"/>';
+    const isEdge=i===0||i===d.length-1;
+    if(!isEdge&&mode==='thin'&&i%step!==0) return;
+    // 只標日的時候，每月一號與第一格補上月份，才知道跨到哪個月
+    const dd=row.date.slice(8), mm=row.date.slice(5,7);
+    const label=(mode==='md'||dd==='01'||i===0)?(mm+'-'+dd):dd;
+    g+='<text x="'+x.toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10.5" fill="var(--mut)">'+label+'</text>';
   });
 
-  // CTR 的 null 值要保留為斷點，避免把「尚無曝光」誤畫成 0%。
+  // 兩種斷點都要保留，不能畫成 0：
+  //  ① 那天根本沒資料（hasData=false，工具還沒開始投）→ 兩條線一起斷，起點才會一致
+  //  ② 有資料但無曝光 → CTR 是 null（算不出來），花費照畫
   const line=(key,color,yOf)=>{
-    let path='', open=false, last=-1;
+    // 先切成一段一段連續的點，再各自畫：**只有單一點的段要畫成圓點**，
+    // 不然 path 只有一個 M 指令、SVG 什麼都不會畫 → 那天的數字在圖上直接消失。
+    const segs=[]; let cur=[];
     d.forEach((row,i)=>{
-      const v=row[key];
-      if(v==null){ open=false; return; }
-      path+=(open?'L':'M')+X(i).toFixed(1)+' '+yOf(v).toFixed(1)+' '; open=true; last=i;
+      const v=row.hasData?row[key]:null;
+      if(v==null){ if(cur.length) segs.push(cur); cur=[]; return; }
+      cur.push([X(i),yOf(v)]);
     });
-    if(path) g+='<path d="'+path.trim()+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-    if(last>=0) g+='<circle cx="'+X(last).toFixed(1)+'" cy="'+yOf(d[last][key]).toFixed(1)+'" r="4.5" fill="'+color+'" stroke="var(--slot)" stroke-width="2"/>';
+    if(cur.length) segs.push(cur);
+    for(const seg of segs){
+      if(seg.length===1){
+        g+='<circle cx="'+seg[0][0].toFixed(1)+'" cy="'+seg[0][1].toFixed(1)+'" r="3" fill="'+color+'"/>';
+        continue;
+      }
+      g+='<path d="'+seg.map(([x,y],k)=>(k?'L':'M')+x.toFixed(1)+' '+y.toFixed(1)).join(' ')+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+    }
+    const tail=segs.length?segs[segs.length-1][segs[segs.length-1].length-1]:null;
+    if(tail) g+='<circle cx="'+tail[0].toFixed(1)+'" cy="'+tail[1].toFixed(1)+'" r="4.5" fill="'+color+'" stroke="var(--slot)" stroke-width="2"/>';
   };
   line('spend',C_SPEND,spendY);
   line('ctr',C_CTR,ctrY);
@@ -321,7 +344,9 @@ function drawCharts(){
     i=Math.max(0,Math.min(d.length-1,i));
     const row=d[i]; if(!row) return;
     cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity','.25');
-    const rows=[['廣告花費',money(row.spend)],['CTR',pct(row.ctr)],['點擊',nf(row.click)],['曝光',nf(row.imp)]];
+    const rows=row.hasData
+      ?[['廣告花費',money(row.spend)],['CTR',pct(row.ctr)],['點擊',nf(row.click)],['曝光',nf(row.imp)]]
+      :[['—','這天尚未投放']];
     tip.innerHTML='<b>'+row.date+'</b>'+rows.map(([k,v])=>'<div class="r"><span>'+k+'</span><span>'+v+'</span></div>').join('');
     tip.style.opacity='1';
     const tw=tip.offsetWidth;
