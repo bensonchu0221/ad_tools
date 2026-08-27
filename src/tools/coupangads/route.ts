@@ -18,7 +18,6 @@ export function summarize(r: SyncResult): string {
     r.textUpdated ? '改文案 ' + r.textUpdated : '',
     r.reactivated ? '重啟 ' + r.reactivated : '',
     r.created ? '新開 ' + r.created : '',
-    r.newCampaigns ? '新 campaign ' + r.newCampaigns : '',
     r.paused ? '暫停 ' + r.paused : '',
     r.failed ? '失敗 ' + r.failed : '',
     '在跑 ' + r.activeCount + ' 檔／每檔 ' + r.budgetPerGroup + ' 元',

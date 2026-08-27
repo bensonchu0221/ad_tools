@@ -9,8 +9,8 @@
 //  - **價格文案變了只改文案**（素材與落地頁不動），把重審範圍壓到最小。
 //  - **舊商品回到 reco → 重啟它自己那個 group**；文案沒變連改都不用改 ⇒ 免重審、開啟即有量。
 //  - **不在 reco 的暫停**；全新商品才建新 group。
-//  - 一支 campaign 最多 300 個 group，滿了自動開新 campaign；
-//    全域日預算 3000 依「各 campaign 在跑檔數」比例分攤（每支都給 3000 的話總上限會變成 3000×N）。
+//  - **一支 campaign、不限 ad group 數**（2026-08-27 向 R 端 PM 確認沒有上限），
+//    日預算就是 DAILY_BUDGET；不必為了容量去開第二支 campaign，也就沒有預算怎麼分的問題。
 import { fetchReco, createDeeplink, type CoupangProduct } from '../../core/coupang.js';
 import {
   listCampaigns, createCampaign, listGroupsAll, createGroup, listCreatives,
@@ -22,8 +22,7 @@ import {
   insertCoupangSyncRun, setCoupangSlotCampaign, type CoupangSlotRow,
 } from '../../core/store.js';
 import {
-  planRotation, allocateCampaignBudgets, campaignNameOf, titleOf, descOf,
-  DAILY_BUDGET, CPC, CAMPAIGN_NAME, MAX_GROUPS_PER_CAMPAIGN, type GroupView, type CampaignView,
+  planRotation, titleOf, descOf, DAILY_BUDGET, CPC, CAMPAIGN_NAME, type GroupView,
 } from './plan.js';
 
 export const ACCOUNT_EMAIL = process.env.COUPANG_R_EMAIL ?? 'benson@popin.cc';
@@ -37,14 +36,8 @@ export const aliasOf = (productId: number | string) => `coupang_pid_${productId}
 export const subIdOf = (productId: number | string) => `${SUBID_PREFIX}_${productId}`;
 export const creativeNameOf = (productId: number | string) => `[Coupang] ${productId}`;
 
-/** 我們自己的 campaign（第一支沿用原名，之後 `... #2`）。 */
-export function isOurCampaign(name: string): boolean {
-  return String(name ?? '').startsWith(CAMPAIGN_NAME);
-}
-
 export interface SyncResult {
   campaignId: number;
-  campaignIds: number[];
   recoCount: number;
   unchanged: number;
   textUpdated: number;
@@ -54,7 +47,6 @@ export interface SyncResult {
   failed: number;
   budgetPerGroup: number;
   activeCount: number;
-  newCampaigns: number;
   needReview: { productId: string; groupId: number; reason: '改文案' | '新建' }[];
   errors: string[];
   elapsedMs: number;
@@ -73,16 +65,15 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   const errors: string[] = [];
   const needReview: SyncResult['needReview'] = [];
 
-  // 1) 我們的 campaign（可能有多支）
-  const all = await listCampaigns(email);
-  const ours = all.filter((c) => isOurCampaign(c.cpg_name)).sort((a, b) => a.cpg_id - b.cpg_id);
-  if (!ours.length && !dryRun) {
+  // 1) Campaign：一支就夠（不限 group 數），沒有就建、日預算校正到 DAILY_BUDGET
+  let campaign = (await listCampaigns(email)).find((c) => c.cpg_name === CAMPAIGN_NAME);
+  if (!campaign && !dryRun) {
     const cpgId = await createCampaign(email, {
-      name: campaignNameOf(1), dayBudget: DAILY_BUDGET, adomain: 'coupang.com', sponsored: 'Coupang',
+      name: CAMPAIGN_NAME, dayBudget: DAILY_BUDGET, adomain: 'coupang.com', sponsored: 'Coupang',
     });
-    ours.push({ cpg_id: cpgId, cpg_name: campaignNameOf(1), day_budget: DAILY_BUDGET });
+    campaign = { cpg_id: cpgId, cpg_name: CAMPAIGN_NAME, day_budget: DAILY_BUDGET };
   }
-  if (!ours.length) throw new Error('Campaign 不存在且 dryRun 不建立');
+  if (!campaign) throw new Error('Campaign 不存在且 dryRun 不建立');
 
   // 2) reco 商品（固定 20 筆）＋寫進商品表（價格歷史）
   const products = await fetchReco(IMAGE_SIZE);
@@ -107,23 +98,14 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     }
   }
 
-  // 各 campaign 目前有幾個 group（含暫停）＝容量計算的依據
-  const countByCpg = new Map<number, number>();
-  for (const c of ours) countByCpg.set(c.cpg_id, 0);
-  for (const s of slots) {
-    const id = Number(s.cpgId ?? 0);
-    if (id) countByCpg.set(id, (countByCpg.get(id) ?? 0) + 1);
-  }
-  const campaignViews: CampaignView[] = ours.map((c) => ({ cpgId: c.cpg_id, groupCount: countByCpg.get(c.cpg_id) ?? 0 }));
-
   // 4) 決策（純函式）
-  const plan = planRotation(slots.map(toView), campaignViews, products);
+  const plan = planRotation(slots.map(toView), products);
   const budget = plan.budgetPerGroup;
   const base: SyncResult = {
-    campaignId: ours[0].cpg_id, campaignIds: ours.map((c) => c.cpg_id), recoCount: products.length,
+    campaignId: campaign.cpg_id, recoCount: products.length,
     unchanged: plan.keep.length, textUpdated: plan.retext.length, reactivated: plan.reactivate.length,
     created: plan.create.length, paused: plan.pause.length, failed: 0,
-    budgetPerGroup: budget, activeCount: plan.activeCount, newCampaigns: plan.newCampaigns,
+    budgetPerGroup: budget, activeCount: plan.activeCount,
     needReview: [], errors, elapsedMs: Date.now() - t0,
   };
   if (dryRun) return base;
@@ -179,28 +161,10 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     } catch (e: any) { errors.push(`group ${group.groupId} 重啟失敗：${e.message}`); }
   }
 
-  // 5d) 全新商品才開 group；沒空位就先開一支新 campaign
-  const spare: number[] = [];
-  for (let i = 0; i < plan.newCampaigns; i++) {
-    try {
-      const idx = ours.length + 1 + i;
-      const cpgId = await createCampaign(email, {
-        name: campaignNameOf(idx), dayBudget: DAILY_BUDGET, adomain: 'coupang.com', sponsored: 'Coupang',
-      });
-      spare.push(cpgId);
-      ours.push({ cpg_id: cpgId, cpg_name: campaignNameOf(idx), day_budget: DAILY_BUDGET });
-      countByCpg.set(cpgId, 0);
-    } catch (e: any) { errors.push(`新開 campaign 失敗：${e.message}`); }
-  }
-  let spareLeft = MAX_GROUPS_PER_CAMPAIGN;
-  for (const { product, cpgId } of plan.create) {
+  // 5d) 全新商品才開 group
+  const target = campaign.cpg_id;
+  for (const product of plan.create) {
     const pid = String(product.productId);
-    let target = cpgId;
-    if (target == null) {
-      if (!spare.length) { errors.push(`新建 ${pid} 失敗：沒有可用的 campaign`); continue; }
-      target = spare[0];
-      if (--spareLeft <= 0) { spare.shift(); spareLeft = MAX_GROUPS_PER_CAMPAIGN; }
-    }
     try {
       const slotNo = await nextCoupangSlotNo();
       const { mtId } = await ensureMaterial(email, product.productImage, aliasOf(pid));
@@ -217,7 +181,6 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
         title: titleOf(product), descr: descOf(product), price: Number(product.productPrice ?? 0),
         dayBudget: budget, active: true,
       }, true);
-      countByCpg.set(target, (countByCpg.get(target) ?? 0) + 1);
       needReview.push({ productId: pid, groupId, reason: '新建' });
     } catch (e: any) { errors.push(`新建 ${pid} 失敗：${e.message}`); }
   }
@@ -230,18 +193,10 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     } catch (e: any) { errors.push(`group ${group.groupId} 暫停失敗：${e.message}`); }
   }
 
-  // 6) campaign 日預算：依各自「在跑檔數」比例分攤，總和維持 DAILY_BUDGET
-  const liveByCpg = new Map<number, number>();
-  const bump = (id: number) => liveByCpg.set(id, (liveByCpg.get(id) ?? 0) + 1);
-  for (const { group } of plan.keep) bump(group.cpgId);
-  for (const { group } of plan.retext) bump(group.cpgId);
-  for (const { group } of plan.reactivate) bump(group.cpgId);
-  for (const { cpgId } of plan.create) if (cpgId != null) bump(cpgId);
-  for (const { cpgId, dayBudget } of allocateCampaignBudgets([...liveByCpg].map(([cpgId, activeCount]) => ({ cpgId, activeCount })))) {
-    const cur = ours.find((c) => c.cpg_id === cpgId);
-    if (Number(cur?.day_budget ?? 0) === dayBudget) continue;
-    try { await updateCampaign(email, cpgId, { day_budget: dayBudget }); }
-    catch (e: any) { errors.push(`campaign ${cpgId} 預算校正失敗：${e.message}`); }
+  // 6) campaign 日預算校正（程式初版從不更新它，會卡住整體花費）
+  if (Number(campaign.day_budget ?? 0) !== DAILY_BUDGET) {
+    try { await updateCampaign(email, campaign.cpg_id, { day_budget: DAILY_BUDGET }); }
+    catch (e: any) { errors.push(`campaign 預算校正失敗：${e.message}`); }
   }
 
   const result: SyncResult = { ...base, failed: errors.length, needReview, errors, elapsedMs: Date.now() - t0 };
@@ -255,22 +210,31 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   return result;
 }
 
-/** 給 worker 用：把 R 上的即時狀態（開關、審核）同步回 DB。 */
+/**
+ * 給 worker 用：把 R 上的即時狀態（開關、審核）同步回 DB。每 10 分鐘跑一次。
+ * ⚠️ **只寫真的變了的列**：group ↔ 商品改永久對映後 group 只增不減（一天約 +20），
+ * 原本無條件每個 group 一條 UPDATE，穩定狀態下等於每 10 分鐘白寫幾百上千列。
+ */
 export async function refreshSlotStatus(): Promise<{ updated: number; pendingReview: number }> {
   const { updateCoupangSlotStatus } = await import('../../core/store.js');
   const email = ACCOUNT_EMAIL;
-  const groups = await listGroupsAll(email);
-  const creatives = await listCreatives(email);
+  const [groups, creatives, known] = await Promise.all([
+    listGroupsAll(email), listCreatives(email), listCoupangSlots(),
+  ]);
   const crByGroup = new Map<number, any>();
   for (const c of creatives) crByGroup.set(Number(c.group_id), c);
+  const dbByGroup = new Map(known.map((s) => [s.groupId, s]));
 
   let updated = 0, pendingReview = 0;
   for (const g of groups) {
     const cr = crByGroup.get(g.group_id);
     const summary = cr ? Number(cr.summary_status) : null;
     const active = Number(g.group_status ?? 0) === 1;
+    const dayBudget = Number((g as any).budget?.day_budget ?? 0);
     if (active && summary === PENDING_REVIEW) pendingReview++;
-    await updateCoupangSlotStatus(g.group_id, active, summary, Number((g as any).budget?.day_budget ?? 0));
+    const cur = dbByGroup.get(g.group_id);
+    if (cur && cur.active === active && cur.summaryStatus === summary && Number(cur.dayBudget ?? 0) === dayBudget) continue;
+    await updateCoupangSlotStatus(g.group_id, active, summary, dayBudget);
     updated++;
   }
   return { updated, pendingReview };

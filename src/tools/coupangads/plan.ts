@@ -13,8 +13,9 @@
 //  - reco 裡、從沒見過的商品 → **建新 group**（絕不覆蓋任何既有 group）
 //  - 不在 reco、還開著的 → 暫停
 //
-// 容量：一個 campaign 最多 MAX_GROUPS_PER_CAMPAIGN 個 group，滿了就開新 campaign。
-// （R 官方沒有公開上限；實測正常廣告主一個 campaign 約 10 個 group，我們刻意設 300 當安全閥。）
+// 容量：**一支 campaign 不限 ad group 數**（2026-08-27 向 R 端 PM 確認）。曾經自設 300 的安全閥、
+// 滿了就開新 campaign，但那會帶出「多支 campaign 的日預算怎麼分」的麻煩（每支都給 3000 的話
+// 總花費上限會變成 3000×N），既然平台沒限制就不自找麻煩——一支 campaign 吃 DAILY_BUDGET 就好。
 import type { CoupangProduct } from '../../core/coupang.js';
 
 export const DAILY_BUDGET = 3000;      // 全域日預算（台幣），由各 campaign 依在跑檔數分攤
@@ -25,7 +26,6 @@ export const CPC = 1;
 // ⇒ 幾乎標不到量。實證 8/26 全帳戶 54 組只花 107.94 元、曝光比 8/25 掉 5 倍（每小時口徑）。
 // 預算再怎麼分攤都不該低到「不可能出量」，寧可少開幾檔也不要每檔都跑不動。
 export const MIN_GROUP_BUDGET = 50;
-export const MAX_GROUPS_PER_CAMPAIGN = 300;
 export const CAMPAIGN_NAME = '[Coupang] reco 自動投放';
 
 /** R 上一個 AdGroup 的現況。productId 建立後就固定，這是整套設計的不變量。 */
@@ -38,21 +38,14 @@ export interface GroupView {
   active: boolean;
 }
 
-/** campaign 現況；groupCount 含暫停的 group（容量是以「建過幾個」算，不是「幾個在跑」）。 */
-export interface CampaignView {
-  cpgId: number;
-  groupCount: number;
-}
-
 export interface RotationPlan {
   keep: { group: GroupView; product: CoupangProduct }[];                       // 完全不動
   retext: { group: GroupView; product: CoupangProduct }[];                     // 只改文案
   reactivate: { group: GroupView; product: CoupangProduct; retext: boolean }[];// 重啟舊 group
-  create: { product: CoupangProduct; cpgId: number | null }[];                 // 建新 group；null＝要先開新 campaign
+  create: CoupangProduct[];                                                   // 建新 group
   pause: GroupView[];
   activeCount: number;      // 這次結束後會在跑的檔數
   budgetPerGroup: number;
-  newCampaigns: number;     // 這次要新開幾支 campaign
 }
 
 /** 廣告標題＝商品名（R 上限 40 字）。 */
@@ -75,36 +68,7 @@ export function textMatches(group: Pick<GroupView, 'title' | 'descr'>, p: Coupan
   return group.title === titleOf(p) && group.descr === descOf(p);
 }
 
-/** campaign 名稱：第一支沿用原名，之後加序號（R 撞名會回 409）。 */
-export function campaignNameOf(index: number): string {
-  return index <= 1 ? CAMPAIGN_NAME : `${CAMPAIGN_NAME} #${index}`;
-}
-
-/**
- * campaign 日預算：依「該 campaign 有幾個在跑的 group」按比例分攤全域日預算。
- * 每支都給 DAILY_BUDGET 的話，總花費上限會變成 3000×campaign 數。
- * 用最大餘數法補齊整數，總和剛好等於 total；沒有在跑 group 的 campaign 不分配（也就不去動它）。
- */
-export function allocateCampaignBudgets(
-  counts: { cpgId: number; activeCount: number }[], total = DAILY_BUDGET
-): { cpgId: number; dayBudget: number }[] {
-  const live = counts.filter((c) => c.activeCount > 0);
-  const sum = live.reduce((s, c) => s + c.activeCount, 0);
-  if (!live.length || sum <= 0) return [];
-  const raw = live.map((c) => ({ cpgId: c.cpgId, exact: (total * c.activeCount) / sum }));
-  const out = raw.map((r) => ({ cpgId: r.cpgId, dayBudget: Math.max(1, Math.floor(r.exact)) }));
-  // 最大餘數法把整數化少掉的補回去，總和才會剛好是 total
-  let left = total - out.reduce((s, o) => s + o.dayBudget, 0);
-  const order = raw
-    .map((r, i) => ({ i, frac: r.exact - Math.floor(r.exact) }))
-    .sort((a, b) => b.frac - a.frac);
-  for (let k = 0; left > 0 && order.length; k++, left--) out[order[k % order.length].i].dayBudget++;
-  return out;
-}
-
-export function planRotation(
-  groups: GroupView[], campaigns: CampaignView[], products: CoupangProduct[]
-): RotationPlan {
+export function planRotation(groups: GroupView[], products: CoupangProduct[]): RotationPlan {
   const recoIds = new Set(products.map((p) => String(p.productId)));
   // 一個商品理論上只會有一個 group；真的撞到多個（例如歷史遺留）就優先用還開著、id 較新的那個
   const byProduct = new Map<string, GroupView>();
@@ -118,26 +82,14 @@ export function planRotation(
   const keep: RotationPlan['keep'] = [];
   const retext: RotationPlan['retext'] = [];
   const reactivate: RotationPlan['reactivate'] = [];
-  const fresh: CoupangProduct[] = [];
+  const create: RotationPlan['create'] = [];
 
   for (const p of products) {
     const g = byProduct.get(String(p.productId));
-    if (!g) { fresh.push(p); continue; }
+    if (!g) { create.push(p); continue; }
     if (!g.active) { reactivate.push({ group: g, product: p, retext: !textMatches(g, p) }); continue; }
     if (textMatches(g, p)) keep.push({ group: g, product: p });
     else retext.push({ group: g, product: p });
-  }
-
-  // 新商品塞進還有空位的 campaign（依 cpgId 由小到大填滿），不夠的排新 campaign
-  const room = campaigns
-    .map((c) => ({ cpgId: c.cpgId, left: Math.max(0, MAX_GROUPS_PER_CAMPAIGN - c.groupCount) }))
-    .sort((a, b) => a.cpgId - b.cpgId);
-  const create: RotationPlan['create'] = [];
-  let overflow = 0;
-  for (const p of fresh) {
-    const slot = room.find((r) => r.left > 0);
-    if (slot) { slot.left--; create.push({ product: p, cpgId: slot.cpgId }); }
-    else { overflow++; create.push({ product: p, cpgId: null }); }
   }
 
   // 不在 reco、又還開著的才要暫停（已經停掉的不用重複下指令）
@@ -147,6 +99,5 @@ export function planRotation(
   return {
     keep, retext, reactivate, create, pause, activeCount,
     budgetPerGroup: budgetPerGroup(DAILY_BUDGET, activeCount),
-    newCampaigns: Math.ceil(overflow / MAX_GROUPS_PER_CAMPAIGN),
   };
 }

@@ -1,8 +1,8 @@
 // tool#6 酷澎聯盟投放：純函式驗證（離線，不打 API、不碰 DB）。
 // 跑法：npx tsx poc/verify_coupangads.mts
 import {
-  planRotation, titleOf, descOf, budgetPerGroup, textMatches, allocateCampaignBudgets, campaignNameOf,
-  DAILY_BUDGET, MIN_GROUP_BUDGET, MAX_GROUPS_PER_CAMPAIGN, type GroupView, type CampaignView,
+  planRotation, titleOf, descOf, budgetPerGroup, textMatches,
+  DAILY_BUDGET, MIN_GROUP_BUDGET, type GroupView,
 } from '../src/tools/coupangads/plan.js';
 import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
 import {
@@ -25,7 +25,6 @@ const G = (groupId: number, productId: string, p?: any, active = true, cpgId = 1
   groupId, cpgId, productId,
   title: p ? titleOf(p) : null, descr: p ? descOf(p) : null, active,
 });
-const C = (cpgId: number, groupCount: number): CampaignView => ({ cpgId, groupCount });
 
 console.log('\n[文案：價格變動要看得出來，長度不能超過 R 的上限]');
 check('標題＝商品名', titleOf(P(1, '樂扣保溫杯', 363)) === '樂扣保溫杯');
@@ -60,14 +59,14 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
   const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
-  const r = planRotation(gs, [C(194431, 2)], ps);
+  const r = planRotation(gs, ps);
   check('全部同商品同價 → 全 keep、零改動', r.keep.length === 2 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
   check('在跑檔數＝2、每檔 3000', r.activeCount === 2 && r.budgetPerGroup === 3000);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
   const gs = [G(101, '1', P(1, 'A', 99)), G(102, '2', ps[1])];
-  const r = planRotation(gs, [C(194431, 2)], ps);
+  const r = planRotation(gs, ps);
   check('只有降價那檔進 retext，另一檔仍 keep', r.retext.length === 1 && r.retext[0].group.groupId === 101 && r.keep.length === 1);
   check('retext 只改文案、不會變成新建', r.create.length === 0);
 }
@@ -75,69 +74,38 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   // 這就是使用者要的核心：暫停過的商品回到 reco → 重啟它自己那個 group，素材落地頁原封不動＝免重審
   const ps = [P(7, 'OLD', 30)];
   const gs = [G(107, '7', ps[0], false)];
-  const r = planRotation(gs, [C(194431, 1)], ps);
+  const r = planRotation(gs, ps);
   check('舊商品回清單 → reactivate（不是 create、也不是覆蓋別人）', r.reactivate.length === 1 && r.create.length === 0);
   check('文案沒變的重啟不需要改文案＝不重審', r.reactivate[0].retext === false);
   check('重啟的是它自己原本那個 group', r.reactivate[0].group.groupId === 107);
 }
 {
   const ps = [P(7, 'OLD', 55)]; // 回來時價格變了
-  const r = planRotation([G(107, '7', P(7, 'OLD', 30), false)], [C(194431, 1)], ps);
+  const r = planRotation([G(107, '7', P(7, 'OLD', 30), false)], ps);
   check('重啟且價格有變 → 一併改文案', r.reactivate.length === 1 && r.reactivate[0].retext === true);
 }
 {
   const ps = [P(1, 'A', 10), P(9, 'NEW', 50)];
   const gs = [G(101, '1', ps[0]), G(102, '2', P(2, 'B', 20)), G(103, '3', P(3, 'C', 30))];
-  const r = planRotation(gs, [C(194431, 3)], ps);
-  check('全新商品 → 建新 group（絕不覆蓋既有 group）', r.create.length === 1 && String(r.create[0].product.productId) === '9');
+  const r = planRotation(gs, ps);
+  check('全新商品 → 建新 group（絕不覆蓋既有 group）', r.create.length === 1 && String(r.create[0].productId) === '9');
   check('不在清單又還開著的 → 暫停', r.pause.length === 2 && r.pause.map((g) => g.groupId).sort().join() === '102,103');
   check('在跑檔數＝2（reco 那批）', r.activeCount === 2);
 }
 {
   const gs = [G(101, '1', P(1, 'A', 10), false), G(102, '2', P(2, 'B', 20))];
-  const r = planRotation(gs, [C(194431, 2)], []);
+  const r = planRotation(gs, []);
   check('reco 回空 → 只暫停還開著的、不重複暫停已停的', r.pause.length === 1 && r.pause[0].groupId === 102);
   check('reco 回空 → 不建新', r.create.length === 0 && r.activeCount === 0);
 }
 
-console.log('\n[campaign 容量：一個 campaign 最多 ' + MAX_GROUPS_PER_CAMPAIGN + ' 個 group，滿了就開新的]');
+console.log('\n[一支 campaign 不限 ad group 數（R 端 PM 確認無限制，2026-08-27）]');
 {
-  check('上限常數是 300', MAX_GROUPS_PER_CAMPAIGN === 300);
-  const ps = [P(1, 'A', 10), P(2, 'B', 20)];
-  const r = planRotation([], [C(194431, 299)], ps);
-  check('第一檔塞進還有空位的 campaign', r.create[0].cpgId === 194431);
-  check('塞爆之後的排進新 campaign（cpgId=null）', r.create[1].cpgId === null, r.create.map((c) => c.cpgId));
-  check('要開 1 個新 campaign', r.newCampaigns === 1);
-}
-{
-  const ps = Array.from({ length: 5 }, (_, i) => P(100 + i, 'P' + i, 10));
-  const r = planRotation([], [C(1, 300), C(2, 298)], ps);
-  check('滿的 campaign 跳過、找有空位的', r.create.filter((c) => c.cpgId === 2).length === 2);
-  check('剩下的排新 campaign', r.create.filter((c) => c.cpgId === null).length === 3);
-  check('3 個排不下但一個新 campaign 裝得完', r.newCampaigns === 1);
-}
-{
-  const ps = Array.from({ length: 700 }, (_, i) => P(1000 + i, 'P' + i, 10));
-  const r = planRotation([], [C(1, 300)], ps);
-  check('700 檔全新 → 要開 3 個新 campaign（700/300 進位）', r.newCampaigns === 3, r.newCampaigns);
-}
-
-console.log('\n[campaign 日預算：依在跑檔數比例分攤，總和不超過 ' + DAILY_BUDGET + ']');
-{
-  const a = allocateCampaignBudgets([{ cpgId: 1, activeCount: 15 }, { cpgId: 2, activeCount: 5 }]);
-  check('15:5 → 2250 / 750', a.map((x) => x.dayBudget).join() === '2250,750', a);
-  check('總和剛好 3000', a.reduce((s2, x) => s2 + x.dayBudget, 0) === DAILY_BUDGET);
-  const b = allocateCampaignBudgets([{ cpgId: 1, activeCount: 1 }, { cpgId: 2, activeCount: 1 }, { cpgId: 3, activeCount: 1 }]);
-  check('除不盡也不會超過總預算（最大餘數法）', b.reduce((s2, x) => s2 + x.dayBudget, 0) === DAILY_BUDGET, b);
-  check('沒有在跑 group 的 campaign 不分預算（也不去動它）', allocateCampaignBudgets([{ cpgId: 1, activeCount: 0 }, { cpgId: 2, activeCount: 4 }]).length === 1);
-  check('全部都沒在跑 → 不下任何指令', allocateCampaignBudgets([{ cpgId: 1, activeCount: 0 }]).length === 0);
-}
-
-console.log('\n[campaign 命名：第一支沿用原名，之後加序號]');
-{
-  check('第 1 支＝原名', campaignNameOf(1) === '[Coupang] reco 自動投放');
-  check('第 2 支加 #2', campaignNameOf(2) === '[Coupang] reco 自動投放 #2');
-  check('名稱不重複（R 撞名回 409）', campaignNameOf(2) !== campaignNameOf(3));
+  const ps = Array.from({ length: 400 }, (_, i) => P(1000 + i, 'P' + i, 10));
+  const r = planRotation([], ps);
+  check('400 檔全新商品照建，不會被容量擋下', r.create.length === 400);
+  check('不再有「要開新 campaign」這件事', !('newCampaigns' in r), Object.keys(r));
+  check('在跑檔數＝400、每檔預算按 3000 分攤後吃下限 50', r.activeCount === 400 && r.budgetPerGroup === 50);
 }
 
 console.log('\n[CTR 與排序]');
@@ -243,10 +211,9 @@ console.log('\n[R 管理 token 被踢掉的辨識：一帳只能有一個有效 
 
 console.log('\n[同步摘要]');
 {
-  const base: any = { campaignId: 1, campaignIds: [1], recoCount: 20, unchanged: 20, textUpdated: 0, reactivated: 0, created: 0, newCampaigns: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
+  const base: any = { campaignId: 1, recoCount: 20, unchanged: 20, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
   check('什麼都沒動時不出現雜訊欄位', summarize(base) === '不動 20、在跑 20 檔／每檔 300 元、1.2s', summarize(base));
   check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
-  check('要開新 campaign 會列出（300 個 group 的安全閥）', summarize({ ...base, created: 5, newCampaigns: 1 }).includes('新 campaign 1'));
   check('有暫停會列出', summarize({ ...base, paused: 45 }).includes('暫停 45'));
 }
 
