@@ -5,6 +5,7 @@ import {
   listCoupangDailyStats, listCoupangSlots, listCoupangProducts,
 } from '../../core/store.js';
 import { PENDING_REVIEW } from './sync.js';
+import { DAILY_BUDGET } from './plan.js';
 
 export interface DailyRow {
   date: string;
@@ -41,7 +42,7 @@ export interface StatsResult {
   running: number;
   pendingReview: number;
   paused: number;
-  totals: { spend: number; imp: number; click: number; ctr: number | null; commission: number; gmv: number; orders: number; roi: number | null; dayBudget: number };
+  totals: { spend: number; imp: number; click: number; ctr: number | null; commission: number; gmv: number; orders: number; roi: number | null; campaignBudget: number };
   daily: DailyRow[];
   products: ProductRow[];
   warnings: string[];
@@ -164,7 +165,9 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
       commission, gmv: sum((d) => d.gmv), orders: sum((d) => d.orders),
       roi: spend > 0 ? commission / spend : null,
-      dayBudget: slots.filter((s) => s.active).reduce((s2, s) => s2 + (s.dayBudget ?? 0), 0),
+      // Campaign 的日預算（不是各 group 加總）：sync 每次都把它校正回 DAILY_BUDGET，
+      // 所以這個常數就是 R 上那支 campaign 當下的日預算，也是整體花費的硬上限。
+      campaignBudget: DAILY_BUDGET,
     },
     daily,
     products,

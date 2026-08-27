@@ -222,9 +222,7 @@ function render(){
   $('#kpis').innerHTML=[
     ['投放中商品','hero',data.running+' 檔',(data.pendingReview?('待審 '+data.pendingReview+' · '):'')+'暫停 '+data.paused],
     ['CTR','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
-    ['聯盟淨佣金','',money(t.commission),'已扣退貨取消'],
-    ['廣告花費','',money(t.spend),'日預算合計 '+money(t.dayBudget)],
-    ['訂單 / GMV','',nf(t.orders)+' 筆',money(t.gmv)],
+    ['廣告花費','',money(t.spend),'Campaign 日預算 '+money(t.campaignBudget)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
   setSelectedRange(data.range.sd,data.range.ed);
@@ -273,7 +271,7 @@ function esc(s){const d=document.createElement('div');d.textContent=s==null?'':S
 function drawCharts(){
   const svg=$('#svg'), host=$('#plot'), tip=$('#tip');
   const d=data.daily;
-  const W=host.clientWidth||720, H=250, L=58, R=58, T=14, B=28;
+  const W=host.clientWidth||720, H=260, L=86, R=58, T=20, B=28;
   svg.setAttribute('viewBox','0 0 '+W+' '+H);
   svg.style.height=H+'px';
   const iw=W-L-R, ih=H-T-B;
@@ -290,7 +288,7 @@ function drawCharts(){
   for(let i=0;i<=4;i++){
     const spendValue=spendNice*i/4, ctrValue=ctrNice*i/4, y=T+ih-ih*i/4;
     g+='<line x1="'+L+'" y1="'+y.toFixed(1)+'" x2="'+(W-R)+'" y2="'+y.toFixed(1)+'" stroke="var(--line2)" stroke-width="1"/>'+
-       '<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="'+C_SPEND+'">'+moneyAxis(spendValue,spendStep)+'</text>'+
+       '<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="'+C_SPEND+'">TWD $'+moneyAxis(spendValue,spendStep)+'</text>'+
        '<text x="'+(W-R+8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="start" font-size="10.5" fill="'+C_CTR+'">'+(ctrValue*100).toFixed(ctrStep*100<1?2:1)+'%</text>';
   }
   // X 軸：每天都畫刻度；文字擠不下就退成「只有日」，再擠不下才隔天標（不硬塞成一團黑）
@@ -307,6 +305,21 @@ function drawCharts(){
     const label=(mode==='md'||dd==='01'||i===0)?(mm+'-'+dd):dd;
     g+='<text x="'+x.toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10.5" fill="var(--mut)">'+label+'</text>';
   });
+
+  // 每個點都標上數值（花費在點上方、CTR 在點下方，兩條線的標籤才不會互相蓋）。
+  // 天數多的時候字級自動縮小，並用底色描邊（paint-order）當外框，密集時仍讀得出來。
+  let lab='';
+  const labFont=per>=34?10:(per>=22?9:8);
+  const yOfKey=(key)=>key==='spend'?spendY:ctrY;
+  const labelPoints=(key,color,fmt,dy)=>{
+    d.forEach((row,i)=>{
+      const v=row.hasData?row[key]:null;
+      if(v==null) return;
+      const y=Math.max(T+9,Math.min(T+ih+11,yOfKey(key)(v)+dy));
+      lab+='<text x="'+X(i).toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="middle" font-size="'+labFont+'"'+
+           ' fill="'+color+'" stroke="var(--slot)" stroke-width="2.6" paint-order="stroke" stroke-linejoin="round">'+fmt(v)+'</text>';
+    });
+  };
 
   // 兩種斷點都要保留，不能畫成 0：
   //  ① 那天根本沒資料（hasData=false，工具還沒開始投）→ 兩條線一起斷，起點才會一致
@@ -333,6 +346,10 @@ function drawCharts(){
   };
   line('spend',C_SPEND,spendY);
   line('ctr',C_CTR,ctrY);
+  // 標籤最後才疊上去，才不會被後畫的折線蓋掉
+  labelPoints('spend',C_SPEND,(v)=>nf(v,v<100?1:0),-10);
+  labelPoints('ctr',C_CTR,(v)=>(v*100).toFixed(2)+'%',16);
+  g+=lab;
   if(!d.length||(spendMax<=0&&!ctrVals.length)) g+='<text x="'+(L+iw/2)+'" y="'+(T+ih/2)+'" text-anchor="middle" font-size="12.5" fill="var(--mut)">這段期間尚無花費與 CTR 數據</text>';
   g+='<line class="cross" x1="0" y1="'+T+'" x2="0" y2="'+(T+ih)+'" stroke="var(--ink)" stroke-width="1" opacity="0"/>';
   svg.innerHTML=g;
