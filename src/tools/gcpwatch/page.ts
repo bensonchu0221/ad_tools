@@ -185,12 +185,50 @@ const STYLE = `
   .note-cost b{color:var(--ink)}
 
   /* 手刻 HUD 原型：幾何留在 SVG，底色、縮放與發光由 CSS 負責。 */
-  .hud-prototype{display:flex;justify-content:center;margin:36px 0 8px;color:#01D7EB}
-  .hud-prototype svg{display:block;width:min(480px,100%);height:auto;overflow:visible;
+  .hud-prototype{position:relative;width:min(480px,100%);aspect-ratio:480/177;margin:36px auto 8px;color:#01D7EB}
+  .hud-prototype-frame{position:absolute;inset:0;display:block;width:100%;height:100%;overflow:visible;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .hud-prototype .hud-solid{fill:currentColor}
   .hud-prototype .hud-lines{fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:miter}
   .hud-prototype .hud-lines path{vector-effect:non-scaling-stroke}
+  /* 跑道燈：原貌是空心線框，依序填滿發光後復原。8 秒週期＝約 3 秒追光＋約 5 秒靜止。 */
+  .hud-runway path{fill:transparent;stroke:currentColor;vector-effect:non-scaling-stroke;
+    animation:runwayLight 8s ease-in-out infinite;animation-delay:calc(var(--i) * .3s)}
+  @keyframes runwayLight{
+    0%,10%,100%{fill:transparent;filter:none}
+    4%{fill:currentColor;filter:drop-shadow(0 0 2px currentColor) drop-shadow(0 0 7px currentColor)}
+  }
+  .hud-prototype-data{position:absolute;inset:12% 7% 9% 5%;display:grid;
+    grid-template-columns:minmax(0,.84fr) minmax(0,1.16fr);grid-template-rows:auto 1fr auto;
+    column-gap:clamp(8px,3vw,18px);pointer-events:none}
+  .hud-prototype-head{grid-column:1/-1;display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+  .hud-prototype-title{min-width:0}
+  .hud-prototype-name{font-family:var(--disp);font-size:clamp(10px,3.2vw,15px);font-weight:700;
+    line-height:1.1;color:var(--ink);letter-spacing:.01em}
+  .hud-prototype-meta{font-family:var(--mono);font-size:clamp(6px,1.8vw,8.5px);color:var(--mut);
+    margin-top:3px;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hud-prototype-state{display:inline-flex;align-items:center;gap:5px;border:1px solid currentColor;
+    padding:2px 6px;font-family:var(--mono);font-size:clamp(6px,1.8vw,8.5px);letter-spacing:.08em;white-space:nowrap}
+  .hud-prototype-state .led{width:5px;height:5px}
+  .hud-prototype-reading{align-self:center;min-width:0}
+  .hud-prototype-value{font-family:var(--disp);font-size:clamp(25px,8vw,38px);font-weight:700;
+    line-height:.95;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+  .hud-prototype-caption{font-family:var(--mono);font-size:clamp(6.5px,1.9vw,9px);color:var(--mut);
+    margin-top:6px;white-space:nowrap}
+  .hud-prototype-chart{align-self:center;min-width:0;color:var(--mut)}
+  .hud-prototype-chart-head{display:flex;justify-content:space-between;gap:5px;margin-bottom:3px;
+    font-family:var(--mono);font-size:clamp(5.5px,1.5vw,7.5px);letter-spacing:.06em;color:var(--mut);white-space:nowrap}
+  .hud-prototype-chart svg{display:block;width:100%;height:clamp(28px,9vw,43px);overflow:visible}
+  .hud-prototype-chart .grid{stroke:var(--rail);stroke-width:1;vector-effect:non-scaling-stroke}
+  .hud-prototype-trace{fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round;
+    stroke-linejoin:round;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 3px currentColor)}
+  .hud-prototype-stats{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;
+    padding-top:6px;border-top:1px solid rgba(1,215,235,.22)}
+  .hud-prototype-stat{min-width:0}
+  .hud-prototype-stat span{display:block;font-family:var(--mono);font-size:clamp(5px,1.35vw,6.5px);
+    letter-spacing:.08em;color:var(--mut);white-space:nowrap}
+  .hud-prototype-stat b{display:block;margin-top:1px;font-family:var(--mono);font-size:clamp(7px,2vw,9.5px);
+    font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* 開機序列：只有首次繪製時逐格亮起，60 秒自動更新不重播（每分鐘閃一次很煩） */
   @keyframes rise{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
@@ -199,6 +237,7 @@ const STYLE = `
     .boot{animation:none}
     .led.lv-warn,.led.lv-crit{animation:none}
     .plot .scan{animation:none;opacity:0}
+    .hud-runway path{animation:none;fill:transparent}
   }
   @media(max-width:600px){
     .console .sys{border-right:0;padding-right:0;width:100%}
@@ -468,6 +507,42 @@ const RENDER_JS = `
     tx.textContent=msg;
   }
 
+  // 下方 HUD 原型只吃既有 CardVM，不自行判讀數值；60 秒刷新時跟正式卡片一起更新。
+  function renderPrototype(vm){
+    var cards=vm.redis||[], card=null;
+    for(var i=0;i<cards.length;i++){
+      var key=((cards[i].id||'')+' '+(cards[i].name||'')).toLowerCase();
+      if(key.indexOf('newsscope')>=0){ card=cards[i]; break; }
+    }
+    if(!card&&cards.length) card=cards[0];
+    var data=document.getElementById('hud-prototype-data');
+    data.style.display=card?'grid':'none';
+    if(!card) return;
+    var put=function(id,value){document.getElementById(id).textContent=value||'—';};
+    var stat=function(label){
+      for(var j=0;j<(card.stats||[]).length;j++){
+        if(card.stats[j].label===label) return card.stats[j].value;
+      }
+      return '—';
+    };
+    put('hud-prototype-name',card.name);
+    put('hud-prototype-meta',card.meta);
+    put('hud-prototype-state-text',card.levelLabel);
+    put('hud-prototype-value',card.value);
+    put('hud-prototype-caption',card.caption);
+    put('hud-prototype-trend',card.trend||'24h —');
+    put('hud-prototype-system',stat('系統記憶體'));
+    put('hud-prototype-ttl',stat('無 TTL 佔比'));
+    put('hud-prototype-evicted',stat('24h 逐出 key'));
+    var state=document.getElementById('hud-prototype-state');
+    state.className='hud-prototype-state '+lvClass(card.level);
+    state.querySelector('i').className='led '+lvClass(card.level);
+    document.getElementById('hud-prototype-value').className='hud-prototype-value '+lvClass(card.level);
+    var trace=document.getElementById('hud-prototype-trace');
+    trace.setAttribute('d',card.path||'');
+    trace.setAttribute('class','hud-prototype-trace '+lvClass(card.level));
+  }
+
   function render(vm){
     var k=document.getElementById('kpis'); k.innerHTML='';
     vm.kpis.forEach(function(x){
@@ -486,6 +561,7 @@ const RENDER_JS = `
     document.getElementById('c-sql').textContent=vm.sql.length;
     document.getElementById('stamp').textContent=vm.generatedAt;
     sysLamp(vm.redis.concat(vm.sql));
+    renderPrototype(vm);
     var err=document.getElementById('err');
     if(vm.errors&&vm.errors.length){ err.textContent='部分資料抓取失敗：'+vm.errors.join('；');
       err.classList.remove('hidden'); } else { err.classList.add('hidden'); }
@@ -560,7 +636,7 @@ export function renderGcpWatch(vm: DashboardVM): string {
       只淘汰有 TTL 的 key；沒設 TTL 的 key 塞滿記憶體時 Redis 無 key 可逐出 → 寫入被拒（OOM），
       而此時「逐出 key」仍是 0，所以本頁同時看使用率與無 TTL 佔比。</p>
     <div class="hud-prototype" aria-hidden="true">
-      <svg width="480" height="177" viewBox="0 0 480 177" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <svg class="hud-prototype-frame" width="480" height="177" viewBox="0 0 480 177" fill="none" xmlns="http://www.w3.org/2000/svg">
         <g class="hud-solid">
           <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
           <path d="M80.887 7.5L86 10.4697H139H222.5H239.5L236.5 7.5H210.5L206.5 3.5H158.5L154.5 7.5H80.887Z"/>
@@ -580,7 +656,46 @@ export function renderGcpWatch(vm: DashboardVM): string {
           <path d="M72.4414 173.657L76.5 176H395L410 161H465L479 147V126L469.5 116.5M479 126L476.5 123.5V145.5L469.5 152.5V156.5L479 147M0.5 142L17.5 160.5H49.6532L53.1173 162.5M3 121.557V141.5L9 147.5L9 151.25L0.5 142V124.057L3 121.557ZM7.5 117.057L3 121.557M3 121.5V121.557M53 162.5H53.1173M72.5 173.758L72.4414 173.657M53.1173 162.5L72.4414 173.657M53.1173 162.5H58L70 169.428L72.4414 173.657M397 174V171L405.5 162.5H408.5L397 174Z"/>
           <path d="M1 11V14L8.5 6.5H5.5L1 11M1 11V67L10.5 76.5V123"/>
         </g>
+        <g class="hud-runway">
+          <path style="--i:0" d="M479.5 56L469.5 46V39.5L479.5 49.5V56Z"/>
+          <path style="--i:1" d="M479.5 65.5L469.5 55.5V49L479.5 59V65.5Z"/>
+          <path style="--i:2" d="M479.5 75L469.5 65V58.5L479.5 68.5V75Z"/>
+          <path style="--i:3" d="M479.5 84.5L469.5 74.5V68L479.5 78V84.5Z"/>
+          <path style="--i:4" d="M479.5 94L469.5 84V77.5L479.5 87.5V94Z"/>
+          <path style="--i:5" d="M479.5 103.5L469.5 93.5V87L479.5 97V103.5Z"/>
+          <path style="--i:6" d="M479.5 113L469.5 103V96.5L479.5 106.5V113Z"/>
+          <path style="--i:7" d="M479.5 122.5L469.5 112.5V106L479.5 116V122.5Z"/>
+        </g>
       </svg>
+      <div class="hud-prototype-data" id="hud-prototype-data">
+        <div class="hud-prototype-head">
+          <div class="hud-prototype-title">
+            <div class="hud-prototype-name" id="hud-prototype-name">—</div>
+            <div class="hud-prototype-meta" id="hud-prototype-meta">—</div>
+          </div>
+          <span class="hud-prototype-state lv-none" id="hud-prototype-state">
+            <i class="led lv-none"></i><span id="hud-prototype-state-text">—</span>
+          </span>
+        </div>
+        <div class="hud-prototype-reading">
+          <div class="hud-prototype-value lv-none" id="hud-prototype-value">—</div>
+          <div class="hud-prototype-caption" id="hud-prototype-caption">—</div>
+        </div>
+        <div class="hud-prototype-chart">
+          <div class="hud-prototype-chart-head"><span>MEMORY · 24H</span><span id="hud-prototype-trend">—</span></div>
+          <svg viewBox="0 0 ${SPARK_W} ${SPARK_H}" preserveAspectRatio="none">
+            <line class="grid" x1="0" x2="${SPARK_W}" y1="12" y2="12"/>
+            <line class="grid" x1="0" x2="${SPARK_W}" y1="24" y2="24"/>
+            <line class="grid" x1="0" x2="${SPARK_W}" y1="36" y2="36"/>
+            <path class="hud-prototype-trace lv-none" id="hud-prototype-trace"/>
+          </svg>
+        </div>
+        <div class="hud-prototype-stats">
+          <div class="hud-prototype-stat"><span>SYSTEM MEMORY</span><b id="hud-prototype-system">—</b></div>
+          <div class="hud-prototype-stat"><span>NO TTL</span><b id="hud-prototype-ttl">—</b></div>
+          <div class="hud-prototype-stat"><span>EVICTED · 24H</span><b id="hud-prototype-evicted">—</b></div>
+        </div>
+      </div>
     </div>
     <footer>popin ad-ops · ${vm.project} · asia-east1</footer>
     <div class="tip hidden" id="tip"></div>`;
