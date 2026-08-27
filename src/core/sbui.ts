@@ -9,6 +9,7 @@ const NAV: { key: string; label: string; href: string }[] = [
   { key: 'adpreview', label: '廣告預覽', href: '/tools/adpreview' },
   { key: 'weeklyreport', label: '整合週報', href: '/tools/weeklyreport' },
   { key: 'adstream', label: 'Report Hub', href: '/tools/adstream' },
+  { key: 'gcpwatch', label: '資源看板', href: '/tools/gcpwatch' },
   { key: 'mgidsource', label: 'MGID 媒體', href: '/tools/mgidsource' },
   { key: 'coupangads', label: '酷澎聯盟', href: '/tools/coupangads' },
 ];

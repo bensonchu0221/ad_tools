@@ -580,6 +580,7 @@ export function renderGcpWatch(vm: DashboardVM): string {
 
   return sbPage({
     title: '資源看板 · GCP Watch',
+    active: 'gcpwatch',
     body,
     style: STYLE,
     script: `window.__VM__=${bootstrap};\n${RENDER_JS}`,
