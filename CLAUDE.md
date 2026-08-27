@@ -123,6 +123,7 @@ popin 內部工具集（取代舊 dctool）。
 - **排程**：`coupangads-sync` 每天 09:50 台北 POST `/tools/coupangads/cron`；`coupangads-collect` 每 10 分鐘 POST `/tools/coupangads/collect/cron`。（初版每 30 分鐘那支已停用）
 - **⚠️ 未解：Coupang 端收不到我們的點擊**。8/25 R 花 392.67 元、393 次點擊，Coupang clicks 報表**我們的 subId 一列都沒有**（同日他自己其他來源的 58 次有記錄）。落地頁本身正常（手機 UA curl 追蹤：onelink → `link.tw.coupang.com/re2/...subid=r10222_xxx`，HTTP 200）。可能是 R 流量品質、報表延遲或追蹤未被收下，**尚未結案**
 - **reco 清單變動實測**：45 秒連打 3 次完全相同；由 67 個 group 的建立時間回推＝**每天早上 07:30 整批換 20 檔＋平時每小時換 1 檔**（不是分鐘級）。故排程定在 09:50（早上那波之後、使用者 10:00 上班審核之前）
+- **⚠️⚠️ R 管理 API：一個帳號同時只能有一個有效 token（2026-08-27 實測踩到）**：`POST /auth/tokens` 換發 B 之後，先前的 A **立刻**回 `401 Invalid Token`（實測 A→200、換發 B→B 200 且 A 401）。所以兩個行程共用同一個 R 帳號時（每天 09:50 的 sync 撞上每 10 分鐘的 collect＝`refreshSlotStatus` 也打管理 API），**後換發的會把前一個踢掉**，前者跑到一半整片 Invalid Token（實測：一次 sync 19.5s 內失敗 7 筆——2 個新建、5 個暫停）。對策不是去喬排程時間，而是 `rixbee_admin.req()` 認得這個錯就**丟快取重換一次再打**（`isInvalidToken` 純函式＋最多重試 2 次、300ms 遞增），雙方都能自己收斂；重跑一次 sync 即 failed 0（設計本來就冪等，會依現況重算）。注意 429 限流不算 token 問題（重換沒用，要退避）。
 - 金鑰：`COUPANG_ACCESS_KEY`／`COUPANG_SECRET_KEY` 在 Secret Manager；R 管理 token 走 `nexus.r_account_tokens`（email `benson@popin.cc`），**換發的 token 只活 1 小時**
 - 驗證：`poc/verify_coupangads.mts`（42 項純函式，已做 3 個變異測試）／手動跑 `poc/coupang_sync_run.mts [--dry]`／遷移 `poc/migrate_coupang_slots.mts`
 

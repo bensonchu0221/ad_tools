@@ -27,6 +27,16 @@ export interface RAdminSession { email: string; token: string; expireAt: number 
 // 換發回的 token 實測 expireIn 只有 1 小時 → 快取 50 分鐘就重換，別跨排程重用。
 const sessions = new Map<string, RAdminSession>();
 
+/**
+ * ⚠️⚠️ **一個帳號同時只能有一個有效 token**（2026-08-27 實測：換發 B 之後，先前的 A 立刻回
+ * `401 Invalid Token`）。所以兩個行程同時用同一個 R 帳號（例如每天 09:50 的 sync 撞上每 10 分鐘
+ * 的 collect），**後換發的那個會把前一個踢掉**，前者跑到一半就整片 Invalid Token。
+ * 對策＝認得這個錯就丟掉快取重換一次再打（雙方都能自己收斂），不是去避開排程時間。
+ */
+export function isInvalidToken(status: number, message?: string): boolean {
+  return status === 401 || /invalid\s*token/i.test(String(message ?? ''));
+}
+
 /** 換發管理 token。account_name 必須是登入 email（填數字回 Invalid email）；憑證錯一律籠統 404。 */
 export async function getAdminToken(email: string, rawToken?: string): Promise<string> {
   const cached = sessions.get(email);
@@ -48,17 +58,27 @@ export async function getAdminToken(email: string, rawToken?: string): Promise<s
   return j.data.token;
 }
 
+const TOKEN_RETRIES = 2;
+
 async function req(email: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<any> {
   return schedule(async () => {
-    const token = await getAdminToken(email);
-    const res = await fetch(`${BASE}${path}`, {
-      method,
-      headers: { 'x-authorization': token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const j: any = await res.json().catch(() => ({}));
-    if (res.status === 429) throw new Error(`R 管理 API 限流（5 req/s）：${path}`);
-    return j;
+    for (let attempt = 0; ; attempt++) {
+      const token = await getAdminToken(email);
+      const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: { 'x-authorization': token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const j: any = await res.json().catch(() => ({}));
+      if (res.status === 429) throw new Error(`R 管理 API 限流（5 req/s）：${path}`);
+      // 被別的行程換發 token 踢掉了 → 丟掉快取重換一次再打（見 isInvalidToken）
+      if (isInvalidToken(res.status, j?.message) && attempt < TOKEN_RETRIES) {
+        sessions.delete(email);
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        continue;
+      }
+      return j;
+    }
   });
 }
 

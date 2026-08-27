@@ -10,6 +10,7 @@ import {
   type SlotMapping,
 } from '../src/tools/coupangads/collect.js';
 import { summarize } from '../src/tools/coupangads/route.js';
+import { isInvalidToken } from '../src/core/rixbee_admin.js';
 
 let pass = 0, fail = 0;
 const check = (name: string, ok: boolean, got?: unknown) => {
@@ -228,6 +229,16 @@ console.log('\n[一個 (日期×group) 只能有一個商品持有 R 數字]');
   check('視窗內綁定的才掃（兩個 group × 三天）', planStatOwnership(['2026-08-25', '2026-08-26', '2026-08-27'], slots).length === 6);
   check('視窗外的 group 完全不進掃描清單',
     planStatOwnership(['2026-08-25', '2026-08-26', '2026-08-27'], [...slots, ...old2]).length === 6);
+}
+
+console.log('\n[R 管理 token 被踢掉的辨識：一帳只能有一個有效 token，後換發的會把先前的作廢]');
+{
+  check('401 就是被踢掉', isInvalidToken(401, 'Invalid Token'));
+  check('訊息帶 Invalid Token 也算（有時 HTTP 是 200）', isInvalidToken(200, 'Invalid Token'));
+  check('大小寫不同也認得', isInvalidToken(200, 'invalid token'));
+  check('限流不是 token 問題（重換沒用，要退避）', !isInvalidToken(429, 'Qps Limit, 5 per seconds, try again later.'));
+  check('欄位驗證錯不是 token 問題', !isInvalidToken(400, 'Validation Failed'));
+  check('正常回應不是', !isInvalidToken(200, 'Success'));
 }
 
 console.log('\n[同步摘要]');
