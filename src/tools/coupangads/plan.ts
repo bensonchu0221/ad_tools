@@ -9,6 +9,11 @@ import type { CoupangProduct } from '../../core/coupang.js';
 export const DAILY_BUDGET = 3000;      // campaign 日預算（台幣）
 export const BUDGET_MULTIPLIER = 2;    // 每檔預算＝總預算÷在跑檔數×2（超出的部分由 campaign 日預算擋）
 export const CPC = 1;
+// ⚠️ 每檔預算下限（2026-08-27 加）：初版是「500 ÷ 在跑檔數」且每次同步都重算，檔數長到 67 時
+// 每檔只剩 7 元 → CPC 1 元一天最多 7 次點擊，R 又把這 7 元 pacing 攤到 24 小時（每小時 0.3 元）
+// ⇒ 幾乎標不到量。實證 8/26 全帳戶 54 組只花 107.94 元、曝光比 8/25 掉 5 倍（每小時口徑）。
+// 預算再怎麼分攤都不該低到「不可能出量」，寧可少開幾檔也不要每檔都跑不動。
+export const MIN_GROUP_BUDGET = 50;
 
 export interface SlotView {
   groupId: number;
@@ -40,9 +45,9 @@ export function descOf(p: CoupangProduct): string {
   return `${p.categoryName ?? ''} / NT$${p.productPrice}${p.isRocket ? ' / 火箭配送' : ''}`.slice(0, 60);
 }
 
-/** 每檔日預算：總預算 ÷ 在跑檔數 × 倍數，至少 1 元。 */
+/** 每檔日預算：總預算 ÷ 在跑檔數 × 倍數，不低於 MIN_GROUP_BUDGET（低到那個程度等於不投）。 */
 export function budgetPerGroup(total: number, count: number, multiplier = BUDGET_MULTIPLIER): number {
-  return Math.max(1, Math.floor((total / Math.max(1, count)) * multiplier));
+  return Math.max(MIN_GROUP_BUDGET, Math.floor((total / Math.max(1, count)) * multiplier));
 }
 
 /** slot 上的內容跟這個商品現在的文案一不一樣。 */

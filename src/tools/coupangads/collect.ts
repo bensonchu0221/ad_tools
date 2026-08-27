@@ -2,6 +2,11 @@
 // 看板改讀這張表＝秒開，也不受 API 保留期與延遲影響。
 // 兩邊粒度不同：R 是 group×日、Coupang 是 subId(=商品)×日 → 用 slots 表的 group↔商品對映接起來。
 // 換素材當天該 group 全天的量會算給「當下掛的商品」（R 報表拆不出時段），這是刻意的取捨。
+//
+// ⚠️ 2026-08-27 修重複計數：slots 只存「當下」的對映，但每次回補都重抓最近 4 天。
+// 原本無條件把 group 的歷史數字寫到當下掛的商品名下，而舊商品那幾列不會被刪 →
+// 換過商品的 group，同一天的量會同時掛在新舊兩個商品上被算兩次（實證 8/25 R 只有 30 個 group
+// 卻存了 49 列、看板曝光灌水 69%）。修法＝**換商品之前的日子就不寫**（那些列在舊商品名下已經是對的）。
 import { fetchCommission, fetchOrders, fetchCancels } from '../../core/coupang.js';
 import { fetchReport } from '../../core/rixbee.js';
 import { listCoupangSlots, upsertCoupangDailyStats, type CoupangDailyStatRow } from '../../core/store.js';
@@ -27,6 +32,53 @@ export function normDate(v: string | number): string {
   return s.length === 8 ? s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6, 8) : String(v ?? '');
 }
 
+/** DB 時間欄是 UTC（NOW() 就是 UTC），R 報表的 day 是 UTC+8 口徑 → 比對前先換算成台北日期。 */
+export function twDateFromUtc(utc: string | null | undefined): string | null {
+  if (!utc) return null;
+  const t = Date.parse(String(utc).replace(' ', 'T') + 'Z');
+  return Number.isFinite(t) ? new Date(t + 8 * 3600000).toISOString().slice(0, 10) : null;
+}
+
+/** 這一天的 R 數字該不該算給「現在」掛在該 group 上的商品。
+ *  換商品當天算新的（沿用既有取捨），換之前的日子屬於舊商品、已經有列了，再寫一次就是重複計數。 */
+export function attributesToCurrentProduct(day: string, changedTwDate: string | null): boolean {
+  return !changedTwDate || day >= changedTwDate;
+}
+
+export interface SlotMapping {
+  groupId: number;
+  productId: string | null;
+  lastChangedAt: string | null; // UTC 'YYYY-MM-DD HH:mm:ss'
+}
+
+export interface AttributedRow {
+  dt: string; productId: string; groupId: number;
+  imp: number; click: number; spend: number;
+}
+
+/** R 報表列 → (日期 × 商品) 的曝光/點擊/花費。純函式：重複計數的防線在這裡，好驗。 */
+export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow[] {
+  const byGroup = new Map<number, { productId: string; changedTwDate: string | null }>();
+  for (const s of slots) {
+    if (s.productId) byGroup.set(s.groupId, { productId: s.productId, changedTwDate: twDateFromUtc(s.lastChangedAt) });
+  }
+  const out = new Map<string, AttributedRow>();
+  for (const r of rows) {
+    const gid = Number(r.group_id ?? 0);
+    const m = byGroup.get(gid);
+    if (!m) continue; // 不是本工具的 group
+    const dt = normDate(r.day);
+    if (!attributesToCurrentProduct(dt, m.changedTwDate)) continue; // 換商品之前的日子留給舊商品
+    const k = dt + '|' + m.productId;
+    if (!out.has(k)) out.set(k, { dt, productId: m.productId, groupId: gid, imp: 0, click: 0, spend: 0 });
+    const c = out.get(k)!;
+    c.imp += Number(r.impression ?? 0);
+    c.click += Number(r.click ?? 0);
+    c.spend += Number(r.payment_revenue ?? 0);
+  }
+  return [...out.values()];
+}
+
 export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; pendingReview: number }> {
   const now = new Date();
   const ed = twYmd(now);
@@ -38,8 +90,6 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
     listCoupangSlots(),
     refreshSlotStatus().catch(() => ({ updated: 0, pendingReview: 0 })),
   ]);
-  const pidByGroup = new Map<number, string>();
-  for (const s of slots) if (s.productId) pidByGroup.set(s.groupId, s.productId);
 
   const [rRows, commission, orders, cancels] = await Promise.all([
     fetchReport({ userType: R_USER_TYPE, userIds: [ACCOUNT_ID], startDate: sd, endDate: ed, dimensions: ['day', 'group_id'], metrics: [] } as any).catch(() => [] as any[]),
@@ -57,14 +107,9 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
     return c;
   };
 
-  for (const r of rRows as any[]) {
-    const gid = Number(r.group_id ?? 0);
-    const pid = pidByGroup.get(gid);
-    if (!pid) continue; // 不是本工具的 group
-    const c = cell(normDate(r.day), pid, gid);
-    c.imp += Number(r.impression ?? 0);
-    c.click += Number(r.click ?? 0);
-    c.spend += Number(r.payment_revenue ?? 0);
+  for (const a of attributeRRows(rRows as any[], slots)) {
+    const c = cell(a.dt, a.productId, a.groupId);
+    c.imp += a.imp; c.click += a.click; c.spend += a.spend;
   }
   for (const r of commission) {
     const pid = productIdFromSubId(r.subId, prefix);
