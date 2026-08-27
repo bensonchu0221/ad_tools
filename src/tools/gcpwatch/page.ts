@@ -184,6 +184,14 @@ const STYLE = `
     border-top:1px solid var(--rail);padding-top:16px}
   .note-cost b{color:var(--ink)}
 
+  /* 手刻 HUD 原型：幾何留在 SVG，底色、縮放與發光由 CSS 負責。 */
+  .hud-prototype{display:flex;justify-content:center;margin:36px 0 8px;color:#01D7EB}
+  .hud-prototype svg{display:block;width:min(514px,100%);height:auto;
+    filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
+  .hud-prototype .hud-solid{fill:currentColor}
+  .hud-prototype .hud-lines{fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:miter}
+  .hud-prototype .hud-lines path{vector-effect:non-scaling-stroke}
+
   /* 開機序列：只有首次繪製時逐格亮起，60 秒自動更新不重播（每分鐘閃一次很煩） */
   @keyframes rise{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
   .boot{animation:rise .5s cubic-bezier(.2,.75,.25,1) backwards;animation-delay:calc(var(--i,0) * 45ms)}
@@ -551,6 +559,22 @@ export function renderGcpWatch(vm: DashboardVM): string {
       Redis 淘汰政策未自訂時＝Memorystore 預設 <b>volatile-lru</b>（官方文件），
       只淘汰有 TTL 的 key；沒設 TTL 的 key 塞滿記憶體時 Redis 無 key 可逐出 → 寫入被拒（OOM），
       而此時「逐出 key」仍是 0，所以本頁同時看使用率與無 TTL 佔比。</p>
+    <div class="hud-prototype" aria-hidden="true">
+      <svg width="514" height="210" viewBox="0 0 514 210" xmlns="http://www.w3.org/2000/svg">
+        <rect width="514" height="210" fill="#000"/>
+        <g class="hud-solid">
+          <path d="M78.5 190.5H54.134L55 192H58L61 195H68.1491L70 193.149H76.5L86.5 198.923L91 197.717L78.5 190.5Z"/>
+          <path d="M441 190.5H487.5L486 192H484L482.5 193.5H466.5L465 192H442L433.5 200.5H431L441 190.5Z"/>
+        </g>
+        <g class="hud-lines">
+          <path d="M477 28L419.419 28L412 34H366"/>
+          <path d="M40 31H104L116 37.9697H396M111 35H184.5L188.5 31H236.5L240.5 35H266.5L269.5 38M252.5 38L249 41.5H230.5L229 40H171L169 38"/>
+          <path d="M459 31H482L495.5 44.5V144M477 31L495.5 49.5"/>
+          <path d="M499.5 144L509 153.5V174.5L495 188.5H440L425 203.5H106.5L79.6532 188H47.5L30.5 169.5V151.557L37.5 144.557M33 149V169L39 175V178.5M83 190H88L100 196.928L102.5 201.258M506.5 151V173L499.5 180V184M427 201.5V198.5L435.5 190H438.5"/>
+          <path d="M48.5 34H35.5L31 38.5V94.5L40.5 104V150.5M38.5 34L31 41.5"/>
+        </g>
+      </svg>
+    </div>
     <footer>popin ad-ops · ${vm.project} · asia-east1</footer>
     <div class="tip hidden" id="tip"></div>`;
 
