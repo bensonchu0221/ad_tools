@@ -1,10 +1,12 @@
-// 酷澎聯盟投放（tool#6）路由：看板頁、統計 API、手動同步、兩支排程。
-// /cron（每天 09:50 輪替）與 /collect/cron（每小時 :30 收成效）都在 auth.ts 白名單的 endsWith('/cron') 內。
+// 酷澎聯盟投放（tool#6）路由：看板頁、統計 API、手動同步、三支排程。
+// /cron（每天 09:50 輪替）、/collect/cron（每小時 :30 收成效）、/bq/cron（每天 12:30 全量寫 BQ）
+// 都在 auth.ts 白名單的 endsWith('/cron') 內。
 import type { FastifyInstance } from 'fastify';
 import { coupangAdsPage } from './page.js';
 import { buildStats, rangeOf } from './stats.js';
 import { syncCoupangAds, type SyncResult } from './sync.js';
 import { collectStats } from './collect.js';
+import { exportToBigQuery } from './bq.js';
 import {
   listCoupangDailyStats, listCoupangSyncRuns, type CoupangDailyStatRow,
 } from '../../core/store.js';
@@ -165,6 +167,27 @@ export function registerCoupangAds(app: FastifyInstance): void {
     } catch (e: any) {
       const error = String(e?.message ?? e);
       app.log.error({ marker: 'coupangads_collect', error }, 'coupangads collect failed');
+      reply.code(500).send({ ok: false, error });
+    }
+  });
+
+  // BigQuery 匯出：把 popIn_network 那條 domain 全量重寫進共用表。
+  // ⚠️ 必須排在主管的排程 query 之後（他台北 12:00 跑、WRITE_TRUNCATE 清整張表），排在他前面寫了就白寫。
+  // **每天 12:30 台北跑一次**：我們只寫到 T-1，一天內重跑就是寫同一份；R 對 T-1 的修正當天就定案
+  // （synced_at 實證）。時間點是這樣定的：他 9 次 run 延遲中位 3 秒、耗時 74 秒（通常 12:01:15 結束），
+  // 但 8/27 那次延遲 603 秒（12:10:03 起跑、12:11:17 結束）⇒ 12:30 留 ~19 分鐘餘裕避開該最壞情況。
+  // 端點本身冪等（先刪我們的 domain 再全量寫），所以隨時手動重打都安全。
+  // ?dry=1 只算不寫，方便線上先看數字。
+  app.post(BASE_PATH + '/bq/cron', async (req, reply) => {
+    const q = req.query as any;
+    if (!process.env.DIAG_KEY || q.key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+    try {
+      const r = await exportToBigQuery({ dryRun: q.dry === '1' });
+      app.log.info({ marker: 'coupangads_bq', ...r }, 'coupangads bq export');
+      reply.send({ ok: true, ...r });
+    } catch (e: any) {
+      const error = String(e?.message ?? e);
+      app.log.error({ marker: 'coupangads_bq', error }, 'coupangads bq export failed');
       reply.code(500).send({ ok: false, error });
     }
   });
