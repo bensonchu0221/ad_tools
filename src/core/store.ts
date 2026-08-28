@@ -1684,6 +1684,16 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
     await p.query(`ALTER TABLE coupang_slots ADD COLUMN cpg_id BIGINT NULL
                    COMMENT '所屬 campaign；一支最多 300 個 group，滿了開新的'`);
   }
+  // 2026-08-28：可在執行期改的設定（目前只有 daily_budget，給 Siri 捷徑用）。
+  // ⚠️ 沒有這一列時，一切行為與加這張表之前完全相同——讀取端一律 fallback 回原始碼常數。
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_settings (
+      k          VARCHAR(64)  NOT NULL PRIMARY KEY,
+      v          VARCHAR(255) NOT NULL,
+      updated_by VARCHAR(64)  NULL COMMENT '誰改的（siri / manual / cron）',
+      updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) DEFAULT CHARSET=utf8mb4
+  `);
   if (!(await hasColumn('coupang_sync_runs', 'reactivated'))) {
     await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reactivated INT NOT NULL DEFAULT 0
                    COMMENT '重啟舊 group 的檔數（舊制的 replaced 欄留著給歷史紀錄）'`);
@@ -1889,4 +1899,32 @@ export async function listCoupangSyncRuns(limit = 20): Promise<any[]> {
   const p = await coupangPool();
   const [rows] = await p.query(`SELECT * FROM coupang_sync_runs ORDER BY id DESC LIMIT ?`, [limit]);
   return rows as any[];
+}
+
+/** 讀一個執行期設定；沒設定過回 null（呼叫端自己決定預設值）。 */
+export async function getCoupangSetting(key: string): Promise<string | null> {
+  const p = await coupangPool();
+  const [rows] = await p.query(`SELECT v FROM coupang_settings WHERE k = ?`, [key]);
+  const r = (rows as any[])[0];
+  return r ? String(r.v) : null;
+}
+
+/** 寫一個執行期設定（upsert）。updatedBy 只是給人看的來源標記。 */
+export async function setCoupangSetting(key: string, value: string, updatedBy = 'manual'): Promise<void> {
+  const p = await coupangPool();
+  await p.query(
+    `INSERT INTO coupang_settings (k, v, updated_by) VALUES (?,?,?)
+     ON DUPLICATE KEY UPDATE v = VALUES(v), updated_by = VALUES(updated_by)`,
+    [key, value, updatedBy]
+  );
+}
+
+/** 某段期間的成效最後一次真的被寫入是什麼時候（synced_at 是 ON UPDATE，值沒變就不會動）。 */
+export async function getCoupangStatsSyncedAt(sd: string, ed: string): Promise<string | null> {
+  const p = await coupangPool();
+  const [rows] = await p.query(
+    `SELECT DATE_FORMAT(MAX(synced_at), '%Y-%m-%d %H:%i:%s') AS t
+       FROM coupang_daily_stats WHERE dt BETWEEN ? AND ?`, [sd, ed]
+  );
+  return (rows as any[])[0]?.t ?? null;
 }

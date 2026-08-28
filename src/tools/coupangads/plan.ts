@@ -68,7 +68,11 @@ export function textMatches(group: Pick<GroupView, 'title' | 'descr'>, p: Coupan
   return group.title === titleOf(p) && group.descr === descOf(p);
 }
 
-export function planRotation(groups: GroupView[], products: CoupangProduct[]): RotationPlan {
+/**
+ * @param totalBudget 這次要分攤的日預算。預設 DAILY_BUDGET；呼叫端（sync.ts）會傳入
+ *   `settings.ts getDailyBudget()` 的生效值，讓 Siri 改過的預算能真的分到每一檔。
+ */
+export function planRotation(groups: GroupView[], products: CoupangProduct[], totalBudget = DAILY_BUDGET): RotationPlan {
   const recoIds = new Set(products.map((p) => String(p.productId)));
   // 一個商品理論上只會有一個 group；真的撞到多個（例如歷史遺留）就優先用還開著、id 較新的那個
   const byProduct = new Map<string, GroupView>();
@@ -98,6 +102,6 @@ export function planRotation(groups: GroupView[], products: CoupangProduct[]): R
   const activeCount = keep.length + retext.length + reactivate.length + create.length;
   return {
     keep, retext, reactivate, create, pause, activeCount,
-    budgetPerGroup: budgetPerGroup(DAILY_BUDGET, activeCount),
+    budgetPerGroup: budgetPerGroup(totalBudget, activeCount),
   };
 }

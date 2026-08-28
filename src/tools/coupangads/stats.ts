@@ -5,7 +5,7 @@ import {
   listCoupangDailyStats, listCoupangSlots, listCoupangProducts,
 } from '../../core/store.js';
 import { PENDING_REVIEW } from './sync.js';
-import { DAILY_BUDGET } from './plan.js';
+import { getDailyBudget } from './settings.js';
 
 export interface DailyRow {
   date: string;
@@ -44,7 +44,8 @@ export interface StatsResult {
   fetchedAt: string;
 }
 
-const twYmd = (d: Date) => new Intl.DateTimeFormat('en-CA', {
+/** 台北日曆日（YYYY-MM-DD）。R 報表的 day 就是這個口徑，siri.ts 也共用同一支避免兩套日期邏輯。 */
+export const twYmd = (d: Date) => new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(d);
 
@@ -80,7 +81,9 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const { sd, ed } = range ?? rangeOf(days);
   const warnings: string[] = [];
 
-  const [stats, slots] = await Promise.all([listCoupangDailyStats(sd, ed), listCoupangSlots()]);
+  const [stats, slots, campaignBudget] = await Promise.all([
+    listCoupangDailyStats(sd, ed), listCoupangSlots(), getDailyBudget(),
+  ]);
 
   // 商品資料：先用 slot 上的（就是廣告上真正在跑的文案），沒有的再查商品表（已下架但期間有數據者）
   const slotByProduct = new Map<string, typeof slots[number]>();
@@ -152,9 +155,10 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     totals: {
       spend, imp: sum((d) => d.imp), click: sum((d) => d.click),
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
-      // Campaign 的日預算（不是各 group 加總）：sync 每次都把它校正回 DAILY_BUDGET，
-      // 所以這個常數就是 R 上那支 campaign 當下的日預算，也是整體花費的硬上限。
-      campaignBudget: DAILY_BUDGET,
+      // Campaign 的日預算（不是各 group 加總）：sync 每次都把它校正回這個生效值
+      // （plan.ts 的 DAILY_BUDGET，或 Siri 端點改過後存在 coupang_settings 的值），
+      // 所以它就是 R 上那支 campaign 當下的日預算，也是整體花費的硬上限。
+      campaignBudget,
     },
     daily,
     products,

@@ -22,8 +22,9 @@ import {
   insertCoupangSyncRun, setCoupangSlotCampaign, type CoupangSlotRow,
 } from '../../core/store.js';
 import {
-  planRotation, titleOf, descOf, DAILY_BUDGET, CPC, CAMPAIGN_NAME, type GroupView,
+  planRotation, titleOf, descOf, CPC, CAMPAIGN_NAME, type GroupView,
 } from './plan.js';
+import { getDailyBudget } from './settings.js';
 
 export const ACCOUNT_EMAIL = process.env.COUPANG_R_EMAIL ?? 'benson@popin.cc';
 export const ACCOUNT_ID = process.env.COUPANG_R_USER_ID ?? '10222';
@@ -65,13 +66,16 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   const errors: string[] = [];
   const needReview: SyncResult['needReview'] = [];
 
-  // 1) Campaign：一支就夠（不限 group 數），沒有就建、日預算校正到 DAILY_BUDGET
+  // 日預算：預設是 plan.ts 的 DAILY_BUDGET，被 Siri 端點改過就以設定為準（沒改過兩者相同）
+  const dailyBudget = await getDailyBudget();
+
+  // 1) Campaign：一支就夠（不限 group 數），沒有就建、日預算校正到生效的日預算
   let campaign = (await listCampaigns(email)).find((c) => c.cpg_name === CAMPAIGN_NAME);
   if (!campaign && !dryRun) {
     const cpgId = await createCampaign(email, {
-      name: CAMPAIGN_NAME, dayBudget: DAILY_BUDGET, adomain: 'coupang.com', sponsored: 'Coupang',
+      name: CAMPAIGN_NAME, dayBudget: dailyBudget, adomain: 'coupang.com', sponsored: 'Coupang',
     });
-    campaign = { cpg_id: cpgId, cpg_name: CAMPAIGN_NAME, day_budget: DAILY_BUDGET };
+    campaign = { cpg_id: cpgId, cpg_name: CAMPAIGN_NAME, day_budget: dailyBudget };
   }
   if (!campaign) throw new Error('Campaign 不存在且 dryRun 不建立');
 
@@ -99,7 +103,7 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   }
 
   // 4) 決策（純函式）
-  const plan = planRotation(slots.map(toView), products);
+  const plan = planRotation(slots.map(toView), products, dailyBudget);
   const budget = plan.budgetPerGroup;
   const base: SyncResult = {
     campaignId: campaign.cpg_id, recoCount: products.length,
@@ -194,8 +198,8 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   }
 
   // 6) campaign 日預算校正（程式初版從不更新它，會卡住整體花費）
-  if (Number(campaign.day_budget ?? 0) !== DAILY_BUDGET) {
-    try { await updateCampaign(email, campaign.cpg_id, { day_budget: DAILY_BUDGET }); }
+  if (Number(campaign.day_budget ?? 0) !== dailyBudget) {
+    try { await updateCampaign(email, campaign.cpg_id, { day_budget: dailyBudget }); }
     catch (e: any) { errors.push(`campaign 預算校正失敗：${e.message}`); }
   }
 
