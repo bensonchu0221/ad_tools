@@ -18,7 +18,7 @@
 // 總花費上限會變成 3000×N），既然平台沒限制就不自找麻煩——一支 campaign 吃 DAILY_BUDGET 就好。
 import type { CoupangProduct } from '../../core/coupang.js';
 
-export const DAILY_BUDGET = 3000;      // 全域日預算（台幣），由各 campaign 依在跑檔數分攤
+export const DAILY_BUDGET = 2500;      // 全域日預算（台幣），2026-08-28 由 3000 調降（使用者指定）
 export const BUDGET_MULTIPLIER = 2;    // 每檔預算＝總預算÷在跑檔數×2（超出的部分由 campaign 日預算擋）
 export const CPC = 1;
 // ⚠️ 每檔預算下限（2026-08-27 加）：初版是「500 ÷ 在跑檔數」且每次同步都重算，檔數長到 67 時
