@@ -1,8 +1,8 @@
 // tool#6 酷澎聯盟投放：純函式驗證（離線，不打 API、不碰 DB）。
 // 跑法：npx tsx poc/verify_coupangads.mts
 import {
-  planRotation, titleOf, descOf, budgetPerGroup, textMatches,
-  DAILY_BUDGET, MIN_GROUP_BUDGET, type GroupView,
+  planRotation, titleOf, descOf, budgetPerGroup, textMatches, imageMatches,
+  DAILY_BUDGET, MIN_GROUP_BUDGET, IMAGE_SIZE, aliasOf, type GroupView,
 } from '../src/tools/coupangads/plan.js';
 import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
 import {
@@ -20,11 +20,15 @@ const check = (name: string, ok: boolean, got?: unknown) => {
 
 const P = (id: number, name: string, price: number, cat = '廚房', rocket = true) =>
   ({ productId: id, productName: name, productPrice: price, productImage: 'https://img/' + id, categoryName: cat, isRocket: rocket }) as any;
-// group ↔ 商品是永久對映（建立後 productId 永不改變），所以測試用的建構子不再有「換商品」這個概念
-const G = (groupId: number, productId: string, p?: any, active = true, cpgId = 194431): GroupView => ({
+// group ↔ 商品是永久對映（建立後 productId 永不改變），所以測試用的建構子不再有「換商品」這個概念。
+// mtName 預設＝該商品的 native 素材別名（＝已經換過圖的狀態）；要測「還掛著舊圖」就自己傳。
+const G = (groupId: number, productId: string, p?: any, active = true, cpgId = 194431, mtName?: string | null): GroupView => ({
   groupId, cpgId, productId,
   title: p ? titleOf(p) : null, descr: p ? descOf(p) : null, active,
+  mtName: mtName === undefined ? aliasOf(productId) : mtName,
 });
+/** 改版前的舊別名（300×250 那批在 R 上就長這樣）。 */
+const OLD_ALIAS = (productId: string) => `coupang_pid_${productId}`;
 
 console.log('\n[文案：價格變動要看得出來，長度不能超過 R 的上限]');
 check('標題＝商品名', titleOf(P(1, '樂扣保溫杯', 363)) === '樂扣保溫杯');
@@ -44,7 +48,8 @@ check('MIN_GROUP_BUDGET 是 50', MIN_GROUP_BUDGET === 50);
 // 這就是 8/26 曝光崩掉的情境：舊公式 500÷67＝7 元，CPC 1 元一天最多 7 次點擊、pacing 攤 24 小時幾乎不出量
 check('舊事故重現：500 元 67 檔也不再砍到 7 元', budgetPerGroup(500, 67, 1) === 50, budgetPerGroup(500, 67, 1));
 check('下限不會反過來灌大正常值', budgetPerGroup(3000, 20) === 300);
-check('DAILY_BUDGET 是 3000', DAILY_BUDGET === 3000);
+check('DAILY_BUDGET 是 2500（2026-08-28 由 3000 調降）', DAILY_BUDGET === 2500);
+check('新預算下 20 檔 → 每檔 250', budgetPerGroup(DAILY_BUDGET, 20) === 250, budgetPerGroup(DAILY_BUDGET, 20));
 
 console.log('\n[textMatches：同商品同文案才算沒變]');
 {
@@ -55,13 +60,35 @@ console.log('\n[textMatches：同商品同文案才算沒變]');
   check('沒有文案紀錄 → false', !textMatches(G(1, '9'), p));
 }
 
+console.log('\n[素材尺寸：R 的 Native／Display 由尺寸決定，別名要帶尺寸才換得掉舊圖]');
+{
+  // R 後台的 Native廣告／Display廣告是唯讀的：固定 IAB 尺寸＝Display，1.91:1＝Native
+  check('IMAGE_SIZE 是 native 規格 1200x628（不是 IAB 的 300x250）', IMAGE_SIZE === '1200x628', IMAGE_SIZE);
+  const [w, h] = IMAGE_SIZE.split('x').map(Number);
+  check('比例落在 1.91:1（R 的 native 判準）', Math.abs(w / h - 1.91) < 0.01, w / h);
+  check('不小於 R 的下限 600×314', w >= 600 && h >= 314);
+  check('不超過 R 的上限寬 2400', w <= 2400);
+  check('不是 IAB 固定尺寸清單裡的任何一個（那些會被判成 Display）',
+    !['300x250', '728x90', '300x600', '970x250', '320x50', '320x100', '320x200', '320x480',
+      '160x600', '336x280', '120x600', '468x60', '300x100', '480x320'].includes(IMAGE_SIZE));
+
+  check('別名帶尺寸', aliasOf('123') === 'coupang_pid_123_1200x628', aliasOf('123'));
+  // 沒帶尺寸的話 ensureMaterial 會用別名命中舊素材直接重用 ⇒ 素材永遠換不掉
+  check('新別名 ≠ 舊別名（否則 ensureMaterial 會重用 300×250 那張）', aliasOf('123') !== OLD_ALIAS('123'));
+
+  check('掛著 native 素材 → 不用換', imageMatches(G(1, '123'), '123'));
+  check('還掛著舊的 300×250 → 要換', !imageMatches(G(1, '123', undefined, true, 1, OLD_ALIAS('123')), '123'));
+  check('沒有素材紀錄 → 要換', !imageMatches(G(1, '123', undefined, true, 1, null), '123'));
+  check('掛到別的商品的圖 → 要換', !imageMatches(G(1, '123', undefined, true, 1, aliasOf('999')), '123'));
+}
+
 console.log('\n[planRotation：group↔商品永久對映，舊商品回來是「重啟」不是「覆蓋」]');
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
   const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
   const r = planRotation(gs, ps);
-  check('全部同商品同價 → 全 keep、零改動', r.keep.length === 2 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
-  check('在跑檔數＝2、每檔 3000', r.activeCount === 2 && r.budgetPerGroup === 3000);
+  check('全部同商品同價、素材已是 native → 全 keep、零改動', r.keep.length === 2 && r.reimage.length === 0 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
+  check('在跑檔數＝2、每檔 2500（＝DAILY_BUDGET÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 2500);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
@@ -99,13 +126,47 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   check('reco 回空 → 不建新', r.create.length === 0 && r.activeCount === 0);
 }
 
+console.log('\n[換素材：舊的 300×250 要被換成 native 圖，換完就不再動]');
+{
+  // 遷移當下的情境：文案完全沒變，只是素材還是舊的 Display 尺寸
+  const ps = [P(1, 'A', 10), P(2, 'B', 20)];
+  const gs = [G(101, '1', ps[0], true, 1, OLD_ALIAS('1')), G(102, '2', ps[1])];
+  const r = planRotation(gs, ps);
+  check('舊圖那檔進 reimage、不進 keep', r.reimage.length === 1 && r.reimage[0].group.groupId === 101);
+  check('已經是 native 的那檔仍然完全不動', r.keep.length === 1 && r.keep[0].group.groupId === 102);
+  check('換素材不會被誤判成改文案或新建', r.retext.length === 0 && r.create.length === 0);
+  check('換素材的檔仍算在跑（預算照分）', r.activeCount === 2);
+}
+{
+  // 價格也變了 → 走 retext，但素材要一起換（同一次 PUT，只重審一次）
+  const ps = [P(1, 'A', 99)];
+  const r = planRotation([G(101, '1', P(1, 'A', 10), true, 1, OLD_ALIAS('1'))], ps);
+  check('文案與素材都要動 → 只出現在 retext 一次', r.retext.length === 1 && r.reimage.length === 0);
+  check('retext 帶著「順便換素材」旗標', r.retext[0].reimage === true);
+}
+{
+  const ps = [P(1, 'A', 10)];
+  const r = planRotation([G(101, '1', ps[0], true, 1, OLD_ALIAS('1'))], ps);
+  const r2 = planRotation([G(101, '1', ps[0])], ps); // 換完之後
+  check('換完素材後同一份 reco 就回到全 keep（不會每天重審）', r.reimage.length === 1 && r2.reimage.length === 0 && r2.keep.length === 1);
+}
+{
+  // 暫停中的舊 group 回來：素材舊的話重啟時要一起換
+  const ps = [P(7, 'OLD', 30)];
+  const r = planRotation([G(107, '7', ps[0], false, 1, OLD_ALIAS('7'))], ps);
+  check('重啟且素材還是舊的 → reimage=true', r.reactivate.length === 1 && r.reactivate[0].reimage === true);
+  check('文案沒變就不改文案（只換素材）', r.reactivate[0].retext === false);
+  const r2 = planRotation([G(107, '7', ps[0], false)], ps);
+  check('素材已是 native 的重啟 → 兩個旗標都 false＝免重審', r2.reactivate[0].retext === false && r2.reactivate[0].reimage === false);
+}
+
 console.log('\n[一支 campaign 不限 ad group 數（R 端 PM 確認無限制，2026-08-27）]');
 {
   const ps = Array.from({ length: 400 }, (_, i) => P(1000 + i, 'P' + i, 10));
   const r = planRotation([], ps);
   check('400 檔全新商品照建，不會被容量擋下', r.create.length === 400);
   check('不再有「要開新 campaign」這件事', !('newCampaigns' in r), Object.keys(r));
-  check('在跑檔數＝400、每檔預算按 3000 分攤後吃下限 50', r.activeCount === 400 && r.budgetPerGroup === 50);
+  check('在跑檔數＝400、每檔預算按 DAILY_BUDGET 分攤後吃下限 50', r.activeCount === 400 && r.budgetPerGroup === 50);
 }
 
 console.log('\n[CTR 與排序]');
@@ -261,9 +322,10 @@ console.log('\n[R 管理 token 被踢掉的辨識：一帳只能有一個有效 
 
 console.log('\n[同步摘要]');
 {
-  const base: any = { campaignId: 1, recoCount: 20, unchanged: 20, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
+  const base: any = { campaignId: 1, recoCount: 20, unchanged: 20, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
   check('什麼都沒動時不出現雜訊欄位', summarize(base) === '不動 20、在跑 20 檔／每檔 300 元、1.2s', summarize(base));
   check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
+  check('換素材會列出', summarize({ ...base, reimaged: 12 }).includes('換素材 12'));
   check('有暫停會列出', summarize({ ...base, paused: 45 }).includes('暫停 45'));
 }
 

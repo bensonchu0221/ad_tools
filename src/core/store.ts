@@ -1551,7 +1551,7 @@ export interface CoupangDailyStatRow {
 
 export interface CoupangSyncRunRow {
   trigger: 'cron' | 'manual';
-  recoCount: number; unchanged: number; textUpdated: number;
+  recoCount: number; unchanged: number; reimaged: number; textUpdated: number;
   reactivated: number; created: number; paused: number; failed: number;
   budgetPerGroup: number | null; elapsedMs: number; message: string | null;
 }
@@ -1697,6 +1697,11 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
   if (!(await hasColumn('coupang_sync_runs', 'reactivated'))) {
     await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reactivated INT NOT NULL DEFAULT 0
                    COMMENT '重啟舊 group 的檔數（舊制的 replaced 欄留著給歷史紀錄）'`);
+  }
+  // 2026-08-31：素材由 300×250（Display）改成 1.91:1（Native），多一個「只換素材」的動作要記。
+  if (!(await hasColumn('coupang_sync_runs', 'reimaged'))) {
+    await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reimaged INT NOT NULL DEFAULT 0
+                   COMMENT '文案沒變、只換素材的檔數（換成 native 尺寸）'`);
   }
 }
 
@@ -1889,9 +1894,9 @@ export async function insertCoupangSyncRun(r: CoupangSyncRunRow): Promise<void> 
   const p = await coupangPool();
   await p.query(
     `INSERT INTO coupang_sync_runs
-       (trigger_src, reco_count, unchanged, text_updated, reactivated, created, paused, failed, budget_per_group, elapsed_ms, message)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-    [r.trigger, r.recoCount, r.unchanged, r.textUpdated, r.reactivated, r.created, r.paused, r.failed, r.budgetPerGroup, r.elapsedMs, r.message]
+       (trigger_src, reco_count, unchanged, reimaged, text_updated, reactivated, created, paused, failed, budget_per_group, elapsed_ms, message)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [r.trigger, r.recoCount, r.unchanged, r.reimaged, r.textUpdated, r.reactivated, r.created, r.paused, r.failed, r.budgetPerGroup, r.elapsedMs, r.message]
   );
 }
 

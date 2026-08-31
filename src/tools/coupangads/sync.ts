@@ -6,7 +6,10 @@
 //    輪替只剩「啟用 / 暫停」兩個動作。這樣 R 報表的 `day × group` 數字歸屬永遠唯一，
 //    回補幾天都不會算錯（舊制的重複計數問題從根上消失，見 collect.ts 檔頭）。
 //  - **同商品不動**：reco 裡已經在跑的商品完全不碰 → 不觸發重審，繼續跑。
-//  - **價格文案變了只改文案**（素材與落地頁不動），把重審範圍壓到最小。
+//  - **價格文案變了只改文案**（落地頁不動），把重審範圍壓到最小。
+//  - **素材不是這個商品的 native 圖就換掉**（2026-08-31 加）：R 後台的 Native／Display 是唯讀的、
+//    由素材尺寸決定，舊的 300×250 一律被判成 Display 固定尺寸廣告（見 plan.ts IMAGE_SIZE）。
+//    換素材會讓 creative 進待審，所以只換「真的還不是 native 素材」的那些，換完就永遠 no-op。
 //  - **舊商品回到 reco → 重啟它自己那個 group**；文案沒變連改都不用改 ⇒ 免重審、開啟即有量。
 //  - **不在 reco 的暫停**；全新商品才建新 group。
 //  - **一支 campaign、不限 ad group 數**（2026-08-27 向 R 端 PM 確認沒有上限），
@@ -22,18 +25,18 @@ import {
   insertCoupangSyncRun, setCoupangSlotCampaign, type CoupangSlotRow,
 } from '../../core/store.js';
 import {
-  planRotation, titleOf, descOf, CPC, CAMPAIGN_NAME, type GroupView,
+  planRotation, titleOf, descOf, CPC, CAMPAIGN_NAME, IMAGE_SIZE, aliasOf, type GroupView,
 } from './plan.js';
 import { getDailyBudget } from './settings.js';
 
 export const ACCOUNT_EMAIL = process.env.COUPANG_R_EMAIL ?? 'benson@popin.cc';
 export const ACCOUNT_ID = process.env.COUPANG_R_USER_ID ?? '10222';
-export const IMAGE_SIZE = '300x250'; // R 只收 IAB 矩形；Coupang 原圖 1:1 會 letterbox 補白
 export const SUBID_PREFIX = `r${ACCOUNT_ID}`;
+// 素材尺寸與素材別名都在 plan.ts（純函式層，離線可驗）；這裡再匯出保持既有 import 路徑可用。
+export { IMAGE_SIZE, aliasOf };
 
 /** group 名以商品 ID 命名（永久對映 → 名字也就固定了，在 R 後台好認）。 */
 export const groupNameOf = (productId: number | string) => `[Coupang] pid-${productId}`;
-export const aliasOf = (productId: number | string) => `coupang_pid_${productId}`;
 export const subIdOf = (productId: number | string) => `${SUBID_PREFIX}_${productId}`;
 export const creativeNameOf = (productId: number | string) => `[Coupang] ${productId}`;
 
@@ -41,6 +44,8 @@ export interface SyncResult {
   campaignId: number;
   recoCount: number;
   unchanged: number;
+  /** 文案沒變、只換素材的檔數（把 Display 舊圖換成 native 圖）。 */
+  reimaged: number;
   textUpdated: number;
   reactivated: number;
   created: number;
@@ -48,14 +53,15 @@ export interface SyncResult {
   failed: number;
   budgetPerGroup: number;
   activeCount: number;
-  needReview: { productId: string; groupId: number; reason: '改文案' | '新建' }[];
+  needReview: { productId: string; groupId: number; reason: '改文案' | '換素材' | '新建' }[];
   errors: string[];
   elapsedMs: number;
 }
 
-const toView = (s: CoupangSlotRow): GroupView => ({
+/** DB 的 slot ＋ R 上那支 creative 現在掛的素材別名 → 決策用的 GroupView。 */
+const toView = (s: CoupangSlotRow, mtName: string | null): GroupView => ({
   groupId: s.groupId, cpgId: Number(s.cpgId ?? 0), productId: String(s.productId ?? ''),
-  title: s.title, descr: s.descr, active: s.active,
+  title: s.title, descr: s.descr, active: s.active, mtName,
 });
 
 /** 執行一次輪替。dryRun 只算計畫不寫任何東西。 */
@@ -91,8 +97,12 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   // 3) group 現況：對映以 DB 為準（永久、不會變），開關狀態用 R 的即時值校正
   //    ——有人在後台手動關掉時 DB 才跟得上。`listGroupsAll` 會把暫停的一起撈回來。
   const slots = (await listCoupangSlots()).filter((s) => s.productId);
-  const rGroups = await listGroupsAll(email);
+  // creative 清單多打一支（已分頁、含暫停 group 的），用來知道每個 group 現在掛的是哪張素材
+  // ——素材要不要換就靠它判斷，不必對每個商品都先 ensureMaterial 探一次。
+  const [rGroups, rCreatives] = await Promise.all([listGroupsAll(email), listCreatives(email)]);
   const rById = new Map(rGroups.map((g) => [g.group_id, g]));
+  const crByGroup = new Map<number, any>();
+  for (const c of rCreatives) crByGroup.set(Number(c.group_id), c);
   for (const s of slots) {
     const g = rById.get(s.groupId);
     s.active = g ? Number(g.group_status ?? 0) === 1 : false;
@@ -103,11 +113,15 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   }
 
   // 4) 決策（純函式）
-  const plan = planRotation(slots.map(toView), products, dailyBudget);
+  const plan = planRotation(
+    slots.map((s) => toView(s, crByGroup.get(s.groupId)?.cr_mt_name ?? null)),
+    products, dailyBudget,
+  );
   const budget = plan.budgetPerGroup;
   const base: SyncResult = {
     campaignId: campaign.cpg_id, recoCount: products.length,
-    unchanged: plan.keep.length, textUpdated: plan.retext.length, reactivated: plan.reactivate.length,
+    unchanged: plan.keep.length, reimaged: plan.reimage.length,
+    textUpdated: plan.retext.length, reactivated: plan.reactivate.length,
     created: plan.create.length, paused: plan.pause.length, failed: 0,
     budgetPerGroup: budget, activeCount: plan.activeCount,
     needReview: [], errors, elapsedMs: Date.now() - t0,
@@ -126,6 +140,13 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     if (Object.keys(patch).length) await updateGroup(email, g.groupId, patch);
   };
 
+  /** 這個商品的 native 素材（沒有就上傳）。別名帶尺寸，所以不會誤用到舊的 300×250。 */
+  const nativeMaterial = async (product: CoupangProduct) =>
+    (await ensureMaterial(email, product.productImage, aliasOf(product.productId))).mtId;
+  /** creative id：DB 為主，DB 沒有就用 R 清單補（避免舊列缺 cr_id 就整檔失敗）。 */
+  const creativeIdOf = (groupId: number) =>
+    Number(slotByGroup.get(groupId)?.crId ?? crByGroup.get(groupId)?.cr_id ?? 0);
+
   // 5a) 完全不動的：只把日預算對齊（改 group 設定不影響素材審核）
   for (const { group, product } of plan.keep) {
     try {
@@ -134,34 +155,54 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     } catch (e: any) { errors.push(`group ${group.groupId} 預算調整失敗：${e.message}`); }
   }
 
-  // 5b) 只改文案（價格變動）：素材與落地頁刻意不動
-  for (const { group, product } of plan.retext) {
+  // 5a2) 只換素材（文案沒變）：把舊的 Display 尺寸圖換成 native 圖。會進待審，換完就不再動。
+  for (const { group, product } of plan.reimage) {
     const cur = slotByGroup.get(group.groupId);
     try {
-      await updateCreative(email, Number(cur?.crId), { cr_title: titleOf(product), cr_desc: descOf(product) });
+      const mtId = await nativeMaterial(product);
+      await updateCreative(email, creativeIdOf(group.groupId), { cr_mt_id: mtId });
+      await alignGroup(group, product);
+      await upsertCoupangSlot({ ...(cur as any), groupId: group.groupId, mtId, dayBudget: budget, active: true }, true);
+      needReview.push({ productId: group.productId, groupId: group.groupId, reason: '換素材' });
+    } catch (e: any) { errors.push(`group ${group.groupId} 換素材失敗：${e.message}`); }
+  }
+
+  // 5b) 只改文案（價格變動）：落地頁刻意不動；素材若還不是 native 就順手一起換（同一次 PUT）
+  for (const { group, product, reimage } of plan.retext) {
+    const cur = slotByGroup.get(group.groupId);
+    try {
+      const mtId = reimage ? await nativeMaterial(product) : null;
+      await updateCreative(email, creativeIdOf(group.groupId), {
+        cr_title: titleOf(product), cr_desc: descOf(product), ...(mtId ? { cr_mt_id: mtId } : {}),
+      });
       await alignGroup(group, product);
       await upsertCoupangSlot({
         ...(cur as any), groupId: group.groupId,
         title: titleOf(product), descr: descOf(product), price: Number(product.productPrice ?? 0),
-        dayBudget: budget, active: true,
+        ...(mtId ? { mtId } : {}), dayBudget: budget, active: true,
       }, true);
       needReview.push({ productId: group.productId, groupId: group.groupId, reason: '改文案' });
     } catch (e: any) { errors.push(`group ${group.groupId} 改文案失敗：${e.message}`); }
   }
 
   // 5c) 舊商品回到 reco：重啟它自己那個 group。素材與落地頁原封不動 ⇒ 文案沒變就免重審。
-  for (const { group, product, retext } of plan.reactivate) {
+  for (const { group, product, retext, reimage } of plan.reactivate) {
     const cur = slotByGroup.get(group.groupId);
     try {
       await alignGroup(group, product, { group_status: 1 });
-      if (retext) {
-        await updateCreative(email, Number(cur?.crId), { cr_title: titleOf(product), cr_desc: descOf(product) });
-        needReview.push({ productId: group.productId, groupId: group.groupId, reason: '改文案' });
+      const mtId = reimage ? await nativeMaterial(product) : null;
+      if (retext || reimage) {
+        await updateCreative(email, creativeIdOf(group.groupId), {
+          ...(retext ? { cr_title: titleOf(product), cr_desc: descOf(product) } : {}),
+          ...(mtId ? { cr_mt_id: mtId } : {}),
+        });
+        needReview.push({ productId: group.productId, groupId: group.groupId, reason: retext ? '改文案' : '換素材' });
       }
       await upsertCoupangSlot({
         ...(cur as any), groupId: group.groupId, dayBudget: budget, active: true,
         ...(retext ? { title: titleOf(product), descr: descOf(product), price: Number(product.productPrice ?? 0) } : {}),
-      }, retext);
+        ...(mtId ? { mtId } : {}),
+      }, retext || reimage);
     } catch (e: any) { errors.push(`group ${group.groupId} 重啟失敗：${e.message}`); }
   }
 
@@ -171,7 +212,7 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     const pid = String(product.productId);
     try {
       const slotNo = await nextCoupangSlotNo();
-      const { mtId } = await ensureMaterial(email, product.productImage, aliasOf(pid));
+      const mtId = await nativeMaterial(product);
       const dl = await createDeeplink(pid, subIdOf(pid));
       const groupId = await createGroup(email, {
         cpgId: target, name: groupNameOf(pid), landingUrl: dl.landingUrl, dayBudget: budget, cpc: CPC,
@@ -206,7 +247,8 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   const result: SyncResult = { ...base, failed: errors.length, needReview, errors, elapsedMs: Date.now() - t0 };
   await insertCoupangSyncRun({
     trigger: opts.trigger ?? 'manual',
-    recoCount: result.recoCount, unchanged: result.unchanged, textUpdated: result.textUpdated,
+    recoCount: result.recoCount, unchanged: result.unchanged, reimaged: result.reimaged,
+    textUpdated: result.textUpdated,
     reactivated: result.reactivated, created: result.created, paused: result.paused, failed: result.failed,
     budgetPerGroup: budget, elapsedMs: result.elapsedMs,
     message: errors.length ? errors.slice(0, 5).join('；') : null,

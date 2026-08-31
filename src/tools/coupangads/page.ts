@@ -61,7 +61,8 @@ const STYLE = `
   table.tb td{padding:9px 10px;border-bottom:1px solid var(--line2);vertical-align:middle}
   table.tb tr:last-child td{border-bottom:0}
   table.tb td.n{text-align:right;font-variant-numeric:tabular-nums}
-  table.tb img{width:56px;height:47px;object-fit:contain;background:#fff;border:1px solid var(--line2);border-radius:3px;display:block}
+  /* 素材是 1.91:1 的 native 圖（2026-08-31 由 300×250 改），縮圖框跟著改比例才不會整片留白 */
+  table.tb img{width:72px;height:38px;object-fit:contain;background:#fff;border:1px solid var(--line2);border-radius:3px;display:block}
   .nm{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .nm a{color:inherit;text-decoration:none;border-bottom:1px solid var(--line)}
   .pill{display:inline-block;font-size:10.5px;padding:2px 7px;border-radius:99px;border:1px solid var(--line)}

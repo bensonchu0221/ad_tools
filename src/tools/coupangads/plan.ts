@@ -7,7 +7,9 @@
 //
 // 規則：
 //  - reco 裡、group 還開著、文案也沒變 → **完全不動**（不觸發重審）
-//  - reco 裡、group 開著但價格/文案變了 → **只改文案**（素材與落地頁不動）
+//  - reco 裡、group 開著但價格/文案變了 → **只改文案**（落地頁不動）
+//  - reco 裡、文案沒變但素材不是這個商品的 native 圖 → **只換素材**
+//    （2026-08-31 新增：舊的 300×250 全部落在這條，換完之後就永遠 no-op）
 //  - reco 裡、但 group 是暫停的（以前跑過的商品又回來）→ **重啟它自己那個 group**；
 //    文案沒變就連改都不用改 ⇒ **免重審、開啟即有量**。這是永久對映最大的好處。
 //  - reco 裡、從沒見過的商品 → **建新 group**（絕不覆蓋任何既有 group）
@@ -17,6 +19,22 @@
 // 滿了就開新 campaign，但那會帶出「多支 campaign 的日預算怎麼分」的麻煩（每支都給 3000 的話
 // 總花費上限會變成 3000×N），既然平台沒限制就不自找麻煩——一支 campaign 吃 DAILY_BUDGET 就好。
 import type { CoupangProduct } from '../../core/coupang.js';
+
+/**
+ * 素材尺寸。**必須是 R 的 native 規格（比例 1.91:1）**——2026-08-31 由 `300x250` 改。
+ * R 後台「廣告預覽」的〈Native廣告／Display廣告〉是**唯讀的、由素材尺寸決定**：
+ *   - 固定 IAB 尺寸（300×250、728×90…共 14 種）→ 歸成 **Display 固定尺寸廣告**
+ *   - 比例 1.91:1、不小於 600×314、最大寬 2400 → 才是 **Native 自適應廣告**
+ * 舊值 300×250 正好在 IAB 清單裡，所以我們投出去的全部被判成 Display。
+ * Coupang reco 的 `imageSize` 直接帶這個值（它會把方形商品圖 letterbox 成這個比例）。
+ */
+export const IMAGE_SIZE = '1200x628';
+
+/**
+ * 素材別名（帳戶內唯一＝天然去重）。**名字帶尺寸**：不帶的話換尺寸時
+ * `ensureMaterial` 會用別名命中舊的 300×250 素材直接重用，素材永遠換不掉。
+ */
+export const aliasOf = (productId: number | string) => `coupang_pid_${productId}_${IMAGE_SIZE}`;
 
 export const DAILY_BUDGET = 2500;      // 全域日預算（台幣），2026-08-28 由 3000 調降（使用者指定）
 export const BUDGET_MULTIPLIER = 2;    // 每檔預算＝總預算÷在跑檔數×2（超出的部分由 campaign 日預算擋）
@@ -36,12 +54,15 @@ export interface GroupView {
   title: string | null;
   descr: string | null;
   active: boolean;
+  /** 這個 group 的 creative 現在掛的素材別名（R 的 `cr_mt_name`）。判斷素材要不要換就靠它。 */
+  mtName: string | null;
 }
 
 export interface RotationPlan {
   keep: { group: GroupView; product: CoupangProduct }[];                       // 完全不動
-  retext: { group: GroupView; product: CoupangProduct }[];                     // 只改文案
-  reactivate: { group: GroupView; product: CoupangProduct; retext: boolean }[];// 重啟舊 group
+  reimage: { group: GroupView; product: CoupangProduct }[];                    // 文案沒變、只換素材
+  retext: { group: GroupView; product: CoupangProduct; reimage: boolean }[];   // 改文案（順便換素材）
+  reactivate: { group: GroupView; product: CoupangProduct; retext: boolean; reimage: boolean }[]; // 重啟舊 group
   create: CoupangProduct[];                                                   // 建新 group
   pause: GroupView[];
   activeCount: number;      // 這次結束後會在跑的檔數
@@ -69,6 +90,15 @@ export function textMatches(group: Pick<GroupView, 'title' | 'descr'>, p: Coupan
 }
 
 /**
+ * group 現在掛的素材是不是「這個商品的 native 素材」。
+ * 別名帶尺寸 ⇒ 舊的 `coupang_pid_{pid}`（300×250）一律不相符 → 會被排進換素材。
+ * 別名也帶商品 ⇒ 順便擋掉「掛到別的商品的圖」這種歷史髒資料。
+ */
+export function imageMatches(group: Pick<GroupView, 'mtName'>, productId: number | string): boolean {
+  return group.mtName === aliasOf(productId);
+}
+
+/**
  * @param totalBudget 這次要分攤的日預算。預設 DAILY_BUDGET；呼叫端（sync.ts）會傳入
  *   `settings.ts getDailyBudget()` 的生效值，讓 Siri 改過的預算能真的分到每一檔。
  */
@@ -84,6 +114,7 @@ export function planRotation(groups: GroupView[], products: CoupangProduct[], to
   }
 
   const keep: RotationPlan['keep'] = [];
+  const reimage: RotationPlan['reimage'] = [];
   const retext: RotationPlan['retext'] = [];
   const reactivate: RotationPlan['reactivate'] = [];
   const create: RotationPlan['create'] = [];
@@ -91,17 +122,20 @@ export function planRotation(groups: GroupView[], products: CoupangProduct[], to
   for (const p of products) {
     const g = byProduct.get(String(p.productId));
     if (!g) { create.push(p); continue; }
-    if (!g.active) { reactivate.push({ group: g, product: p, retext: !textMatches(g, p) }); continue; }
-    if (textMatches(g, p)) keep.push({ group: g, product: p });
-    else retext.push({ group: g, product: p });
+    // 素材不是這個商品的 native 素材就要換（舊的 300×250 全部落在這裡，換完就永遠 no-op）
+    const needImage = !imageMatches(g, p.productId);
+    if (!g.active) { reactivate.push({ group: g, product: p, retext: !textMatches(g, p), reimage: needImage }); continue; }
+    if (!textMatches(g, p)) retext.push({ group: g, product: p, reimage: needImage });
+    else if (needImage) reimage.push({ group: g, product: p });
+    else keep.push({ group: g, product: p });
   }
 
   // 不在 reco、又還開著的才要暫停（已經停掉的不用重複下指令）
   const pause = groups.filter((g) => g.active && !recoIds.has(g.productId));
 
-  const activeCount = keep.length + retext.length + reactivate.length + create.length;
+  const activeCount = keep.length + reimage.length + retext.length + reactivate.length + create.length;
   return {
-    keep, retext, reactivate, create, pause, activeCount,
+    keep, reimage, retext, reactivate, create, pause, activeCount,
     budgetPerGroup: budgetPerGroup(totalBudget, activeCount),
   };
 }

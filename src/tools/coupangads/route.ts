@@ -22,6 +22,7 @@ export const SIRI_PATH = BASE_PATH + '/siri';
 export function summarize(r: SyncResult): string {
   const parts = [
     '不動 ' + r.unchanged,
+    r.reimaged ? '換素材 ' + r.reimaged : '',
     r.textUpdated ? '改文案 ' + r.textUpdated : '',
     r.reactivated ? '重啟 ' + r.reactivated : '',
     r.created ? '新開 ' + r.created : '',
@@ -114,6 +115,7 @@ export function registerCoupangAds(app: FastifyInstance): void {
           time: twTime(r.ran_at),
           text: [
             '不動 ' + r.unchanged,
+            r.reimaged ? '換素材 ' + r.reimaged : '',
             r.text_updated ? '改文案 ' + r.text_updated : '',
             r.reactivated ? '重啟 ' + r.reactivated : '',
             r.replaced ? '換商品 ' + r.replaced : '',

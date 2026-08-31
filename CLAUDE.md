@@ -91,7 +91,14 @@ popin 內部工具集（取代舊 dctool）。
 
 ## 酷澎聯盟投放核心（tool#6，`/tools/coupangads`，`src/tools/coupangads/`）
 - 目的：把 Coupang 聯盟商品變成 R 平台廣告去買流量、賺聯盟佣金。**客戶指定只用 Coupang `reco` 端點**。分層：`core/coupang.ts`（Coupang API）＋`core/rixbee_admin.ts`（R **管理** API，與報表側 `core/rixbee.ts` 完全兩套）→ `plan.ts`（輪替決策純函式）→ `sync.ts`（執行）→ `collect.ts`（成效收集）→ `stats.ts`／`page.ts`／`route.ts`
-- **投放結構**：一支 Campaign `[Coupang] reco 自動投放`（日預算 **2500**，2026-08-28 由 3000 調降、不限 group 數）→ **一商品一 AdGroup、永久對映**（`group_name='[Coupang] pid-{productId}'`、CPC 1 元、各自落地頁）→ 一 Creative（商品圖 300x250、`立即選購`、IAB1）。素材別名 `coupang_pid_{productId}`（帳戶內唯一＝天然去重）。⚠️ 2026-08-26～27 之間曾用過 `slot-NNN` 複用命名，R 上的舊 group 名字會在下次被更新時自動改成 pid 命名
+- **投放結構**：一支 Campaign `[Coupang] reco 自動投放`（日預算 **2500**，2026-08-28 由 3000 調降、不限 group 數）→ **一商品一 AdGroup、永久對映**（`group_name='[Coupang] pid-{productId}'`、CPC 1 元、各自落地頁）→ 一 Creative（商品圖 **1200x628**、`立即選購`、IAB1）。素材別名 `coupang_pid_{productId}_1200x628`（帳戶內唯一＝天然去重）。⚠️ 2026-08-26～27 之間曾用過 `slot-NNN` 複用命名，R 上的舊 group 名字會在下次被更新時自動改成 pid 命名
+- **⚠️⚠️ 素材必須是 native 尺寸 1.91:1（2026-08-31 由 300×250 改，使用者指出投的全是 banner）**：R 後台〈廣告預覽〉那組〈Native廣告／Display廣告〉**是唯讀的、由素材尺寸決定**，選不了——給固定 IAB 尺寸就被判成 Display，只有 1.91:1 才是 Native。判準從 console 前端 bundle 挖出來（`https://broadciel.console.rixbeedesk.com/umi.*.js`，`SupportImgSize`／`library.images.upload.support.*`）：**Native＝比例 1.91:1、不小於 600×314、建議最大 2400×1256**；**Display＝14 種固定尺寸**（300×250、728×90、300×600、970×250、320×50/100/200/480、160×600、336×280、120×600、468×60、300×100、480×320），舊值 300×250 正好在裡面。`plan.ts IMAGE_SIZE='1200x628'` 直接當 Coupang reco 的 `imageSize` 參數（它會把方形商品圖 letterbox 成該比例），**R 素材 API 收得下**（實測 1200×628 與 600×314 都回 200，size 照記）。
+  - **⚠️ 素材別名一定要帶尺寸**（`coupang_pid_{pid}_{IMAGE_SIZE}`）：不帶的話 `ensureMaterial` 會用舊別名命中那張 300×250 直接重用 → 素材永遠換不掉。以後再改尺寸也是同一個機制自動生效。
+  - **⚠️ 不必重開 ad group**：實測 `updateCreative` 換 `cr_mt_id` 就能把既有廣告從 Display 變 Native（`cr_mt_size` 300*250→1200*628、`summary_status` 1→3）。重開 group 會打壞「group↔商品永久對映」（防重複計數的根基）並讓歷史數據斷掉，**別做**。
+  - `plan.ts` 因此多一個動作 **`reimage`（只換素材）**：文案沒變、但素材別名不是這個商品的 native 別名就換；`retext`／`reactivate` 則帶 `reimage` 旗標**在同一次 PUT 一起換**（只重審一次）。**換完就永遠 no-op**，不會每天重審。`imageMatches()` 純函式順便擋掉「掛到別的商品的圖」。`coupang_sync_runs` 加 `reimaged` 欄（自動 ALTER），摘要顯示「換素材 N」。
+  - **⚠️ 換素材＝進待審＝該檔停止曝光到審過為止**（使用者每天 10:00 審）。2026-08-31 14:5x 手動跑一次遷移：`不動 0｜換素材 14｜新開 6｜暫停 6｜失敗 0`，44.7s；回讀 R 複驗**在跑 20 檔全是 1200*628、別名全對、待審 20**（`poc/check_coupang_native.mts`）。舊的 300×250 素材留在圖庫沒刪（沒被引用，之後要清再說）。
+  - 看板商品表縮圖框同步由 56×47 改 **72×38**（1.91:1），不然整片留白。
+  - 驗證：`poc/verify_coupangads.mts` 加了尺寸／別名／`imageMatches`／四條 reimage 路徑的斷言（共 120 項全過），已做 5 個變異測試（尺寸改回 300×250、別名不帶尺寸、在跑的檔不檢查素材、改文案時不換圖、重啟時不換圖）**全部被抓到**。`poc/check_coupang_native.mts` 是線上複驗腳本。
 - **⚠️⚠️ 輪替規則（2026-08-27 定案：group ↔ 商品永久對映，取代 8/26 的「slot 複用」）**：**一個 group 建立後就綁死一個商品，永遠不改掛別的商品**，輪替只剩「啟用／暫停」。這是為了根除重複計數——slot 複用會讓 R 報表的 `day × group` 數字需要時間邊界才知道算給誰，回補時就會算錯（見下）。規則：
   ①**reco 裡、還開著、文案沒變 → 完全不動**（不重審）；
   ②**同商品但價格/文案變了 → 只改 creative 文案**（素材與落地頁不動）；
