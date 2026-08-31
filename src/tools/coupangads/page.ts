@@ -58,6 +58,9 @@ const STYLE = `
   .tip .r{display:flex;justify-content:space-between;gap:12px;font-variant-numeric:tabular-nums}
   table.tb{width:100%;border-collapse:collapse;font-size:12.5px}
   table.tb th{text-align:left;font-weight:600;color:var(--mut);font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:8px 10px;border-bottom:1px solid var(--line)}
+  table.tb th.sort{cursor:pointer;user-select:none;white-space:nowrap}
+  table.tb th.sort:hover,table.tb th.sort.on{color:var(--ink)}
+  table.tb th.sort .ar{margin-left:3px;font-size:9px}
   table.tb td{padding:9px 10px;border-bottom:1px solid var(--line2);vertical-align:middle}
   table.tb tr:last-child td{border-bottom:0}
   table.tb td.n{text-align:right;font-variant-numeric:tabular-nums}
@@ -143,7 +146,7 @@ const BODY = `
 
     <div class="sec">
       <div class="bar" style="margin:0 0 10px">
-        <h2 style="margin:0">商品 <span id="pcount" class="muted"></span> <span class="muted" style="text-transform:none;letter-spacing:0">· 依 CTR 由高到低</span></h2>
+        <h2 style="margin:0">商品 <span id="pcount" class="muted"></span> <span class="muted" id="psort" style="text-transform:none;letter-spacing:0">· 依 CTR 由高到低</span></h2>
         <div class="spacer"></div>
         <div class="chips" id="pfilter">
           <button type="button" data-f="on" class="on">投放中</button>
@@ -155,7 +158,10 @@ const BODY = `
         <table class="tb" id="tbl">
           <thead><tr>
             <th style="width:66px">素材</th><th style="width:74px">Group</th><th>商品</th>
-            <th class="n hide-s">曝光</th><th class="n">點擊</th><th class="n">CTR</th><th class="n">花費</th>
+            <th class="n hide-s sort" data-sort="imp" aria-sort="none">曝光<span class="ar"></span></th>
+            <th class="n sort" data-sort="click" aria-sort="none">點擊<span class="ar"></span></th>
+            <th class="n sort" data-sort="ctr" aria-sort="descending">CTR<span class="ar"></span></th>
+            <th class="n sort" data-sort="spend" aria-sort="none">花費<span class="ar"></span></th>
             <th class="n">日預算</th><th>狀態</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
@@ -177,6 +183,9 @@ const BODY = `
 const SCRIPT = `
 const C_SPEND=${JSON.stringify(C_SPEND)}, C_CTR=${JSON.stringify(C_CTR)};
 let data=null, pfilter='on';
+// 清單排序：預設與後端一致（CTR 由高到低），點表頭可改
+let sortKey='ctr', sortDir='desc';
+const SORT_LABEL={imp:'曝光',click:'點擊',ctr:'CTR',spend:'花費'};
 let selectedStart='', selectedEnd='', draftStart='', draftEnd='', calendarBase=null, pickingEnd=false;
 const $=(s)=>document.querySelector(s);
 const nf=(n,d=0)=>Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -242,8 +251,34 @@ function render(){
   $('#warn').innerHTML = (data.warnings&&data.warnings.length)
     ? '<div class="warn"><b>提醒</b><ul>'+data.warnings.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul></div>' : '';
 
+  renderTable();
+  drawCharts();
+}
+
+// 排序：CTR 可能是 null（無曝光算不出來，UI 顯示「—」）——升冪降冪都讓它沉底，
+// 不然按升冪時整片「—」會佔在最前面，看不到真正最低的那幾檔。
+function sortProducts(list){
+  const dir=sortDir==='asc'?1:-1;
+  return list.slice().sort((a,b)=>{
+    const x=a[sortKey], y=b[sortKey];
+    if(x==null&&y==null) return 0;
+    if(x==null) return 1;
+    if(y==null) return -1;
+    return (x-y)*dir || b.spend-a.spend || String(a.productId).localeCompare(String(b.productId));
+  });
+}
+
+function renderTable(){
+  [...$('#tbl').querySelectorAll('th.sort')].forEach(th=>{
+    const on=th.dataset.sort===sortKey;
+    th.classList.toggle('on',on);
+    th.setAttribute('aria-sort',on?(sortDir==='asc'?'ascending':'descending'):'none');
+    th.querySelector('.ar').textContent=on?(sortDir==='asc'?'▲':'▼'):'';
+  });
+  $('#psort').textContent='· 依'+SORT_LABEL[sortKey]+(sortDir==='desc'?' 由高到低':' 由低到高');
+
   const tb=$('#tbody'); tb.innerHTML='';
-  const shown=data.products.filter(p=>pfilter==='all'||(pfilter==='on'?p.active:!p.active));
+  const shown=sortProducts(data.products.filter(p=>pfilter==='all'||(pfilter==='on'?p.active:!p.active)));
   for(const p of shown){
     const tr=document.createElement('tr');
     tr.innerHTML=
@@ -257,7 +292,6 @@ function render(){
     tb.appendChild(tr);
   }
   if(!shown.length) tb.innerHTML='<tr><td colspan="9" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
-  drawCharts();
 }
 
 function statusPill(p){
@@ -463,6 +497,12 @@ async function loadLogs(){
   }catch(e){ $('#logs').innerHTML='<span class="muted">讀取失敗：'+esc(e.message)+'</span>'; }
 }
 
+$('#tbl').querySelector('thead').addEventListener('click',(e)=>{
+  const th=e.target.closest('th.sort'); if(!th||!data) return;
+  if(th.dataset.sort===sortKey) sortDir=sortDir==='desc'?'asc':'desc';
+  else { sortKey=th.dataset.sort; sortDir='desc'; }
+  renderTable();
+});
 $('#pfilter').addEventListener('click',(e)=>{
   const b=e.target.closest('button'); if(!b) return;
   [...$('#pfilter').children].forEach(x=>x.classList.toggle('on',x===b));
