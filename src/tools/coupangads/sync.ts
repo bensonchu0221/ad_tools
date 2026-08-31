@@ -28,6 +28,7 @@ import {
   planRotation, titleOf, descOf, CPC, CAMPAIGN_NAME, IMAGE_SIZE, aliasOf, type GroupView,
 } from './plan.js';
 import { getDailyBudget } from './settings.js';
+import { approveOwnCreatives, reviewConfigured, type ReviewResult } from './review.js';
 
 export const ACCOUNT_EMAIL = process.env.COUPANG_R_EMAIL ?? 'benson@popin.cc';
 export const ACCOUNT_ID = process.env.COUPANG_R_USER_ID ?? '10222';
@@ -54,6 +55,8 @@ export interface SyncResult {
   budgetPerGroup: number;
   activeCount: number;
   needReview: { productId: string; groupId: number; reason: '改文案' | '換素材' | '新建' }[];
+  /** 自動審核結果（沒設定 console 帳密時 configured=false，等於這功能沒開）。 */
+  review: ReviewResult;
   errors: string[];
   elapsedMs: number;
 }
@@ -124,7 +127,8 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     textUpdated: plan.retext.length, reactivated: plan.reactivate.length,
     created: plan.create.length, paused: plan.pause.length, failed: 0,
     budgetPerGroup: budget, activeCount: plan.activeCount,
-    needReview: [], errors, elapsedMs: Date.now() - t0,
+    needReview: [], review: { approved: 0, skipped: 0, batches: 0, errors: [], configured: reviewConfigured() },
+    errors, elapsedMs: Date.now() - t0,
   };
   if (dryRun) return base;
 
@@ -244,14 +248,23 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     catch (e: any) { errors.push(`campaign 預算校正失敗：${e.message}`); }
   }
 
-  const result: SyncResult = { ...base, failed: errors.length, needReview, errors, elapsedMs: Date.now() - t0 };
+  // 7) 自動審核：只審**這次真的被改動到**的那幾檔，而且 cr_id 一律從 coupang_slots 查
+  //    （審核帳號看得到別的廣告主的待審素材，範圍必須由來源鎖死，見 review.ts 檔頭）。
+  //    審核失敗不算同步失敗——廣告都已經改好了，人工補審即可。
+  const review = await approveOwnCreatives(needReview.map((n) => n.groupId));
+  if (review.errors.length) errors.push(...review.errors);
+
+  const result: SyncResult = { ...base, failed: errors.length, needReview, review, errors, elapsedMs: Date.now() - t0 };
   await insertCoupangSyncRun({
     trigger: opts.trigger ?? 'manual',
     recoCount: result.recoCount, unchanged: result.unchanged, reimaged: result.reimaged,
     textUpdated: result.textUpdated,
     reactivated: result.reactivated, created: result.created, paused: result.paused, failed: result.failed,
     budgetPerGroup: budget, elapsedMs: result.elapsedMs,
-    message: errors.length ? errors.slice(0, 5).join('；') : null,
+    message: [
+      review.configured && review.approved ? `自動審核 ${review.approved} 檔` : '',
+      errors.length ? errors.slice(0, 5).join('；') : '',
+    ].filter(Boolean).join('；') || null,
   });
   return result;
 }

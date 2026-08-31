@@ -28,6 +28,7 @@ export function summarize(r: SyncResult): string {
     r.created ? '新開 ' + r.created : '',
     r.paused ? '暫停 ' + r.paused : '',
     r.failed ? '失敗 ' + r.failed : '',
+    r.review?.approved ? '自動審核 ' + r.review.approved : '',
     '在跑 ' + r.activeCount + ' 檔／每檔 ' + r.budgetPerGroup + ' 元',
     (r.elapsedMs / 1000).toFixed(1) + 's',
   ].filter(Boolean);
