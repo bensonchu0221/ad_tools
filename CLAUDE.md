@@ -4,10 +4,11 @@ popin 內部工具集（取代舊 dctool）。
 - tool#1＝廣告預覽：在「真實媒體文章頁」的 popin 廣告位換上廣告主素材後供 AM 截圖，取代舊 PPT 產出。
 - tool#2＝整合週報（原 D&R 週報）：整合 Discovery（D）+ Rixbee（R）+ MGID（M）三平台報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device 七工作表），取代舊 weeklyreport。2026-07-11 併入 MGID、改名整合週報。
 - tool#3＝AdStream（廣告凝視者）：多 D／R／MGID 帳戶 bulk 原始報表定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw；另有 integrated／device_summary 整合分頁。
-- tool#4＝資源看板（GCP Watch）：GCP 專案 popinpoc1 的 Memorystore Redis／Cloud SQL 用量即時監看，唯讀 Cloud Monitoring。2026-08-17 建立（起因：Redis 用滿導致爬蟲寫不進去，事後才發現）。
+- tool#4＝GCP 資源（GCP Watch）：GCP 專案 popinpoc1 的 Memorystore Redis／Cloud SQL 用量即時監看，唯讀 Cloud Monitoring。2026-08-17 建立（起因：Redis 用滿導致爬蟲寫不進去，事後才發現）。2026-09-01 用戶可見名稱由「資源看板」改為「GCP 資源」。
 - tool#5＝MGID 媒體報表：廣告主角度看各媒體（source）成效。排程把 `day×source` raw 寫入 `mgid_source_raw`，頁面讀庫組成 MSN 合併／折線／堆積／合計／每日鑽取。不即時打 API。設計 `docs/superpowers/specs/2026-08-24-mgid-source-report-design.md`。
 - tool#6＝酷澎聯盟投放：Coupang Partners 聯盟商品（reco）自動上架到 R 平台帳戶 10222 投放，看板即時對照聯盟佣金與廣告花費。2026-08-25 建立，**零資料表**（對映靠命名規則存在 R 上、報表即時打 API、執行紀錄靠 Cloud Logging）。
 - tool#7＝FUI 面板（`/tools/fuidash`）：**視覺語言實驗頁，全部是合成假資料**，不接任何後端。2026-08-27 建立，起因是想把科幻片 HUD 那套「資訊密度＋發光訊號」在專案裡真的做一次。不上首頁導覽列（比照 `adstream-lab`），只走直接網址。
+- tool#8＝D1 影音報表（`/tools/d1videoad`）：D1 平台**影音廣告**的曝光／點擊／25-50-75%／完整播放報表，含折線圖、campaign 表格與 Excel 匯出。2026-09-01 建立，**零資料表、零排程**（清單即時查 Firestore、成效即時打 Action4）。**D 平台報表 API 完全拿不到影音**，見下。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
@@ -69,10 +70,11 @@ popin 內部工具集（取代舊 dctool）。
 - 重置同步進度＝刪除設定重建（`updateBulkConfig` 不動 `last_synced_date`）
 - 驗證：`poc/probe_adstream_bulk.mts`（D 80008 根因＋切段）；R 欄位用 `fetchReport(super, userIds:[])` probe 鎖定
 
-## 資源看板核心（tool#4，`/tools/gcpwatch`，`src/tools/gcpwatch/`）
+## GCP 資源核心（tool#4，`/tools/gcpwatch`，`src/tools/gcpwatch/`）
 - 目的：**記憶體爆掉前先看得到**。起因是 Redis 用滿→爬蟲寫不進去，事後才發現。純看板、**刻意不做告警**（先把數字看得到，真有需要再加 cron+通知）
 - 分層：`core/monitoring.ts`（Cloud Monitoring v3 唯讀封裝，走 ADC 同 gcs.ts）→ `collect.ts`（清單 API＋指標，組 Snapshot）→ `view.ts`（純函式轉畫面模型 VM）→ `page.ts`（Slot Board 外殼，前端 JS 只把 VM 塞進 DOM）→ `route.ts`。**所有判讀/格式化/sparkline 幾何都在 view/metrics（TS 純函式），前端不含業務邏輯**＝首屏渲染與 60 秒輪詢共用同一份邏輯、可離線驗證
-- 監看對象：Redis 3 台（ad-engine-redis 2GB／crawler-cache 4GB／newsscope 12GB）＋ Cloud SQL 2 台（internal-tool db-g1-small、popin-audience-center）。清單走 Memorystore Admin API `instances.list`(locations `-`)／`sqladmin.instances.list`，**scope 用 `cloud-platform.read-only`**（實測夠）
+- 監看對象：Redis 3 台（ad-engine-redis **4GB**（2026-09-01 由 2GB 升）／crawler-cache 4GB／newsscope 12GB）＋ Cloud SQL 2 台（internal-tool db-g1-small、popin-audience-center）。清單走 Memorystore Admin API `instances.list`(locations `-`)／`sqladmin.instances.list`，**scope 用 `cloud-platform.read-only`**（實測夠）
+- **改規格為什麼重整不會立刻變**：卡片規格 GB 來自 Memorystore 清單的 `memorySizeGb`＝**當下已生效容量**，scale 期間 `state=UPDATING`、完成前仍是舊 GB（2→4 大約數分鐘，跟 Console 顯示的目標容量不同）。使用中／上限與使用率來自 Cloud Monitoring；即時值對齊 60 秒（2026-09-01 由 10 分鐘改掉，舊對齊會讓改完規格還卡在上一個 10 分鐘桶）。Monitoring 指標本身還有 1～3 分鐘 ingest 延遲。後端快取 20 秒；手動「重新整理」帶 `?fresh=1` 跳過。
 - **關鍵判讀（這次事故的根因）**：Memorystore 未自訂 `maxmemory-policy` 時＝官方預設 **volatile-lru**，只淘汰「有 TTL」的 key；沒設 TTL 的 key 塞滿記憶體時 Redis **無 key 可逐出 → 寫入被拒（OOM）**，而此時 `evicted_keys` 仍是 0 ⇒ **只看逐出數會完全漏判**。故卡片同時顯示使用率＋`keyspace/keys` vs `keys_with_expiration` 算出的「無 TTL 佔比」（≥20% 且用量高就出 ▲ 提示）。三台目前都是 volatile-lru 未自訂，但無 TTL 佔比 ≤0.07%（＝TTL 有好好設）
 - **指標型別務必配對正確的對齊方式**（踩錯就是靜默錯值）：`stats/memory/usage_ratio|usage|maxmemory|system_memory_usage_ratio|cache_hit_ratio`、`clients/connected`、`keyspace/keys(_with_expiration)` 是 GAUGE→ALIGN_MEAN；`stats/evicted_keys`／`stats/reject_connections_count` 是 **DELTA→ALIGN_SUM**（24h 累計）；`stats/cpu_utilization` 是 **DELTA 秒數→ALIGN_RATE**（回 vCPU 數，且有 space/relationship 四條 label 組合 → 必須 `crossSeriesReducer=REDUCE_SUM` + `groupByFields=resource.instance_id` 合併）。Cloud SQL 用 `database/{memory,cpu,disk}/utilization`＋quota/usage/`network/connections`（Postgres 那台不吐 connections＝顯示 —，非漏抓）
 - 門檻：<80% 正常、80~90% 偏高、≥90% 危險。sparkline y 軸固定 0~100%＝斜率誠實，hover 有十字線與 tooltip
@@ -83,11 +85,11 @@ popin 內部工具集（取代舊 dctool）。
 - **⚠️ sparkline 的 SVG 圓會被拉成橢圓**：`viewBox` 是 `preserveAspectRatio="none"` 橫向拉寬的（280→實際 ~450px），`<circle>` 跟著非等比縮放。「現在」點與 hover 點改用 CSS 定位的 `div`（`.plot .pt`，left/top 用百分比）才是正圓；十字線是垂直線、`vector-effect:non-scaling-stroke` 不受影響
 - 示波器不再疊危險帶色塊；改掃描光帶（顏色＝折線 `currentColor`）從上掃到下
 - 視覺檢視 `poc/preview_gcpwatch.mts`：假資料（正常／偏高／危險／單支指標 null 都有）起 :4599 渲染真實頁面並代供 `/fonts` 與 `/api/status`（自架字體與輪詢路徑都要 http 才驗得到）
-- 成本：Monitoring **讀取** API $0.50/百萬條 time series、每月前 100 萬條免費（官方 pricing 查證），一次刷新約 50 條 ⇒ 實質 $0。後端 20 秒共用快取（多人同開只抓一次）＋前端分頁切到背景就停止輪詢
+- 成本：Monitoring **讀取** API $0.50/百萬條 time series、每月前 100 萬條免費（官方 pricing 查證），一次刷新約 50 條 ⇒ 實質 $0。後端 20 秒共用快取（多人同開只抓一次；手動刷新 `?fresh=1` 跳過）＋前端分頁切到背景就停止輪詢
 - 權限：Cloud Run SA 已有 `roles/editor`（含 monitoring 讀取）⇒ **不需改 IAM**；本機用 gcloud ADC
 - **⚠️ scope 必須用 `cloud-platform`，別改成看起來更小的 `*.read-only`**（2026-08-18 上線首發踩到）：Memorystore（redis.googleapis.com）discovery 只接受 `redis.read-only`／`cloud-platform`，SQL Admin 只接受 `sqlservice.admin`／`cloud-platform`，都**不收 `cloud-platform.read-only`** → 線上兩支清單 API 回 `Request had insufficient authentication scopes.`（整頁沒有卡片、只剩紅色橫幅）。**本機完全不會重現**：gcloud 使用者憑證會忽略程式指定的 scope，只有 Cloud Run 的 SA token 才照 scope 發 ⇒ 這類問題只有部署後才看得到。三支 API（monitoring/redis/sqladmin）都列了 `cloud-platform`，故 `core/monitoring.ts` 匯出單一 `gcpAuth` 共用
 - 容錯：單支指標失敗→該欄位 null（UI 顯示 —）＋訊息進頁面紅色橫幅；清單 API 失敗才整區空；整包失敗仍渲染頁面只顯示錯誤
-- 驗證 `poc/verify_gcpwatch.mts`：111 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照／頁面字串契約）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
+- 驗證 `poc/verify_gcpwatch.mts`：117 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照／頁面字串契約含 GCP 資源改名與 fresh=1）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
 
 ## 酷澎聯盟投放核心（tool#6，`/tools/coupangads`，`src/tools/coupangads/`）
 - 目的：把 Coupang 聯盟商品變成 R 平台廣告去買流量、賺聯盟佣金。**客戶指定只用 Coupang `reco` 端點**。分層：`core/coupang.ts`（Coupang API）＋`core/rixbee_admin.ts`（R **管理** API，與報表側 `core/rixbee.ts` 完全兩套）→ `plan.ts`（輪替決策純函式）→ `sync.ts`（執行）→ `collect.ts`（成效收集）→ `stats.ts`／`page.ts`／`route.ts`
@@ -185,6 +187,37 @@ popin 內部工具集（取代舊 dctool）。
 - **假資料的取捨**：事件流的代號用專案真實階段名（`D_BULK_FETCH`／`M_TEASER_STAT`／`ZERO_CLICK_FILL`…）讓畫面像這個專案在跑；mainframe **離線台數固定為 2**（純機率抽樣會抽出「六台掛五台」的死機房畫面，那是隨機的正常結果但不是這頁想講的狀態）
 - 視覺檢視 `poc/preview_fuidash.mts`（起 :4601 並代供 `/fonts`，自架字體要 http 才載得到）；驗證 `poc/verify_fuidash.mts` 73 項全離線（PRNG 可重現／聲紋值域與兩份實作等值／假資料結構／頁面字串契約含 SIMULATED 標記）
 
+## D1 影音報表核心（tool#8，`/tools/d1videoad`，`src/tools/d1videoad/`）
+- 目的：D1 系統兩種廣告型態（廣編／影音）中的**影音**，做一份 AM 自己查得到的報表。分層：`core/firestore_d1.ts`（campaign 清單/名稱/影音旗標）＋`core/action4.ts`（成效）→ `metrics.ts`（口徑純函式）→ `report.ts`（組裝）→ `xlsx.ts`／`page.ts`／`route.ts`
+- **⚠️⚠️ D 平台報表 API（s2s.popin.cc）一格影音資料都沒有**，別再去那邊找。三重實證（2026-09-01）：①掃 `nexus.d_tokens` **全部 242 個帳號、8302 個 campaign** 的 `campaign/lists`，`type` **100% 是 `native`**、0 個 `video`，`charge_type` 只有 cpc/ocpc/max_cv（`poc/probe_d_video_types.mts`）；②官方文件 mhtml 全文解碼後搜 `video/play/quartile/播放`，**沒有任何播放指標**（只有 `cv_complete_registration`＝表單完成註冊，不同東西）；③文件 §3.4 明寫 Video Ads/Wave 的 campaign 打 date_reporting 會報錯，根因就在 D1 原始碼 `popin-discovery-v2/app/Http/Controllers/Api/Campaign.php:607` 的 `if (is_wave || is_video) return 80000 'not supported campaign.'`（`CampaignModel.php:70` 定義 `is_video = type === 'video'`）
+- **資料源 ①：Action4（成效）** `https://action4.popin.cc/popin-action/?op=article&nid={campaignId}&country=&start=YYYYMMDD&stop=YYYYMMDD&categories=ca_all`
+  - **公網可直接打、無認證**（→ `df-gw.bdjp.io` / 202.232.100.210，HTTP 與 HTTPS 皆 200）。舊筆記寫「內網、要 `ssh popin`」是過時的。⚠️ **Cloud Run 出口 IP 是否被那個 gateway 放行還沒實測**，這是上線第一件要驗的事
+  - **⚠️ 區間上限 12 個月**（D1 `apiUtils.php:115` 寫死）。超過會**靜默回 `{"result":1}` 不帶任何日期、不報錯** → 會被誤讀成「這段沒投放」。`exceedsAction4Window()` 在送出前就擋掉
+  - **⚠️ 一定要帶 `categories=ca_all`**，否則回應塞滿 `ca_`/`cc_`/`ab_` 分類子表。實測同一支 campaign 12 個月：11,379 → **1,425 bytes（省 87%）**
+  - **只回「有量的日子」**，沒投放的日期整個不出現（不是回 0）⇒ **最小的日期鍵就是實際開跑日**，輸入項(3)「預設開跑第一天」不必另外查走期，一次呼叫同時拿到
+  - 效能實測：單支 campaign 12 個月 0.28~0.50s；18 支併發 6 跑完 **約 1.0 秒**
+- **資料源 ②：Firestore `article-action` 的 `campaign` collection（清單/名稱/旗標）**
+  - 走 **MongoDB 相容協定**（Native API 已停用）。端點 `<uuid>.asia-northeast2.firestore.goog:443`，DNS → Google 公網 IP、憑證正常；認證是 **URI 內嵌的 SCRAM-SHA-256 帳密、不是 GCP IAM** ⇒ 跨專案無妨，**Cloud Run 一般對外網路即可，免 VPC connector、免改 IAM**。連線字串在 env `D1_FIRESTORE_URI`（Secret Manager `ad-tools-d1videoad-firestore-uri`，已進 cloudbuild），值出自 `popin-discovery-jp/discovery-utils/.../FirestoreMongoConfig.java` 的 `putDbUri(FirestoreDbId.article_action, ...)`
+  - **⚠️⚠️ `video` / `vertical_video` / `deleted` 是真正的 boolean，不是字串 `"True"`**。用 `'True'` 查會**靜默回 0 筆**（踩過：把文件值 `str()` 過來看就會誤以為是字串）。索引只有 `country_id`/`purpose`/`account`/`wave`/`renewal`/`deleted`，沒有 `video`
+  - 2026-09-01 盤點：全球影音 campaign 1,310、**台灣 393**（其中 `deleted` 87 ⇒ 現存 306、直式 53）、**涉及 169 個帳戶**，單帳戶最多 18 支。查詢 0.3~0.4s ⇒ **不需要排程預存**
+  - ⚠️ 這張表只是「設定殼」：**沒有預算/開關/走期**（在 Redis 與 D1 MySQL，都在內網 Cloud Run 到不了）。走期改由 Action4 的最小日期推得
+- **⚠️⚠️ 口徑：只算 mobile，PC 一律不計**（2026-09-01 與使用者確認）。D1 後台 `apiUtils.php arrangeStats()` 就是寫死的（`video_imp = mobile_video_imp`，完全沒碰 `pc_video_*`），前端 lib6 的 video 也只出 mobile。Action4 有回 `pc_video_*`（實測約佔 1.7% 曝光），加進來就跟 AM 在後台看到的數字對不起來。欄位對映照抄 `campaign_ads_v2.blade.php:1077-1116`：
+  | 畫面欄位 | Action4 欄位 |
+  |---|---|
+  | 收費曝光 | `mobile_video_imp + mobile_video_vertical_imp`（**不含 `imp_over`**＝超預算未計費） |
+  | 點擊數 | `mobile_video_link` |
+  | 點擊率 | 點擊 ÷ 收費曝光 |
+  | 金額 | `(charge.mobile_video_imp + charge.mobile_video_vertical_imp) / **1000**` |
+  | 25/50/75%播放 | `mobile_video_25 / _50 / _75` |
+  | 已播放數 | `mobile_video_100`（完整播放） |
+  | 已播放率 | 已播放數 ÷ 收費曝光 |
+  - **除數 1000 的錨**：charge 存的是「CPM×曝光」。實測 campaign `6a943dd0…` 2026-08-31：1,094,760÷1000＝1,094.76 元，÷15,205 曝光×1000＝**CPM 72.00 整數**。除數錯就不會是整數 —— 驗證腳本用這條當斷言
+  - 比率無曝光時回 **null 不回 0**（UI 顯示 —、排序沉底、Excel 寫 '—'），沿用 coupangads 的 `ctrOf` 慣例
+- **折線圖 X 軸必須補齊成連續時間軸**：Action4 只回有量的日子，直接畫會讓 X 軸變成「有量日的序號」——實測 12 個月的區間刻度會從 08-28 直接跳到 09-17，看起來像連續其實不是。`fillDaily()` 補齊 sd~ed 每一天、缺的填 0 並標 `hasData:false`，tooltip 才分得出「零曝光」與「沒投放」
+- **兩個匯出按鈕共用同一支 `/export.xlsx`**（2026-09-01 與使用者確認）：都送同一組輸入項參數、後端重跑一次 `buildReport` 再產檔。抓取只要 1~2 秒，重跑成本可忽略，換來畫面與 Excel 數字保證同源。Excel 兩張表（〈影音成效〉campaign 列＋合計、〈逐日〉），檔名 `d1_videoad_{account}_{sd}_{ed}.xlsx`
+- campaign 多選**預設不含已刪除**、可勾選顯示（393 支裡 87 支 `deleted`，它們被刪之前是有數字的）
+- 驗證：`poc/verify_d1videoad.mts` **71 項全離線**（真實 8/31 語料回歸／PC 不得滲入／vertical 相加／null 比率／12 個月邊界／日期工具／Excel 欄序與檔名），已做 **6 個變異測試**（把 PC 加進曝光、金額不除 1000、無曝光 ctr 回 0、不丟全 0 日、vertical 沒加、上限誤植 13 個月）**全部被抓到**。端到端 `poc/probe_d1videoad.mts`、視覺檢視 `poc/_shot_d1videoad.mts`（Playwright 走完整流程截圖）
+
 ## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
 - **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
 - **D 分頁**：沿用原語意——鏡像列（`source='dctool'`）唯讀、自建列（`adtools`）受保護可編輯／刪除；KPI 3 磚（總／自建／鏡像）＋來源篩選 chip。走 `store.ts addToken/updateToken/deleteToken`
@@ -214,6 +247,7 @@ popin 內部工具集（取代舊 dctool）。
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 待辦
+- **D1 影音報表（tool#8，2026-09-01）本機全綠、線上待驗**：本機 71 項純函式＋6 個變異測試全過，真 Firestore＋真 Action4 端到端跑過（18 支 campaign 1.0s、合計反推 CPM 72.00 整數、Excel 與畫面逐格相同、Playwright 無 console 錯誤、1440 寬無橫向溢出）。**線上待驗**：①**Cloud Run 出口 IP 打不打得到 `action4.popin.cc`**（本機是辦公室/家裡 IP，那台是 `df-gw.bdjp.io` 閘道，很可能有白名單）——這是最可能爆的一項；②Secret `ad-tools-d1videoad-firestore-uri` **2026-09-01 已建好**（Cloud Run SA 在專案層已有 `roles/secretmanager.admin`，不必另外綁 per-secret IAM）；③線上連 Firestore 相容端點通不通（走 SCRAM 帳密非 IAM，理論上與本機無異）；④帳戶下拉 169 個、選一個帳戶後 campaign 多選帶得出來；⑤兩個匯出按鈕下載的 xlsx 一致。**⚠️ 已知限制**：Action4 只保留 12 個月，要看更久的歷史才需要自己存表（屆時表名 `d1_videoad_daily`、排程 `d1-videoad-sync`，使用者指定前綴 `d1_videoad_`）。
 - **酷澎自動審核（tool#6，2026-08-31）本機端到端已過、線上待驗**：本機 40 項純函式＋真登入＋真審核都過（20 檔 `summary_status` 3→4）。**線上待驗**：①部署後 secrets `rixbee-console-account`／`rixbee-console-password` 有掛上（`review.configured` 要是 true）；②明天 09:50 排程跑完，執行紀錄的 message 出現「自動審核 N 檔」且**不必人工按**；③console session 在 Cloud Run 上能正常登入（本機與線上都是 email/密碼，理論上無差異，但沒實跑過）；④哪天 console 改版換掉 `x-version`／簽章金鑰時，會整片 `code -1`——屆時重抓 bundle 的 `generateSignature` 更新常數即可。**⚠️ 未解**：`getCrReviewList` 參數還沒試出來（回 `code -1`），現行設計不需要它；哪天要做「每小時掃一次補審」才需要解。
 - **酷澎 Siri 捷徑 API（tool#6，2026-08-28）本機全綠、線上待驗**：本機 82 項純函式＋真 DB／真 R／真 Gemini 端到端都過（含預算來回寫入與冪等）。**線上待驗**：①部署後三支端點用線上金鑰打得通（Secret `coupang-siri-key` 已建、已進 cloudbuild `--update-secrets`）；②**線上 SA 打 Vertex Gemini 是否真的通**——本機是使用者憑證，scope 差異只有線上才看得到（同 gcpwatch／bq 那個坑），SA 已有 `roles/aiplatform.user` 理論上沒問題；③在 iPhone 上把三個捷徑建起來、Siri 唸得出 `text`；④用 Siri 真的改一次日預算後，隔天 09:50 的同步要沿用新值（不會被改回 2500）。
 - **酷澎寫 BigQuery（tool#6，2026-08-28）已上線，寫測試表 `_2`**：①~③ 2026-08-28 已完成——部署 `0b40809`、線上 dry run 與真寫都 200（`{rows:9, impressions:674829, clicks:3752, spend:3748.92}`，先手動清掉 `_2` 我們的 9 列再打端點、回查確認是線上寫回去的 ⇒ **線上 SA 打 BigQuery 通了**，`cloud-platform` scope 正確）；Cloud Scheduler `coupangads-bq`（`30 12 * * *` Asia/Taipei、deadline 300s）已建，⚠️ 建立當天 12:30 那次觸發拿到 404（狀態碼 5）是正常的——那時 Cloud Build 12:32 才跑完，下次觸發 8/29 12:30。
@@ -223,7 +257,7 @@ popin 內部工具集（取代舊 dctool）。
 - **FUI 面板（tool#7，2026-08-27）本機已驗、線上待驗**：1920×1080 實測無捲軸／面板零溢出／六個 canvas 皆有尺寸／兩支新字體載入成功、console 無錯。**待驗**：①部署後 `/tools/fuidash` 進得去（走 OAuth 守衛，非白名單路徑）；②新字體 `chakra-petch-*.woff2`／`share-tech-mono-400.woff2` 有隨映像檔進到 `public/fonts/`；③**<1180px 的窄版堆疊排版尚未實際看過**（chrome resize 對最大化視窗沒生效）；④長時間開著看有無記憶體/耗電問題（rAF 常駐）。
 - **MGID 媒體報表（tool#5，2026-08-25）本機已驗、線上待驗**：頁面 Slot Board、compose 純函式全過、里山十二食回補 90 天 raw 可看圖表。**線上待驗**：①部署後 `/tools/mgidsource` 進得去；②Cloud Scheduler `mgid-source-daily`（台北 11:00）與 `mgid-source-worker`（每分鐘）要新建；③首次各帳 90 天回補跑完、清單帳號不再顯示尚未同步；④LA 時區兩帳（859152／859153）日期不錯日。
 - **酷澎聯盟投放（tool#6）2026-08-27 移除 Coupang 報表＋改存裝置維度，線上待驗**：①部署後第一次 `/tools/coupangads/collect/cron` 有沒有成功（線上 `ensureCoupangSchema` 會做改名 legacy＋建新表的遷移，只有第一次會跑）；②看板三磚 KPI 與商品表少了三欄後版面正常；③「下載 raw data (CSV)」拿到的是含 `device` 欄的長格式；④每天 09:50 輪替是否真的只動該動的（看「同步紀錄」的「不動 N」）；⑤使用者 10:00 審核後 `summary_status` 從 3 變成什麼（會確定審核狀態對照表）。⚠️ **本機已於 2026-08-27 用真 R API＋真 DB 跑過整段**（遷移→收集→legacy 回填→逐日與 R 全等 149,173／60,189／289,523），線上那次遷移應是 no-op 只差把新列寫進去。舊事項：**（2026-08-25）本機全鏈路已真跑**：R 帳戶 10222 已真的建好 Campaign 194431＋20 個 AdGroup／素材／Creative（全 Active、日預算各 25 總和 500、CPC 1、落地頁 20/20 帶對 `af_siteid`），看板本機渲染正常（KPI／折線／商品表縮圖）。**線上待驗**：①部署後 `/tools/coupangads` 進得去、Coupang 金鑰 secret 有掛上；②Cloud Scheduler `coupangads-sync` 真的每 30 分鐘跑成功（看「同步紀錄」區塊有沒有列，本機執行不會進 Cloud Logging）；③**線上 SA 讀 Cloud Logging 是否真的通**（本機是使用者憑證，scope 差異只有線上才看得到，同 gcpwatch 那個坑）；④開始有曝光後 R 報表型別偵測要能判出（現在 0 資料回 null）、花費與 ROI 有數字（⑤原「有人下單後確認 orders/commission 的 subId 分得出每商品」已隨 Coupang 報表移除而作廢）
-- **資源看板（tool#4，2026-08-17）本機全綠、線上待驗**：本機真 API 端到端過（三台 Redis／兩台 SQL 都有值、144 點趨勢、hover 正常、console 無錯）。**線上待驗**：①Cloud Run SA 打 Memorystore／sqladmin／Monitoring 三支 API 是否都通（本機是使用者憑證，線上是 SA；理論上 roles/editor 夠，但沒實跑過）；②頁面 60 秒自動更新有沒有真的動；③首頁版位卡進得去。**後續可加**：告警（Cloud Scheduler 每小時檢查 + Slack/Email，使用者這次選純看板先不做）、Cloud Run 5xx（第一版刻意不收）
+- **GCP 資源（tool#4，2026-08-17）本機全綠、線上待驗**：本機真 API 端到端過（三台 Redis／兩台 SQL 都有值、144 點趨勢、hover 正常、console 無錯）。**線上待驗**：①Cloud Run SA 打 Memorystore／sqladmin／Monitoring 三支 API 是否都通（本機是使用者憑證，線上是 SA；理論上 roles/editor 夠，但沒實跑過）；②頁面 60 秒自動更新有沒有真的動；③首頁版位卡進得去。**後續可加**：告警（Cloud Scheduler 每小時檢查 + Slack/Email，使用者這次選純看板先不做）、Cloud Run 5xx（第一版刻意不收）
 - **週報隨機調整模式（2026-07-22）本機全綠、線上端到端待驗**：離線 8 支迴歸全過（`verify_weekly_adjust`/`split_equiv`/`preview` 及既有 5 支未回歸）＋自包含頁面視覺檢視（CPC/CTR 落在區間、裝置 Tablet/Others 零花費維持 0、Raw 寬表橫向捲動）；DB 冒煙過（awaiting_adjustment/adjust_json/requeue）。**線上待驗**：①表單勾「隨機調整」跑一個小帳號短區間 → cron 觸發後佇列顯示「待調整」；②進調整頁填 CPC/CTR 生成預覽 → 7 表數字合理、Raw spend 與抓取一致；③「重抽」數字變、同參數同 seed 重現；④「產出」下載 xlsx 與預覽逐格一致、`weekly_snapshots` 無新列；⑤「再調整」覆寫同檔；⑥「重新抓取」回佇列重跑、adjust_json 預填保留；⑦刪 GCS `weekly/{id}/raw.json` 模擬逾期 → 預覽報「請按重新抓取」。⚠️ bucket lifecycle 需確認有「weekly/ 前綴 14 天」規則涵蓋 raw.json
 - **AdStream MGID 串接（2026-07-10）本機資料層已驗（真 API 抓取＋欄位對齊＋cv/imp 守恆全過），線上端到端待驗**：①在設定加 MGID 帳號＋把 conv_interest/decision/buy 拖進 cv 桶 → 跑一次確認 `m_bulk_raw_data` 有 24 欄、`integrated` 出現 platform=M 列、`device_summary` MGID 裝置有併入；②清單「訊息」欄會顯示「MGID N 列（帳號:列數）」，`MGID 0 列`＝帳號無資料或 token 問題；③重抓昨天多來源下拉新增「只重抓 MGID」。注意 4A 兩帳號(默沙東/黑松)近期 0 投放屬正常
 - 選單裡 r_bulk_upload 連結是 placeholder

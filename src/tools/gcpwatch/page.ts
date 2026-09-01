@@ -1,4 +1,4 @@
-// 資源看板頁面（暗色儀表盤風格，外殼仍是共用的 sbui.ts sbPage）。
+// GCP 資源頁面（暗色儀表盤風格，外殼仍是共用的 sbui.ts sbPage）。
 // 首次渲染的資料以 window.__VM__ 內嵌（免第二趟往返），60 秒刷新走同一個 render()＝只有一份渲染邏輯。
 //
 // 視覺主張（只影響本頁；其他工具的 Slot Board 亮色不受影響）：
@@ -466,10 +466,11 @@ const RENDER_JS = `
   }
 
   var btn=document.getElementById('refresh'), busy=false;
-  function load(){
+  function load(fresh){
     if(busy) return; busy=true; btn.disabled=true; btn.textContent='讀取中…';
     setLink(true,'同步中');
-    fetch('${BASE_PATH}/api/status',{headers:{'Accept':'application/json'}})
+    // 手動刷新帶 fresh=1 跳過後端 20 秒快取；60 秒輪詢不帶（快取本來就過期）
+    fetch('${BASE_PATH}/api/status'+(fresh?'?fresh=1':''),{headers:{'Accept':'application/json'}})
       .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
       .then(function(vm){ render(vm); setLink(true,'正常'); })
       .catch(function(e){
@@ -481,7 +482,7 @@ const RENDER_JS = `
       .then(function(){ busy=false; btn.disabled=false; btn.textContent='重新整理';
         nextAt=Date.now()+REFRESH; tick(); });
   }
-  btn.onclick=load;
+  btn.onclick=function(){ load(true); };
 
   render(window.__VM__);
   first=false;
@@ -495,9 +496,9 @@ const RENDER_JS = `
 export function renderGcpWatch(vm: DashboardVM): string {
   const bootstrap = JSON.stringify(vm).replace(/</g, '\\u003c');
   const body = `
-    <div class="crumb"><a href="/">首頁</a> / 資源看板</div>
+    <div class="crumb"><a href="/">首頁</a> / GCP 資源</div>
     <div class="hd">
-      <h1>資源看板</h1>
+      <h1>GCP 資源</h1>
       <span class="tag">${vm.project.toUpperCase()} · ASIA-EAST1</span>
     </div>
     <p class="sub">Memorystore Redis 與 Cloud SQL 的即時用量。記憶體 80% 起偏高、90% 起危險；
@@ -521,6 +522,8 @@ export function renderGcpWatch(vm: DashboardVM): string {
     <div class="cards" id="sql"></div>
     <p class="note-cost">資料來源：Cloud Monitoring v3（唯讀）。一次更新約 50 條 time series，
       每月前 100 萬條免費 ⇒ 實質零成本；分頁切到背景時自動停止更新。<br>
+      卡片規格 GB 來自 Memorystore 清單（實例還在 UPDATING 時仍是舊容量，scale 完成才會變）；
+      使用中／上限與使用率來自 Cloud Monitoring，指標本身通常再慢 1～3 分鐘。<br>
       Redis 淘汰政策未自訂時＝Memorystore 預設 <b>volatile-lru</b>（官方文件），
       只淘汰有 TTL 的 key；沒設 TTL 的 key 塞滿記憶體時 Redis 無 key 可逐出 → 寫入被拒（OOM），
       而此時「逐出 key」仍是 0，所以本頁同時看使用率與無 TTL 佔比。</p>
@@ -528,7 +531,7 @@ export function renderGcpWatch(vm: DashboardVM): string {
     <div class="tip hidden" id="tip"></div>`;
 
   return sbPage({
-    title: '資源看板 · GCP Watch',
+    title: 'GCP 資源',
     active: 'gcpwatch',
     body,
     style: STYLE,

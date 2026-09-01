@@ -1,4 +1,4 @@
-// 資源看板的純函式層：門檻分級、數值格式化、sparkline 路徑、Redis 寫入風險判讀。
+// GCP 資源的純函式層：門檻分級、數值格式化、sparkline 路徑、Redis 寫入風險判讀。
 // 這裡不碰 API、不碰 DOM ⇒ 全部可用 poc/verify_gcpwatch.mts 離線驗證。
 import type { Point } from '../../core/monitoring.js';
 

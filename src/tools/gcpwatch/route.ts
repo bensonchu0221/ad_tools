@@ -1,4 +1,4 @@
-// 資源看板路由：頁面（內嵌首屏資料）＋ JSON 端點（前端 60 秒輪詢共用）。
+// GCP 資源路由：頁面（內嵌首屏資料）＋ JSON 端點（前端 60 秒輪詢共用）。
 import type { FastifyInstance } from 'fastify';
 import { collectSnapshot, type Snapshot } from './collect.js';
 import { renderGcpWatch, BASE_PATH } from './page.js';
@@ -11,9 +11,9 @@ const CACHE_MS = 20_000;
 let cache: { at: number; snap: Snapshot } | null = null;
 let inflight: Promise<Snapshot> | null = null;
 
-async function getSnapshot(): Promise<Snapshot> {
-  if (cache && Date.now() - cache.at < CACHE_MS) return cache.snap;
-  if (inflight) return inflight; // 同時間多個請求只抓一次
+async function getSnapshot(fresh = false): Promise<Snapshot> {
+  if (!fresh && cache && Date.now() - cache.at < CACHE_MS) return cache.snap;
+  if (inflight) return inflight; // 同時間多個請求只抓一次（含手動刷新碰上正在抓的）
   inflight = collectSnapshot()
     .then((snap) => {
       cache = { at: Date.now(), snap };
@@ -48,9 +48,11 @@ export async function registerGcpWatch(app: FastifyInstance): Promise<void> {
     reply.type('text/html').send(renderGcpWatch(toViewModel(snap)));
   });
 
-  app.get(`${BASE_PATH}/api/status`, async (_req, reply) => {
+  app.get(`${BASE_PATH}/api/status`, async (req, reply) => {
+    const q = req.query as { fresh?: string };
+    const fresh = q?.fresh === '1' || q?.fresh === 'true';
     try {
-      reply.send(toViewModel(await getSnapshot()));
+      reply.send(toViewModel(await getSnapshot(fresh)));
     } catch (e) {
       app.log.error({ err: String((e as any)?.message ?? e) }, 'gcpwatch status failed');
       reply.code(500).send({ error: String((e as any)?.message ?? e) });

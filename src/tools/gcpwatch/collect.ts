@@ -1,4 +1,4 @@
-// 資源看板的資料收集層：清單（Memorystore／Cloud SQL Admin API）＋ 指標（Cloud Monitoring）。
+// GCP 資源的資料收集層：清單（Memorystore／Cloud SQL Admin API）＋ 指標（Cloud Monitoring）。
 // 全走 ADC（同 gcs.ts）：線上 Cloud Run 用服務帳號（已有 roles/editor，含唯讀權限）、本機用 gcloud 憑證。
 // 容錯原則：每支指標各自 allSettled ⇒ 單支壞掉只讓該欄位變 null（UI 顯示 —），不整頁掛；
 //           清單 API 掛掉才會整區沒有卡片，錯誤訊息一律收進 errors 顯示在頁面橫幅。
@@ -12,9 +12,10 @@ const readAuth = gcpAuth;
 /** 24 小時趨勢：10 分鐘一點＝144 點（點數夠看出爬升、又不會讓 payload 變大） */
 const TREND_HOURS = 24;
 const TREND_STEP_SEC = 600;
-/** 只要最新值的指標：抓最近 1 小時、10 分鐘一點，取最後一點（避免剛好落在空窗） */
+/** 只要最新值：抓最近 1 小時、60 秒一點，取最後一點。
+ *  舊值 600 秒會讓改規格後的 maxmemory／使用率卡在上一個 10 分鐘桶，畫面上像「重整了還是舊容量」。 */
 const SPOT_HOURS = 1;
-const SPOT_STEP_SEC = 600;
+export const SPOT_STEP_SEC = 60;
 
 export interface RedisCard {
   id: string;
@@ -108,9 +109,11 @@ async function collectRedis(errors: string[]): Promise<RedisCard[]> {
   }
 
   const L = 'instance_id';
-  const [usage, usageBytes, maxmemory, systemRatio, hitRatio, cpu, clients, keys, keysTtl, evicted, rejected] =
+  const [usage, usageNow, usageBytes, maxmemory, systemRatio, hitRatio, cpu, clients, keys, keysTtl, evicted, rejected] =
     await Promise.all([
       metric(errors, 'Redis 記憶體使用率', trend('redis.googleapis.com/stats/memory/usage_ratio', L)),
+      // 主數字用 60 秒對齊的即時值；24h 折線仍走 10 分鐘桶（payload 才不會膨脹）
+      metric(errors, 'Redis 記憶體使用率（即時）', spot('redis.googleapis.com/stats/memory/usage_ratio', L, 'ALIGN_MEAN')),
       metric(errors, 'Redis 記憶體用量', spot('redis.googleapis.com/stats/memory/usage', L, 'ALIGN_MEAN')),
       metric(errors, 'Redis 記憶體上限', spot('redis.googleapis.com/stats/memory/maxmemory', L, 'ALIGN_MEAN')),
       metric(errors, 'Redis 系統記憶體', spot('redis.googleapis.com/stats/memory/system_memory_usage_ratio', L, 'ALIGN_MEAN')),
@@ -136,7 +139,7 @@ async function collectRedis(errors: string[]): Promise<RedisCard[]> {
       version: (inst.redisVersion ?? '').replace('REDIS_', 'Redis ').replace('_', '.'),
       policy: policyRaw ?? DEFAULT_POLICY,
       policyExplicit: !!policyRaw,
-      usageRatio: latest(usage.get(id)),
+      usageRatio: latest(usageNow.get(id)) ?? latest(usage.get(id)),
       usageBytes: latest(usageBytes.get(id)),
       maxmemory: latest(maxmemory.get(id)),
       systemRatio: latest(systemRatio.get(id)),
@@ -164,9 +167,10 @@ async function collectSql(errors: string[]): Promise<SqlCard[]> {
   }
 
   const L = 'database_id';
-  const [memRatio, memUsed, memQuota, cpuRatio, diskRatio, diskUsed, diskQuota, conns] =
+  const [memRatio, memNow, memUsed, memQuota, cpuRatio, diskRatio, diskUsed, diskQuota, conns] =
     await Promise.all([
       metric(errors, 'SQL 記憶體使用率', trend('cloudsql.googleapis.com/database/memory/utilization', L)),
+      metric(errors, 'SQL 記憶體使用率（即時）', spot('cloudsql.googleapis.com/database/memory/utilization', L, 'ALIGN_MEAN')),
       metric(errors, 'SQL 記憶體用量', spot('cloudsql.googleapis.com/database/memory/usage', L, 'ALIGN_MEAN')),
       metric(errors, 'SQL 記憶體上限', spot('cloudsql.googleapis.com/database/memory/quota', L, 'ALIGN_MEAN')),
       metric(errors, 'SQL CPU', spot('cloudsql.googleapis.com/database/cpu/utilization', L, 'ALIGN_MEAN')),
@@ -185,7 +189,7 @@ async function collectSql(errors: string[]): Promise<SqlCard[]> {
       tier: inst.settings?.tier ?? '',
       state: inst.state ?? '',
       version: inst.databaseVersion ?? '',
-      memoryRatio: latest(memRatio.get(id)),
+      memoryRatio: latest(memNow.get(id)) ?? latest(memRatio.get(id)),
       memoryUsed: latest(memUsed.get(id)),
       memoryQuota: latest(memQuota.get(id)),
       cpuRatio: latest(cpuRatio.get(id)),

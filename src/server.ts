@@ -17,6 +17,7 @@ import { registerFuiDash } from './tools/fuidash/route.js'; // tool#7 FUI 面板
 import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.js';
 import { registerMgidSource, BASE_PATH as MGIDSOURCE } from './tools/mgidsource/route.js';
 import { registerCoupangAds, BASE_PATH as COUPANGADS } from './tools/coupangads/route.js';
+import { registerD1VideoAd, BASE_PATH as D1VIDEOAD } from './tools/d1videoad/route.js';
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
@@ -37,15 +38,17 @@ const ICON = {
   chart: '<path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6"/><rect x="12" y="7" width="3" height="10"/><rect x="17" y="13" width="3" height="4"/>',
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
   gauge: '<path d="M22 12A10 10 0 1 0 2 12"/><path d="M12 12l5-3"/><circle cx="12" cy="12" r="1.6"/><path d="M2 12h3M19 12h3M12 4v1"/>',
-  bag: '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>'
+  bag: '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
+  play: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>'
 };
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
   { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 7 SHEETS' },
   { name: 'Report Hub', desc: '多 D／R／MGID 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' },
-  { name: '資源看板', desc: 'GCP Redis／Cloud SQL 用量即時監看，記憶體爆掉前先看到', href: GCPWATCH, icon: ICON.gauge, code: 'GCP WATCH', tag: 'MONITOR · LIVE' },
+  { name: 'GCP 資源', desc: 'GCP Redis／Cloud SQL 用量即時監看，記憶體爆掉前先看到', href: GCPWATCH, icon: ICON.gauge, code: 'GCP WATCH', tag: 'MONITOR · LIVE' },
   { name: 'MGID 媒體報表', desc: '廣告主角度看各媒體 source 成效，每日同步 raw', href: MGIDSOURCE, icon: ICON.chart, code: 'MGID SOURCE', tag: 'MEDIA · DAILY' },
-  { name: '酷澎聯盟投放', desc: 'Coupang 聯盟商品自動上架 R 平台投放，收益與花費即時對照', href: COUPANGADS, icon: ICON.bag, code: 'COUPANG ADS', tag: 'AUTO · 30 MIN' }
+  { name: '酷澎聯盟投放', desc: 'Coupang 聯盟商品自動上架 R 平台投放，收益與花費即時對照', href: COUPANGADS, icon: ICON.bag, code: 'COUPANG ADS', tag: 'AUTO · 30 MIN' },
+  { name: 'D1 影音報表', desc: 'D1 影音廣告的曝光／點擊／25-50-75% 播放進度，可匯出 Excel', href: D1VIDEOAD, icon: ICON.play, code: 'D1 VIDEO AD', tag: 'ACTION4 · LIVE' }
   // 站外工具與快捷連結統一在 slotboard.ts 的 QUICK_LINKS 維護
 ];
 
@@ -118,6 +121,7 @@ registerFuiDash(app);
 await registerGcpWatch(app);
 await registerMgidSource(app);
 registerCoupangAds(app);
+registerD1VideoAd(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));
