@@ -150,11 +150,12 @@ const STYLE = `
 
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
-  /* 正式資源卡採用手刻 Demo 2；最小高度守住資料空間，內容較多時 SVG 隨卡片延展。 */
+  /* 正式資源卡採用手刻 Demo 2。min-height 守住 HUD 原型高度；不鎖 aspect-ratio，
+     否則九格統計只能塞 6.5px 字。內容變高時 SVG（preserveAspectRatio=none）跟著延展。 */
   .rcard{--hud:#01D7EB;position:relative;display:grid;
     grid-template-columns:minmax(0,.84fr) minmax(0,1.16fr);column-gap:18px;align-content:start;
-    min-height:287px;aspect-ratio:480/287;background:transparent;border:none;
-    padding:22px 34px 20px 24px;overflow:visible}
+    min-height:287px;background:transparent;border:none;
+    padding:24px 44px 26px 28px;overflow:visible}
   .rcard .hud-svg{position:absolute;inset:0;width:100%;height:100%;color:var(--hud);
     pointer-events:none;z-index:0;overflow:visible;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
@@ -163,23 +164,23 @@ const STYLE = `
   .rcard .hud-lines path{vector-effect:non-scaling-stroke}
   .rcard > *:not(.hud-svg){position:relative;z-index:1}
   .r-top{grid-column:1/-1;grid-row:1;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-  .r-name{font-family:var(--disp);font-weight:700;font-size:15px;line-height:1.1;letter-spacing:.01em}
-  .r-meta{font-family:var(--mono);font-size:8.5px;color:var(--mut);margin-top:3px;letter-spacing:.06em;
+  .r-name{font-family:var(--disp);font-weight:700;font-size:17px;line-height:1.15;letter-spacing:.01em}
+  .r-meta{font-family:var(--mono);font-size:11px;color:var(--mut);margin-top:4px;letter-spacing:.06em;
     text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:8.5px;font-weight:500;
-    letter-spacing:.08em;border:1px solid currentColor;border-radius:0;padding:2px 6px;white-space:nowrap}
-  .pill .led{width:5px;height:5px}
-  .r-val{grid-column:1;grid-row:2;align-self:center;min-width:0;margin-top:10px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;font-weight:500;
+    letter-spacing:.08em;border:1px solid currentColor;border-radius:0;padding:3px 8px;white-space:nowrap}
+  .pill .led{width:6px;height:6px}
+  .r-val{grid-column:1;grid-row:2;align-self:center;min-width:0;margin-top:12px}
   .r-val b{display:block;font-family:var(--disp);font-weight:700;font-size:38px;line-height:.95;letter-spacing:-.03em;
     font-variant-numeric:tabular-nums}
   .r-val b.lv-warn,.r-val b.lv-crit{text-shadow:0 0 22px currentColor}
-  .r-val .cap{display:block;font-family:var(--mono);font-size:9px;color:var(--mut);margin-top:6px;
+  .r-val .cap{display:block;font-family:var(--mono);font-size:12px;color:var(--mut);margin-top:7px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* 示波器曲線帶磷光，最右一點是「現在」；y 軸固定 0~100% 讓斜率保持誠實。 */
-  .spark{grid-column:2;grid-row:2;align-self:center;min-width:0;position:relative;margin-top:10px}
-  .spark-head{display:flex;justify-content:space-between;gap:5px;margin-bottom:3px;
-    font-family:var(--mono);font-size:7.5px;letter-spacing:.06em;color:var(--mut);white-space:nowrap}
+  .spark{grid-column:2;grid-row:2;align-self:center;min-width:0;position:relative;margin-top:12px}
+  .spark-head{display:flex;justify-content:space-between;gap:5px;margin-bottom:4px;
+    font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--mut);white-space:nowrap}
   .spark svg{display:block;width:100%;height:${SPARK_H}px}
   .spark svg .trace{filter:drop-shadow(0 0 3px currentColor)}
   /* ⚠️ viewBox 是 preserveAspectRatio="none" 拉寬的 ⇒ SVG 圓會被拉成橢圓。
@@ -199,23 +200,23 @@ const STYLE = `
     background:currentColor;pointer-events:none;z-index:2}
   .plot .now{box-shadow:0 0 0 3px rgba(220,229,239,.10),0 0 10px currentColor}
   .plot .hov{display:none;box-shadow:0 0 9px currentColor}
-  .spark .axis{display:flex;justify-content:space-between;gap:5px;margin-top:3px;
-    font-family:var(--mono);font-size:6.5px;letter-spacing:.04em;color:var(--mut);white-space:nowrap}
+  .spark .axis{display:flex;justify-content:space-between;gap:5px;margin-top:4px;
+    font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--mut);white-space:nowrap}
 
-  .risk{grid-column:1/-1;display:flex;gap:6px;align-items:flex-start;font-size:8px;line-height:1.35;
-    margin-top:5px;border-left:2px solid currentColor;padding:3px 6px;background:rgba(255,255,255,.025)}
+  .risk{grid-column:1/-1;display:flex;gap:7px;align-items:flex-start;font-size:12.5px;line-height:1.4;
+    margin-top:8px;border-left:2px solid currentColor;padding:6px 8px;background:rgba(255,255,255,.025)}
   .risk .rk-i{font-family:var(--mono);font-weight:600;line-height:1.35;flex:none}
   .risk span:last-child{color:var(--ink)}
 
-  .stats{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:5px 10px;
-    margin-top:8px;padding-top:6px;border-top:1px solid rgba(1,215,235,.22)}
+  .stats{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:8px 14px;
+    margin-top:12px;padding-top:10px;border-top:1px solid rgba(1,215,235,.22)}
   @media(max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}}
-  .st-i{display:flex;flex-direction:column;gap:1px;min-width:0}
-  .st-i .s-l{font-family:var(--mono);font-size:6.5px;line-height:1.2;letter-spacing:.08em;
+  .st-i{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .st-i .s-l{font-family:var(--mono);font-size:11px;line-height:1.25;letter-spacing:.08em;
     text-transform:uppercase;color:var(--mut);white-space:nowrap}
-  .st-i .s-v{font-family:var(--mono);font-size:9.5px;line-height:1.2;display:flex;align-items:center;
-    gap:5px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .st-i .s-v i{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
+  .st-i .s-v{font-family:var(--mono);font-size:13.5px;line-height:1.3;display:flex;align-items:center;
+    gap:6px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .st-i .s-v i{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 
   .tip{position:fixed;z-index:50;pointer-events:none;background:#05080C;color:var(--ink);
     border:1px solid var(--rail);border-radius:3px;padding:6px 9px;font-family:var(--mono);font-size:11.5px;
@@ -242,7 +243,12 @@ const STYLE = `
   }
   @media(max-width:600px){
     .console .sys{border-right:0;padding-right:0;width:100%}
+    .rcard{padding:22px 28px 22px 20px}
+    .r-top{flex-wrap:wrap;align-items:flex-start}
     .r-val b{font-size:30px}
+    .r-val .cap,.st-i .s-v,.r-meta{white-space:normal}
+    .spark-head,.spark .axis{white-space:normal;gap:2px 8px;flex-wrap:wrap}
+    .spark .axis span:nth-child(2){display:none}
   }
 `;
 
@@ -291,7 +297,7 @@ const RENDER_JS = `
     box.appendChild(head);
     var gid='sg'+(++uid);
     var svg=svgEl('svg',{viewBox:'0 0 '+W+' '+H,preserveAspectRatio:'none',role:'img',
-      'aria-label':card.name+' 24 小時記憶體使用率趨勢'});
+      'aria-label':card.name+' 24 小時記憶體使用率趨勢，80↑ 偏高、90↑ 危險'});
     svg.classList.add(lvClass(card.level));
 
     var defs=svgEl('defs',{});
@@ -336,7 +342,7 @@ const RENDER_JS = `
 
     var ax=el('div','axis');
     ax.appendChild(el('span',null,pts.length?'-24H '+tpe(pts[0][0]):''));
-    ax.appendChild(el('span',null,'0–100%　80↑ 偏高　90↑ 危險'));
+    ax.appendChild(el('span',null,'0–100%'));
     ax.appendChild(el('span',null,pts.length?'NOW '+tpe(pts[pts.length-1][0]):''));
     box.appendChild(ax);
 

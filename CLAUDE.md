@@ -89,7 +89,7 @@ popin 內部工具集（取代舊 dctool）。
 - 權限：Cloud Run SA 已有 `roles/editor`（含 monitoring 讀取）⇒ **不需改 IAM**；本機用 gcloud ADC
 - **⚠️ scope 必須用 `cloud-platform`，別改成看起來更小的 `*.read-only`**（2026-08-18 上線首發踩到）：Memorystore（redis.googleapis.com）discovery 只接受 `redis.read-only`／`cloud-platform`，SQL Admin 只接受 `sqlservice.admin`／`cloud-platform`，都**不收 `cloud-platform.read-only`** → 線上兩支清單 API 回 `Request had insufficient authentication scopes.`（整頁沒有卡片、只剩紅色橫幅）。**本機完全不會重現**：gcloud 使用者憑證會忽略程式指定的 scope，只有 Cloud Run 的 SA token 才照 scope 發 ⇒ 這類問題只有部署後才看得到。三支 API（monitoring/redis/sqladmin）都列了 `cloud-platform`，故 `core/monitoring.ts` 匯出單一 `gcpAuth` 共用
 - 容錯：單支指標失敗→該欄位 null（UI 顯示 —）＋訊息進頁面紅色橫幅；清單 API 失敗才整區空；整包失敗仍渲染頁面只顯示錯誤
-- 驗證 `poc/verify_gcpwatch.mts`：117 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照／頁面字串契約含 GCP 資源改名與 fresh=1）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
+- 驗證 `poc/verify_gcpwatch.mts`：121 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照／頁面字串契約含 GCP 資源改名、fresh=1、資源卡不鎖 HUD 比例與字級下限）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 4 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向）確認斷言有鑑別力
 
 ## 酷澎聯盟投放核心（tool#6，`/tools/coupangads`，`src/tools/coupangads/`）
 - 目的：把 Coupang 聯盟商品變成 R 平台廣告去買流量、賺聯盟佣金。**客戶指定只用 Coupang `reco` 端點**。分層：`core/coupang.ts`（Coupang API）＋`core/rixbee_admin.ts`（R **管理** API，與報表側 `core/rixbee.ts` 完全兩套）→ `plan.ts`（輪替決策純函式）→ `sync.ts`（執行）→ `collect.ts`（成效收集）→ `stats.ts`／`page.ts`／`route.ts`
