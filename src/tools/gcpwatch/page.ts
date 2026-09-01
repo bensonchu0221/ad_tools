@@ -568,9 +568,9 @@ const RENDER_JS = `
 export function renderGcpWatch(vm: DashboardVM): string {
   const bootstrap = JSON.stringify(vm).replace(/</g, '\\u003c');
   const body = `
-    <div class="crumb"><a href="/">首頁</a> / GCP 資源</div>
+    <div class="crumb"><a href="/">首頁</a> / 營運監控</div>
     <div class="hd">
-      <h1>GCP 資源</h1>
+      <h1>營運監控</h1>
       <span class="tag">${vm.project.toUpperCase()} · ASIA-EAST1</span>
     </div>
     <p class="sub">Memorystore Redis 與 Cloud SQL 的即時用量。記憶體 80% 起偏高、90% 起危險；
@@ -606,7 +606,7 @@ export function renderGcpWatch(vm: DashboardVM): string {
     <div class="tip hidden" id="tip"></div>`;
 
   return sbPage({
-    title: 'GCP 資源',
+    title: '營運監控',
     active: 'gcpwatch',
     body,
     style: STYLE,

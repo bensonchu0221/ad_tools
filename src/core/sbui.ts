@@ -9,7 +9,7 @@ const NAV: { key: string; label: string; href: string }[] = [
   { key: 'adpreview', label: '廣告預覽', href: '/tools/adpreview' },
   { key: 'weeklyreport', label: '整合週報', href: '/tools/weeklyreport' },
   { key: 'adstream', label: 'Report Hub', href: '/tools/adstream' },
-  { key: 'gcpwatch', label: 'GCP 資源', href: '/tools/gcpwatch' },
+  { key: 'gcpwatch', label: '營運監控', href: '/tools/gcpwatch' },
   { key: 'mgidsource', label: 'MGID 媒體', href: '/tools/mgidsource' },
   { key: 'coupangads', label: '酷澎聯盟', href: '/tools/coupangads' },
   { key: 'd1videoad', label: 'D1 影音', href: '/tools/d1videoad' },

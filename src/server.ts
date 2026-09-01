@@ -45,7 +45,7 @@ const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
   { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 7 SHEETS' },
   { name: 'Report Hub', desc: '多 D／R／MGID 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' },
-  { name: 'GCP 資源', desc: 'GCP Redis／Cloud SQL 用量即時監看，記憶體爆掉前先看到', href: GCPWATCH, icon: ICON.gauge, code: 'GCP WATCH', tag: 'MONITOR · LIVE' },
+  { name: '營運監控', desc: '每日清零排程與 GCP 資源健康度，異常發生時即時看見', href: GCPWATCH, icon: ICON.gauge, code: 'OPS WATCH', tag: 'MONITOR · LIVE' },
   { name: 'MGID 媒體報表', desc: '廣告主角度看各媒體 source 成效，每日同步 raw', href: MGIDSOURCE, icon: ICON.chart, code: 'MGID SOURCE', tag: 'MEDIA · DAILY' },
   { name: '酷澎聯盟投放', desc: 'Coupang 聯盟商品自動上架 R 平台投放，收益與花費即時對照', href: COUPANGADS, icon: ICON.bag, code: 'COUPANG ADS', tag: 'AUTO · 30 MIN' },
   { name: 'D1 影音報表', desc: 'D1 影音廣告的曝光／點擊／25-50-75% 播放進度，可匯出 Excel', href: D1VIDEOAD, icon: ICON.play, code: 'D1 VIDEO AD', tag: 'ACTION4 · LIVE' }
