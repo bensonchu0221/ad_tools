@@ -148,28 +148,59 @@ const STYLE = `
   .section-label .cnt{font-family:var(--mono);font-size:10px;color:var(--accent);
     border:1px solid rgba(122,165,240,.3);border-radius:3px;padding:2px 6px}
 
-  /* 每日清零：上方是今日兩個執行時段，下方 14 天雙柱圖；0 筆逾時仍留一條紅線，不能視覺消失。 */
-  .dr-panel{margin-top:14px;padding:18px 20px;background:linear-gradient(180deg,var(--deck2),var(--deck));
-    border:1px solid var(--rail)}
-  .dr-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
-  .dr-title{display:flex;align-items:center;gap:9px;font-family:var(--disp);font-size:18px;font-weight:700}
-  .dr-summary{font-size:12.5px;color:var(--mut);margin-top:5px;line-height:1.45}
-  .dr-windows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
-  .dr-window{border:1px solid var(--rail);background:var(--screen);padding:10px 12px}
-  .dr-window .w-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-  .dr-window .w-name{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--mut)}
-  .dr-window .w-count{font-family:var(--disp);font-weight:700;font-size:26px;margin-top:5px}
-  .dr-window .w-note{font-size:11.5px;color:var(--mut);margin-top:2px}
-  .dr-chart{height:152px;display:grid;grid-template-columns:repeat(14,minmax(24px,1fr));gap:5px;
-    align-items:end;margin-top:18px;padding:12px 8px 0;border-top:1px solid var(--rail);overflow-x:auto}
-  .dr-day{height:130px;min-width:24px;display:grid;grid-template-rows:1fr auto;gap:5px;text-align:center}
-  .dr-bars{display:flex;align-items:flex-end;justify-content:center;gap:3px;height:108px;border-bottom:1px solid var(--rail)}
-  .dr-bar{width:min(10px,40%);min-height:3px;background:currentColor;box-shadow:0 0 6px color-mix(in srgb,currentColor 65%,transparent)}
-  .dr-date{font-family:var(--mono);font-size:9.5px;color:var(--mut);white-space:nowrap}
-  .dr-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:10px;color:var(--mut)}
-  .dr-legend i{display:inline-block;width:8px;height:8px;margin-right:5px;background:currentColor}
-  .dr-source{font-size:11.5px;color:var(--mut);margin-top:10px;line-height:1.5}
-  @media(max-width:600px){.dr-windows{grid-template-columns:1fr}.dr-chart{grid-template-columns:repeat(14,28px)}}
+  /* 每日清零（TW）＋ 資料流聲紋。左：最近 5 天的清零支數，0 筆＝紅色警告（顏色之外
+     還有文字與燈號形狀，同本頁其他狀態的雙重表意原則）。右：純裝飾的 FUI 聲紋，
+     數學與 tool#7 fuidash 的 ribbonY 同一套。兩塊固定 124px 高，不跟資源卡搶版位。 */
+  .dr-row{--fui:'Chakra Petch','Noto Sans TC',sans-serif;
+    --fmono:'Share Tech Mono','IBM Plex Mono',monospace;
+    display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.18fr);
+    grid-auto-rows:124px;gap:10px;margin-top:14px}
+  .dr-pane{background:var(--rail);padding:1px;min-width:0;
+    clip-path:polygon(9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 9px)}
+  .dr-pane>.in{background:linear-gradient(180deg,var(--deck2),var(--deck));height:100%;min-width:0;
+    display:flex;flex-direction:column;overflow:hidden;
+    clip-path:polygon(9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 9px)}
+  /* 面板標題：左上角切角標籤 */
+  .dr-pane h3{margin:0;font-family:var(--fui);font-weight:600;font-size:10px;letter-spacing:.16em;
+    color:#8FE8FF;padding:3px 11px 3px 10px;background:var(--rail2);align-self:flex-start;
+    clip-path:polygon(0 0,100% 0,calc(100% - 8px) 100%,0 100%);flex:none}
+  .dr{flex:1;display:flex;flex-direction:column;min-height:0;font-family:var(--fmono);
+    background-image:linear-gradient(90deg,rgba(53,214,255,.035) 1px,transparent 1px),
+                     linear-gradient(180deg,rgba(53,214,255,.035) 1px,transparent 1px);
+    background-size:14px 14px}
+  .dr-meta{display:flex;align-items:center;gap:10px;padding:6px 10px 0;font-size:10px;
+    letter-spacing:.1em;color:var(--mut)}
+  .dr-meta .grow{flex:1}
+  .dr-st{font-family:var(--fui);font-weight:600;font-size:10px;letter-spacing:.14em;padding:2px 8px;
+    color:var(--ok2);border:1px solid color-mix(in srgb,var(--ok2) 35%,transparent);
+    background:color-mix(in srgb,var(--ok2) 8%,transparent)}
+  .dr-st.bad{color:var(--crit2);border-color:color-mix(in srgb,var(--crit2) 45%,transparent);
+    background:color-mix(in srgb,var(--crit2) 10%,transparent);animation:breathe 1.4s ease-in-out infinite}
+  .dr-days{display:flex;gap:5px;padding:7px 10px 0;flex:1;align-items:center}
+  .dr-days .rd{flex:1;min-width:0;display:flex;flex-direction:column;align-items:stretch;gap:1px;
+    padding:5px 8px;background:rgba(53,214,255,.05);border-left:2px solid #35D6FF}
+  .dr-days .rd s{text-decoration:none;font-size:9.5px;letter-spacing:.12em;color:var(--mut)}
+  .dr-days .rd b{font-family:var(--fui);font-weight:700;font-size:18px;line-height:1;color:var(--ink);
+    text-shadow:0 0 10px rgba(53,214,255,.45)}
+  .dr-days .rd b u{text-decoration:none;font-family:var(--fmono);font-size:10px;font-weight:400;
+    letter-spacing:.1em;color:var(--mut);text-shadow:none;margin-left:3px}
+  .dr-days .rd.bad{background:color-mix(in srgb,var(--crit2) 10%,transparent);border-left-color:var(--crit2)}
+  .dr-days .rd.bad b{color:#FFD3DA;text-shadow:0 0 10px rgba(255,77,141,.6)}
+  .dr-days .rd.bad s{color:color-mix(in srgb,var(--crit2) 70%,var(--ink))}
+  .dr-days .rd.wait{background:color-mix(in srgb,var(--warn2) 7%,transparent);border-left-color:var(--warn2)}
+  .dr-foot{display:flex;align-items:center;gap:7px;padding:6px 10px 7px;font-size:9.5px;color:var(--mut)}
+  .dr-foot span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dr-empty{flex:1;display:flex;align-items:center;padding:0 10px;font-size:11px;color:var(--mut)}
+  /* 聲紋：canvas 只吃剩下的高度，資料層完全不碰它 */
+  .scope{position:relative;background:var(--screen);flex:1;min-height:0}
+  .scope canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .dr-legend{display:flex;gap:12px;padding:3px 10px 5px;flex:none;font-family:var(--fmono);
+    font-size:9px;letter-spacing:.1em;color:var(--mut)}
+  .dr-legend b{display:flex;align-items:center;gap:6px;font-weight:400}
+  .dr-legend b::before{content:'';width:16px;height:2px;background:currentColor;box-shadow:0 0 8px currentColor}
+  .dr-legend b.c{color:#35D6FF} .dr-legend b.a{color:#FF9B2F}
+  .dr-legend .rt{margin-left:auto}
+  @media(max-width:760px){.dr-row{grid-template-columns:1fr}}
 
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
@@ -437,50 +468,42 @@ const RENDER_JS = `
     cards.forEach(function(c){ host.appendChild(cardNode(c)); });
   }
 
+  // 每日 charge_daily 清零（只有 TW）：最近 5 天各一格，數字＝有清零寫入的 campaign 支數。
+  // 0 支且已過寬限時間＝紅色警告；顏色之外還有文字（逾時無寫入）與燈號形狀，不靠顏色單獨表意。
   function renderDailyReset(data){
     var host=document.getElementById('daily-reset'); host.innerHTML='';
-    var head=el('div','dr-head'), left=el('div');
-    var title=el('div','dr-title '+lvClass(data.level));
-    title.appendChild(el('i','led '+lvClass(data.level)));
-    title.appendChild(el('span',null,'每日 charge_daily 清零 · '+data.statusLabel));
-    left.appendChild(title); left.appendChild(el('div','dr-summary',data.summary)); head.appendChild(left);
-    host.appendChild(head);
-    if(!data.available){ host.appendChild(el('div','dr-source',data.sourceNote)); return; }
+    var bad=data.level==='crit';
+    var meta=el('div','dr-meta');
+    meta.appendChild(el('span',null,'UTC 16:10 · 最近 '+(data.days.length||5)+' 天'));
+    meta.appendChild(el('span','grow'));
+    meta.appendChild(el('span','dr-st'+(bad?' bad':''),
+      !data.available ? 'NO DATA' : bad ? 'ALERT' : data.level==='ok' ? 'NOMINAL' : 'STANDBY'));
+    host.appendChild(meta);
 
-    var latest=data.days[data.days.length-1], windows=el('div','dr-windows');
-    [latest.jpKr,latest.tw].forEach(function(w){
-      var box=el('div','dr-window '+lvClass(w.level)), top=el('div','w-top');
-      top.appendChild(el('span','w-name',w.label+' · '+w.schedule));
-      top.appendChild(el('span','pill '+lvClass(w.level),w.statusLabel));
-      box.appendChild(top); box.appendChild(el('div','w-count',String(w.count)));
-      box.appendChild(el('div','w-note','支 campaign 有實際清零寫入'));
-      windows.appendChild(box);
-    });
-    host.appendChild(windows);
+    if(!data.available){
+      host.appendChild(el('div','dr-empty','無法讀取：'+data.summary));
+      host.appendChild(el('div','dr-foot')).appendChild(el('span',null,'資料來源：'+data.sourceNote));
+      return;
+    }
 
-    var max=1;
-    data.days.forEach(function(d){max=Math.max(max,d.jpKr.count,d.tw.count);});
-    var chart=el('div','dr-chart');
+    var days=el('div','dr-days');
     data.days.forEach(function(d){
-      var day=el('div','dr-day'), bars=el('div','dr-bars');
-      [[d.jpKr,'JP/KR'],[d.tw,'TW']].forEach(function(pair){
-        var w=pair[0], name=pair[1], bar=el('i','dr-bar '+lvClass(w.level));
-        bar.style.height=Math.max(3,Math.round(w.count/max*100))+'%';
-        bar.title=d.deliveryDate+' '+name+'：'+w.count+' 支（'+w.statusLabel+'）';
-        bars.appendChild(bar);
-      });
-      day.appendChild(bars); day.appendChild(el('span','dr-date',d.displayDate)); chart.appendChild(day);
+      var cell=el('div','rd'+(d.tw.level==='crit'?' bad':d.tw.status==='pending'?' wait':''));
+      cell.title=d.deliveryDate+'：'+d.tw.count+' 支（'+d.tw.statusLabel+'）';
+      cell.appendChild(el('s',null,d.displayDate));
+      var v=el('b',null,String(d.tw.count));
+      v.appendChild(el('u',null,'支'));
+      cell.appendChild(v);
+      days.appendChild(cell);
     });
-    host.appendChild(chart);
-    var legend=el('div','dr-legend');
-    [['lv-ok','有清零寫入'],['lv-crit','逾時 0 筆'],['lv-none','等待執行']].forEach(function(x){
-      var item=el('span',x[0]); item.appendChild(el('i')); item.appendChild(document.createTextNode(x[1])); legend.appendChild(item);
-    });
-    host.appendChild(legend); host.appendChild(el('div','dr-source','資料來源：'+data.sourceNote));
+    host.appendChild(days);
+
+    var latest=data.days[data.days.length-1], foot=el('div','dr-foot');
+    foot.appendChild(el('i','led '+lvClass(data.level)));
+    foot.appendChild(el('span',null,latest.displayDate+' '+latest.tw.statusLabel+' · '+data.summary));
+    host.appendChild(foot);
   }
 
-  // 系統燈號：把每台的使用率等級與寫入風險等級一起取最嚴重的一項
-  // （風險提示才是這個工具的重點——使用率看起來還好、但淘汰政策擋不住 OOM 的情況）
   function sysLamp(cards){
     var levels=[], bad=0;
     cards.forEach(function(c){
@@ -556,6 +579,119 @@ const RENDER_JS = `
   }
   btn.onclick=function(){ load(true); };
 
+  /* ── DATA STREAM MATRIX（純裝飾） ──────────────────────────────────────
+     與 tool#7 fuidash 的 signal.ts ribbonY 同一套數學：三「束」細線疊加，束內靠 twist 造成
+     跨線相位差＝扭轉的絲帶。這裡的差異有三：①青束加 sep（線距倍率）＋減少線數，面板只有
+     ~80px 高，線太密會糊成一片；②三個諧波的時間相位與空間頻率成比例（×1／×2／×0.55），
+     波形才是整體往右平移＝看得出流動方向（fuidash 原版是各走各的，只有原地閃爍感）；
+     ③6 個資料封包沿線由左往右跑，尾巴逐段變淡＝流星，方向感主要靠它。
+     不承載任何監控資料；分頁切到背景或使用者要求減少動態時完全靜止。 */
+  function ribbonY(b,li,x01,t){
+    var u=b.lines<=1?0.5:li/(b.lines-1);
+    var tw=(u-0.5)*b.twist;
+    var p=b.phase+t*b.speed*Math.PI*2;
+    var w=Math.sin(x01*b.freq*Math.PI*2+p+tw)*1.0
+        +Math.sin(x01*b.freq*2*Math.PI*2+p*2+tw*1.7)*0.34
+        +Math.sin(x01*b.freq*0.61*Math.PI*2+p*0.55-tw*0.8)*0.52;
+    var env=Math.pow(Math.sin(Math.PI*Math.min(1,Math.max(0,x01))),0.55);
+    var spread=0.32+0.68*env;
+    return Math.min(1,Math.max(0,b.mid+w*b.amp*env*0.62+(u-0.5)*b.amp*spread*(b.sep||1)));
+  }
+  // speed 為負＝相位遞減＝波形由左往右跑；三束速度不同＝視差
+  var BUNDLES=[
+    {lines:18,hue:188,hue2:205,mid:0.42,amp:0.20,freq:1.7,speed:-0.20,twist:2.5,phase:0.0,sep:2.6,glow:2.0,core:1.15},
+    {lines:22,hue:33, hue2:14, mid:0.60,amp:0.17,freq:2.3,speed:-0.14,twist:3.1,phase:1.9},
+    {lines:12,hue:196,hue2:190,mid:0.50,amp:0.10,freq:3.1,speed:-0.29,twist:1.4,phase:4.2}
+  ];
+  // b=第幾束、li=束內第幾條線、v=每秒跑幾趟、o=起始位移（錯開才不會同時出現）
+  var PACKETS=[
+    {b:0,li:3, v:0.30,o:0.00},{b:0,li:9, v:0.24,o:0.42},{b:0,li:15,v:0.34,o:0.75},
+    {b:1,li:6, v:0.21,o:0.20},{b:1,li:16,v:0.27,o:0.63},{b:2,li:6, v:0.38,o:0.10}
+  ];
+  var SDPR=Math.min(2,window.devicePixelRatio||1);
+  var SREDUCED=matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function drawStream(ctx,w,h,t){
+    ctx.clearRect(0,0,w,h);
+    var g=ctx.createLinearGradient(0,0,0,h);
+    g.addColorStop(0,'rgba(53,214,255,.05)'); g.addColorStop(.5,'rgba(6,10,15,0)');
+    g.addColorStop(1,'rgba(255,155,47,.045)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
+    var N=Math.max(70,Math.min(260,Math.round(w/SDPR/2.6)));
+    ctx.globalCompositeOperation='lighter';
+    ctx.lineCap='round';
+    for(var bi=0;bi<BUNDLES.length;bi++){
+      var b=BUNDLES[bi];
+      for(var li=0;li<b.lines;li++){
+        var u=b.lines<=1?0.5:li/(b.lines-1);
+        var hue=b.hue+(b.hue2-b.hue)*u;
+        var edge=Math.abs(u-0.5)*2, core=(1-edge)*(1-edge);
+        var a=0.09+0.40*core;
+        var path=new Path2D();
+        for(var i=0;i<=N;i++){
+          var x01=i/N, y=ribbonY(b,li,x01,t)*h;
+          if(i===0) path.moveTo(0,y); else path.lineTo(x01*w,y);
+        }
+        // 輝光＝同一條路徑 stroke 兩遍（粗且淡的暈＋細且亮的芯），比 shadowBlur 快得多
+        ctx.strokeStyle='hsla('+hue+',96%,60%,'+(a*0.20)+')';
+        ctx.lineWidth=(b.glow||3.4)*SDPR; ctx.stroke(path);
+        ctx.strokeStyle='hsla('+hue+',100%,'+(70+20*core)+'%,'+Math.min(1,a*(b.core||1))+')';
+        ctx.lineWidth=0.85*SDPR; ctx.stroke(path);
+      }
+    }
+    // 資料封包＝流星：頭亮、尾巴往後逐段變淡（相對於頭，不是相對於畫布 x）
+    var TN=26, STEP=0.010;
+    for(var pi=0;pi<PACKETS.length;pi++){
+      var pk=PACKETS[pi], bb=BUNDLES[pk.b];
+      var head=((t*pk.v+pk.o)%1+1)%1;
+      var hue2=bb.hue+(bb.hue2-bb.hue)*(bb.lines<=1?0.5:pk.li/(bb.lines-1));
+      var px=null, py=null;
+      for(var k=TN;k>=0;k--){
+        var x=head-k*STEP;
+        if(x<0){ px=null; continue; }                 // 尾巴不繞回，免得從右緣拖進來
+        var yy=ribbonY(bb,pk.li,x,t)*h, xx=x*w;
+        if(px!==null){
+          var f=1-k/TN, fade=f*f*f;
+          ctx.strokeStyle='hsla('+hue2+',100%,72%,'+(0.55*fade)+')';
+          ctx.lineWidth=(0.6+1.9*fade)*SDPR;
+          ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(xx,yy); ctx.stroke();
+        }
+        px=xx; py=yy;
+      }
+      var hy=ribbonY(bb,pk.li,head,t)*h;
+      ctx.fillStyle='hsla('+hue2+',100%,62%,.34)';
+      ctx.beginPath(); ctx.arc(head*w,hy,4.2*SDPR,0,6.284); ctx.fill();
+      ctx.fillStyle='hsla('+hue2+',100%,94%,.98)';
+      ctx.beginPath(); ctx.arc(head*w,hy,1.6*SDPR,0,6.284); ctx.fill();
+    }
+    ctx.globalCompositeOperation='source-over';
+  }
+
+  (function mountStream(){
+    var c=document.getElementById('stream'); if(!c||!c.getContext) return;
+    var ctx=c.getContext('2d');
+    function fit(){
+      var r=c.getBoundingClientRect();
+      c.width =Math.max(1,Math.round(r.width *SDPR));
+      c.height=Math.max(1,Math.round(r.height*SDPR));
+    }
+    fit();
+    if(window.ResizeObserver) new ResizeObserver(fit).observe(c);
+    var t0=performance.now(), spinning=true;
+    function frame(now){
+      if(!spinning) return;
+      var t=SREDUCED?8:(now-t0)/1000;
+      ctx.save(); drawStream(ctx,c.width,c.height,t); ctx.restore();
+      if(!SREDUCED) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+    // 分頁切到背景就停（同本頁 60 秒輪詢的作法），回前景再續跑、時間軸連續
+    document.addEventListener('visibilitychange',function(){
+      if(document.hidden){ spinning=false; }
+      else if(!spinning&&!SREDUCED){ spinning=true; requestAnimationFrame(frame); }
+    });
+  })();
+
   render(window.__VM__);
   first=false;
   setLink(true,'正常');
@@ -587,14 +723,27 @@ export function renderGcpWatch(vm: DashboardVM): string {
       <button class="btn-line" id="refresh" type="button">重新整理</button>
     </div>
     <div class="msg msg-err hidden" id="err" style="margin-top:12px"></div>
-    <div class="dr-panel hud" id="daily-reset"></div>
+    <div class="dr-row">
+      <div class="dr-pane"><div class="in">
+        <h3>CHARGE_DAILY RESET · TW</h3>
+        <div class="dr" id="daily-reset"></div>
+      </div></div>
+      <div class="dr-pane"><div class="in">
+        <h3>DATA STREAM MATRIX</h3>
+        <div class="scope"><canvas id="stream"></canvas></div>
+        <div class="dr-legend"><b class="c">UPLOAD DATA RATE</b><b class="a">DOWNLOAD DATA RATE</b>
+          <span class="rt">3 BUNDLES · 52 TRACES</span></div>
+      </div></div>
+    </div>
     <div class="kpis" id="kpis"></div>
     <div class="section-label">Memorystore Redis <span class="cnt" id="c-redis">0</span></div>
     <div class="cards" id="redis"></div>
     <div class="section-label">Cloud SQL <span class="cnt" id="c-sql">0</span></div>
     <div class="cards" id="sql"></div>
-    <p class="note-cost">清零健康度資料來自 Firestore redis_records（唯讀），只表示實際清零寫入；
-      若要區分排程未啟動、執行中斷或 JP／KR 個別結果，仍需查 D1 RDS batch_log。<br>
+    <p class="note-cost">清零健康度只看 <b>TW 時段（UTC 16:10）</b>，資料來自 Firestore redis_records（唯讀），
+      只表示實際清零寫入；數字＝當日有 charge_daily=0 寫入的 campaign 支數，0 支＝紅色警告。
+      若要區分排程未啟動或執行中斷，仍需查 D1 RDS batch_log。JP／KR（UTC 15 時段）不在本頁範圍。<br>
+      右側 DATA STREAM MATRIX 是裝飾用的合成波形，不承載任何資料。<br>
       GCP 資源資料來源：Cloud Monitoring v3（唯讀）。一次更新約 50 條 time series，
       每月前 100 萬條免費 ⇒ 實質零成本；分頁切到背景時自動停止更新。<br>
       卡片規格 GB 來自 Memorystore 清單（實例還在 UPDATING 時仍是舊容量，scale 完成才會變）；

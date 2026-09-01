@@ -1,6 +1,8 @@
-// D1 每日 charge_daily 清零健康度。
+// D1 每日 charge_daily 清零健康度（**只看 TW**）。
 // 資料來源是 ResetDailyCharge 寫 Redis 時同步留下的 Firestore redis_records；這能證明
 // 「清零寫入確實發生」，但無法取代 RDS batch_log 對排程 start/end 的完整稽核。
+// 2026-09-01 起只保留 TW 時段（UTC 16:10）：JP/KR（UTC 15 時段）不是本頁的守備範圍，
+// 留著只會讓「今日異常」被別的地區的狀況拉紅。歷史天數 14 → 5（版位只放得下一列 5 格）。
 import {
   d1FirestoreAvailable,
   listD1DailyChargeResetRecords,
@@ -9,7 +11,7 @@ import {
 import type { Level } from './metrics.js';
 
 const DAY_MS = 86_400_000;
-const HISTORY_DAYS = 14;
+const HISTORY_DAYS = 5;
 const GRACE_MINUTES = 45;
 
 export type DailyResetStatus = 'ok' | 'pending' | 'missed' | 'unavailable';
@@ -29,7 +31,6 @@ export interface DailyResetDay {
   recordDate: string;
   deliveryDate: string;
   displayDate: string;
-  jpKr: DailyResetWindow;
   tw: DailyResetWindow;
   level: Level;
 }
@@ -79,8 +80,9 @@ function windowStatus(count: number, now: number, deadlineAt: number): Pick<Dail
   return { status: 'missed', level: 'crit', statusLabel: '逾時無寫入' };
 }
 
-function resetEvents(records: D1RedisRecord[]): Map<string, { jpKr: Set<string>; tw: Set<string> }> {
-  const result = new Map<string, { jpKr: Set<string>; tw: Set<string> }>();
+/** 每個 UTC 日期 → 該日 TW 時段（UTC 16）有清零寫入的 campaign key 集合（同 campaign 重複寫入只算一次）。 */
+function resetEvents(records: D1RedisRecord[]): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
   for (const doc of records) {
     for (const record of doc.records) {
       const match = /^(\d{6})\tUNKNOWN_USER\tPUT\t(.+)$/.exec(record);
@@ -88,17 +90,16 @@ function resetEvents(records: D1RedisRecord[]): Map<string, { jpKr: Set<string>;
       let payload: unknown;
       try { payload = JSON.parse(match[2]); } catch { continue; }
       if (!payload || typeof payload !== 'object' || String((payload as any).charge_daily) !== '0') continue;
-      const bucket = result.get(doc.date) ?? { jpKr: new Set<string>(), tw: new Set<string>() };
-      const hour = match[1].slice(0, 2);
-      if (hour === '15') bucket.jpKr.add(doc.key);
-      if (hour === '16') bucket.tw.add(doc.key);
+      if (match[1].slice(0, 2) !== '16') continue; // 15 時段是 JP/KR，本頁不看
+      const bucket = result.get(doc.date) ?? new Set<string>();
+      bucket.add(doc.key);
       result.set(doc.date, bucket);
     }
   }
   return result;
 }
 
-/** 純函式：把 Firestore 異動轉成最近 14 個台灣觀察日的狀態與趨勢。 */
+/** 純函式：把 Firestore 異動轉成最近 N 個台灣觀察日的 TW 清零狀態。 */
 export function summarizeDailyResetRecords(
   records: D1RedisRecord[],
   now = Date.now(),
@@ -112,22 +113,15 @@ export function summarizeDailyResetRecords(
   for (let i = historyDays - 1; i >= 0; i--) {
     const recordDate = addDays(newestRecordDate, -i);
     const deliveryDate = addDays(recordDate, 1);
-    const counts = byDate.get(recordDate) ?? { jpKr: new Set<string>(), tw: new Set<string>() };
-    const jpKrDeadline = deadline(recordDate, 15);
+    const count = (byDate.get(recordDate) ?? new Set<string>()).size;
     const twDeadline = deadline(recordDate, 16);
-    const jpKrState = windowStatus(counts.jpKr.size, now, jpKrDeadline);
-    const twState = windowStatus(counts.tw.size, now, twDeadline);
-    const level: Level = jpKrState.level === 'crit' || twState.level === 'crit'
-      ? 'crit' : jpKrState.level === 'ok' && twState.level === 'ok' ? 'ok' : 'none';
+    const twState = windowStatus(count, now, twDeadline);
     days.push({
       recordDate,
       deliveryDate,
       displayDate: displayDate(deliveryDate),
-      jpKr: { label: 'JP/KR 時段', schedule: 'UTC 15:10', count: counts.jpKr.size,
-        ...jpKrState, deadlineAt: jpKrDeadline },
-      tw: { label: 'TW', schedule: 'UTC 16:10', count: counts.tw.size,
-        ...twState, deadlineAt: twDeadline },
-      level,
+      tw: { label: 'TW', schedule: 'UTC 16:10', count, ...twState, deadlineAt: twDeadline },
+      level: twState.level,
     });
   }
 
@@ -135,17 +129,17 @@ export function summarizeDailyResetRecords(
   const level = latest.level;
   const statusLabel = level === 'ok' ? '今日正常' : level === 'crit' ? '今日異常' : '等待今日排程';
   const summary = level === 'ok'
-    ? `JP/KR ${latest.jpKr.count} 支、TW ${latest.tw.count} 支 campaign 已留下清零紀錄`
+    ? `TW ${latest.tw.count} 支 campaign 已留下清零紀錄`
     : level === 'crit'
-      ? '排程完成寬限時間已過，至少一個時段沒有清零寫入'
-      : '今日清零時段尚未全部完成';
+      ? 'UTC 16:10 的完成寬限時間已過，TW 時段沒有任何清零寫入'
+      : 'TW 清零時段尚未完成';
   return {
     available: true,
     level,
     statusLabel,
     summary,
     days,
-    sourceNote: 'Firestore redis_records（實際 charge_daily=0 寫入；JP/KR 共用 UTC 15 時段，無法由此資料源拆開）',
+    sourceNote: 'Firestore redis_records（TW 時段 UTC 16 的實際 charge_daily=0 寫入）',
   };
 }
 
