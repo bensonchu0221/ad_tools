@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { collectSnapshot, type Snapshot } from './collect.js';
 import { renderGcpWatch, BASE_PATH } from './page.js';
 import { toViewModel } from './view.js';
+import { unavailableDailyResetHealth } from './dailyreset.js';
 
 export { BASE_PATH };
 
@@ -32,6 +33,7 @@ function failedSnapshot(err: unknown): Snapshot {
     project: process.env.GCP_PROJECT ?? 'popinpoc1',
     redis: [],
     sql: [],
+    dailyReset: unavailableDailyResetHealth(String((err as any)?.message ?? err)),
     errors: [String((err as any)?.message ?? err)],
   };
 }

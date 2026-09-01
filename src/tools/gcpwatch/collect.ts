@@ -5,6 +5,11 @@
 import { google } from 'googleapis';
 import { fetchTimeSeries, byKey, gcpAuth, PROJECT_ID, type Point } from '../../core/monitoring.js';
 import { DEFAULT_POLICY, latest, sum } from './metrics.js';
+import {
+  collectDailyResetHealth,
+  unavailableDailyResetHealth,
+  type DailyResetHealth,
+} from './dailyreset.js';
 
 // 清單 API 與指標共用同一顆 ADC（scope=cloud-platform，原因見 core/monitoring.ts 註解）
 const readAuth = gcpAuth;
@@ -65,6 +70,7 @@ export interface Snapshot {
   project: string;
   redis: RedisCard[];
   sql: SqlCard[];
+  dailyReset: DailyResetHealth;
   errors: string[];
 }
 
@@ -205,6 +211,13 @@ async function collectSql(errors: string[]): Promise<SqlCard[]> {
 /** 抓一份完整快照（Redis 與 Cloud SQL 兩區平行進行，各自容錯） */
 export async function collectSnapshot(): Promise<Snapshot> {
   const errors: string[] = [];
-  const [redis, sql] = await Promise.all([collectRedis(errors), collectSql(errors)]);
-  return { generatedAt: Date.now(), project: PROJECT_ID, redis, sql, errors };
+  const dailyResetPromise = collectDailyResetHealth().catch((e: any) => {
+    const message = String(e?.message ?? e);
+    errors.push(`每日清零紀錄：${message}`);
+    return unavailableDailyResetHealth(message);
+  });
+  const [redis, sql, dailyReset] = await Promise.all([
+    collectRedis(errors), collectSql(errors), dailyResetPromise,
+  ]);
+  return { generatedAt: Date.now(), project: PROJECT_ID, redis, sql, dailyReset, errors };
 }

@@ -148,6 +148,29 @@ const STYLE = `
   .section-label .cnt{font-family:var(--mono);font-size:10px;color:var(--accent);
     border:1px solid rgba(122,165,240,.3);border-radius:3px;padding:2px 6px}
 
+  /* 每日清零：上方是今日兩個執行時段，下方 14 天雙柱圖；0 筆逾時仍留一條紅線，不能視覺消失。 */
+  .dr-panel{margin-top:14px;padding:18px 20px;background:linear-gradient(180deg,var(--deck2),var(--deck));
+    border:1px solid var(--rail)}
+  .dr-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .dr-title{display:flex;align-items:center;gap:9px;font-family:var(--disp);font-size:18px;font-weight:700}
+  .dr-summary{font-size:12.5px;color:var(--mut);margin-top:5px;line-height:1.45}
+  .dr-windows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
+  .dr-window{border:1px solid var(--rail);background:var(--screen);padding:10px 12px}
+  .dr-window .w-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .dr-window .w-name{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--mut)}
+  .dr-window .w-count{font-family:var(--disp);font-weight:700;font-size:26px;margin-top:5px}
+  .dr-window .w-note{font-size:11.5px;color:var(--mut);margin-top:2px}
+  .dr-chart{height:152px;display:grid;grid-template-columns:repeat(14,minmax(24px,1fr));gap:5px;
+    align-items:end;margin-top:18px;padding:12px 8px 0;border-top:1px solid var(--rail);overflow-x:auto}
+  .dr-day{height:130px;min-width:24px;display:grid;grid-template-rows:1fr auto;gap:5px;text-align:center}
+  .dr-bars{display:flex;align-items:flex-end;justify-content:center;gap:3px;height:108px;border-bottom:1px solid var(--rail)}
+  .dr-bar{width:min(10px,40%);min-height:3px;background:currentColor;box-shadow:0 0 6px color-mix(in srgb,currentColor 65%,transparent)}
+  .dr-date{font-family:var(--mono);font-size:9.5px;color:var(--mut);white-space:nowrap}
+  .dr-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-family:var(--mono);font-size:10px;color:var(--mut)}
+  .dr-legend i{display:inline-block;width:8px;height:8px;margin-right:5px;background:currentColor}
+  .dr-source{font-size:11.5px;color:var(--mut);margin-top:10px;line-height:1.5}
+  @media(max-width:600px){.dr-windows{grid-template-columns:1fr}.dr-chart{grid-template-columns:repeat(14,28px)}}
+
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
   /* 正式資源卡採用手刻 Demo 2。min-height 守住 HUD 原型高度；不鎖 aspect-ratio，
@@ -414,6 +437,48 @@ const RENDER_JS = `
     cards.forEach(function(c){ host.appendChild(cardNode(c)); });
   }
 
+  function renderDailyReset(data){
+    var host=document.getElementById('daily-reset'); host.innerHTML='';
+    var head=el('div','dr-head'), left=el('div');
+    var title=el('div','dr-title '+lvClass(data.level));
+    title.appendChild(el('i','led '+lvClass(data.level)));
+    title.appendChild(el('span',null,'每日 charge_daily 清零 · '+data.statusLabel));
+    left.appendChild(title); left.appendChild(el('div','dr-summary',data.summary)); head.appendChild(left);
+    host.appendChild(head);
+    if(!data.available){ host.appendChild(el('div','dr-source',data.sourceNote)); return; }
+
+    var latest=data.days[data.days.length-1], windows=el('div','dr-windows');
+    [latest.jpKr,latest.tw].forEach(function(w){
+      var box=el('div','dr-window '+lvClass(w.level)), top=el('div','w-top');
+      top.appendChild(el('span','w-name',w.label+' · '+w.schedule));
+      top.appendChild(el('span','pill '+lvClass(w.level),w.statusLabel));
+      box.appendChild(top); box.appendChild(el('div','w-count',String(w.count)));
+      box.appendChild(el('div','w-note','支 campaign 有實際清零寫入'));
+      windows.appendChild(box);
+    });
+    host.appendChild(windows);
+
+    var max=1;
+    data.days.forEach(function(d){max=Math.max(max,d.jpKr.count,d.tw.count);});
+    var chart=el('div','dr-chart');
+    data.days.forEach(function(d){
+      var day=el('div','dr-day'), bars=el('div','dr-bars');
+      [[d.jpKr,'JP/KR'],[d.tw,'TW']].forEach(function(pair){
+        var w=pair[0], name=pair[1], bar=el('i','dr-bar '+lvClass(w.level));
+        bar.style.height=Math.max(3,Math.round(w.count/max*100))+'%';
+        bar.title=d.deliveryDate+' '+name+'：'+w.count+' 支（'+w.statusLabel+'）';
+        bars.appendChild(bar);
+      });
+      day.appendChild(bars); day.appendChild(el('span','dr-date',d.displayDate)); chart.appendChild(day);
+    });
+    host.appendChild(chart);
+    var legend=el('div','dr-legend');
+    [['lv-ok','有清零寫入'],['lv-crit','逾時 0 筆'],['lv-none','等待執行']].forEach(function(x){
+      var item=el('span',x[0]); item.appendChild(el('i')); item.appendChild(document.createTextNode(x[1])); legend.appendChild(item);
+    });
+    host.appendChild(legend); host.appendChild(el('div','dr-source','資料來源：'+data.sourceNote));
+  }
+
   // 系統燈號：把每台的使用率等級與寫入風險等級一起取最嚴重的一項
   // （風險提示才是這個工具的重點——使用率看起來還好、但淘汰政策擋不住 OOM 的情況）
   function sysLamp(cards){
@@ -452,6 +517,7 @@ const RENDER_JS = `
       box.appendChild(el('div','k-h',x.hint));
       k.appendChild(box);
     });
+    renderDailyReset(vm.dailyReset);
     fill('redis',vm.redis); fill('sql',vm.sql);
     document.getElementById('c-redis').textContent=vm.redis.length;
     document.getElementById('c-sql').textContent=vm.sql.length;
@@ -521,12 +587,15 @@ export function renderGcpWatch(vm: DashboardVM): string {
       <button class="btn-line" id="refresh" type="button">重新整理</button>
     </div>
     <div class="msg msg-err hidden" id="err" style="margin-top:12px"></div>
+    <div class="dr-panel hud" id="daily-reset"></div>
     <div class="kpis" id="kpis"></div>
     <div class="section-label">Memorystore Redis <span class="cnt" id="c-redis">0</span></div>
     <div class="cards" id="redis"></div>
     <div class="section-label">Cloud SQL <span class="cnt" id="c-sql">0</span></div>
     <div class="cards" id="sql"></div>
-    <p class="note-cost">資料來源：Cloud Monitoring v3（唯讀）。一次更新約 50 條 time series，
+    <p class="note-cost">清零健康度資料來自 Firestore redis_records（唯讀），只表示實際清零寫入；
+      若要區分排程未啟動、執行中斷或 JP／KR 個別結果，仍需查 D1 RDS batch_log。<br>
+      GCP 資源資料來源：Cloud Monitoring v3（唯讀）。一次更新約 50 條 time series，
       每月前 100 萬條免費 ⇒ 實質零成本；分頁切到背景時自動停止更新。<br>
       卡片規格 GB 來自 Memorystore 清單（實例還在 UPDATING 時仍是舊容量，scale 完成才會變）；
       使用中／上限與使用率來自 Cloud Monitoring，指標本身通常再慢 1～3 分鐘。<br>

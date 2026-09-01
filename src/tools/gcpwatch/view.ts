@@ -52,6 +52,7 @@ export interface DashboardVM {
   kpis: KpiVM[];
   redis: CardVM[];
   sql: CardVM[];
+  dailyReset: Snapshot['dailyReset'];
   errors: string[];
 }
 
@@ -183,6 +184,7 @@ export function toViewModel(snap: Snapshot): DashboardVM {
     kpis: buildKpis(redis, sql, snap),
     redis,
     sql,
+    dailyReset: snap.dailyReset,
     errors: snap.errors,
   };
 }

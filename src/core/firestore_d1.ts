@@ -23,7 +23,7 @@ export function d1FirestoreAvailable(): boolean {
 }
 
 /** 共用單一連線（module 內快取進行中的 Promise，避免併發初始化開出多條）。 */
-async function campaignCollection(): Promise<Collection<Document>> {
+async function d1Collection(name: string): Promise<Collection<Document>> {
   const uri = process.env.D1_FIRESTORE_URI;
   if (!uri) throw new Error('未設定 D1_FIRESTORE_URI（Firestore article-action 連線字串）');
   if (!clientPromise) {
@@ -33,7 +33,11 @@ async function campaignCollection(): Promise<Collection<Document>> {
     });
   }
   const client = await clientPromise;
-  return client.db().collection('campaign');
+  return client.db().collection(name);
+}
+
+async function campaignCollection(): Promise<Collection<Document>> {
+  return d1Collection('campaign');
 }
 
 export interface D1VideoCampaign {
@@ -68,6 +72,37 @@ export async function listD1VideoCampaigns(): Promise<D1VideoCampaign[]> {
     agency: String(d.agency ?? ''),
     verticalVideo: d.vertical_video === true,
     deleted: d.deleted === true,
+  }));
+}
+
+export interface D1RedisRecord {
+  date: string;
+  key: string;
+  records: string[];
+}
+
+/**
+ * 讀取一段日期內「可能是 daily charge 清零」的 Redis 異動紀錄。
+ *
+ * 先在 Firestore 端以 records regex 篩選，避免 dashboard 每次刷新都把每天上萬筆
+ * redis_records 拉回 Cloud Run；是否真為 charge_daily=0 仍由呼叫端逐筆解析 JSON 確認。
+ */
+export async function listD1DailyChargeResetRecords(
+  startDate: string,
+  endDate: string
+): Promise<D1RedisRecord[]> {
+  const col = await d1Collection('redis_records');
+  const docs = await col.find(
+    {
+      date: { $gte: startDate, $lte: endDate },
+      records: { $elemMatch: { $regex: 'UNKNOWN_USER\\tPUT\\t.*charge_daily' } },
+    },
+    { projection: { date: 1, key: 1, records: 1 } }
+  ).toArray();
+  return docs.map((d) => ({
+    date: String(d.date ?? ''),
+    key: String(d.key ?? ''),
+    records: Array.isArray(d.records) ? d.records.map(String) : [],
   }));
 }
 
