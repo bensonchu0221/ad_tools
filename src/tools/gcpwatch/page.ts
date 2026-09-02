@@ -66,6 +66,7 @@ const CARD_HUD_SVG = `<svg class="hud-svg" viewBox="0 0 480 287" preserveAspectR
 //    直線段的長度比用 flex 比例（358:160）維持原圖比例。
 //    下／右一律鏡射同一份 markup（scaleY(-1) / scaleX(-1)）⇒ 對稱性由結構保證。
 // 參考圖有的斜紋帶（y 61..67）本頁刻意不用：它不承載任何資訊，只會增加雜訊。
+// 顏色／輝光與 Memorystore Redis 資源卡的 HUD 同一組（#01D7EB ＋ 3px/11px 兩層 drop-shadow）。
 const FX_CAP = '<svg class="fx-cap" viewBox="24 0 42 52"><polygon points="24,43 39,28 66,28 66,39 62,43"/></svg>';
 const FX_STEP = '<svg class="fx-step" viewBox="424 0 25 52"><polygon points="424,28 439,28 449,38 449,43 427,43 424,39"/></svg>';
 const FX_NOTCH = '<svg class="fx-notch" viewBox="609 0 80 52"><polygon points="609,38 689,38 689,43 677,50 621,50 609,43"/></svg>';
@@ -100,9 +101,10 @@ const STYLE = `
   }
   /* ── 螢幕外框：position:fixed 貼在視窗（topbar 之下），內容在框內捲動 ──
      --fxk 是整體縮放，所有尺寸都寫成它的倍數 ⇒ 等比縮放不會破壞 45° 角。 */
-  :root{--fxk:1; --fx:#7AA5F0; --tbh:50px}
+  /* 外框色與輝光＝資源卡 HUD 同一組（.rcard 的 --hud 與 .hud-svg 的 filter），兩者必須一致 */
+  :root{--fxk:1; --fx:#01D7EB; --tbh:50px}
   .fxframe{position:fixed;left:0;right:0;top:var(--tbh);bottom:0;z-index:20;pointer-events:none;
-    filter:drop-shadow(0 0 calc(var(--fxk)*6px) rgba(122,165,240,.26))}
+    filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .fxframe i,.fxframe svg{display:block}
   .fxframe polygon{fill:var(--fx)}
   .fx-jog path{stroke:var(--fx);stroke-width:2.2;fill:none}
