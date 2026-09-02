@@ -54,6 +54,36 @@ const CARD_HUD_SVG = `<svg class="hud-svg" viewBox="0 0 480 287" preserveAspectR
   </g>
 </svg>`;
 
+// ── 螢幕外框（HUD frame）──────────────────────────────────────────────
+// 幾何取自使用者給的參考圖，逐像素量測（原圖 1300×900，上下對稱軸 y=449.5、左右 x=649.5）：
+//   橫帶 y：28(頂) 39(細帶底) 43(粗帶底) 50(中央凹槽底)
+//   轉角 x：24 起 45° 斜切 → 39 收平 → 62 → 66 收薄
+//   步階 x：424→427 底部陡切、439→449 頂部 45° 斜切
+//   凹槽 x：609 → 689，底部下探到 50
+//   側軌 x：外側 25 → 中段內縮到 31（45° 折角），線寬 2、粗段 5
+// ⚠️ 做法重點：**只有帶斜角的零件用 SVG 且尺寸鎖死，直線段用 div 伸縮**。
+//    整條邊做成一張 preserveAspectRatio=none 的 SVG 拉滿寬度的話，視窗一窄 45° 會被壓成 30°。
+//    直線段的長度比用 flex 比例（358:160）維持原圖比例。
+//    下／右一律鏡射同一份 markup（scaleY(-1) / scaleX(-1)）⇒ 對稱性由結構保證。
+// 參考圖有的斜紋帶（y 61..67）本頁刻意不用：它不承載任何資訊，只會增加雜訊。
+const FX_CAP = '<svg class="fx-cap" viewBox="24 0 42 52"><polygon points="24,43 39,28 66,28 66,39 62,43"/></svg>';
+const FX_STEP = '<svg class="fx-step" viewBox="424 0 25 52"><polygon points="424,28 439,28 449,38 449,43 427,43 424,39"/></svg>';
+const FX_NOTCH = '<svg class="fx-notch" viewBox="609 0 80 52"><polygon points="609,38 689,38 689,43 677,50 621,50 609,43"/></svg>';
+const FX_JOG = '<svg class="fx-jog" viewBox="20 250 20 20"><path d="M26,255 L32,262"/></svg>';
+const FX_BAR = `${FX_CAP}<i class="fx-up"></i>${FX_STEP}<i class="fx-low"></i>${FX_NOTCH}` +
+  `<i class="fx-low"></i>${FX_STEP.replace('fx-step', 'fx-step fx-m')}<i class="fx-up"></i>` +
+  FX_CAP.replace('fx-cap', 'fx-cap fx-m');
+const FX_RAIL_HALF = `<i class="fx-ln"></i><i class="fx-tk"></i>${FX_JOG}`;
+const FX_RAIL = `<div class="fx-half">${FX_RAIL_HALF}</div>` +
+  '<i class="fx-mid"><i class="fx-midtk"></i></i>' +
+  `<div class="fx-half b">${FX_RAIL_HALF}</div>`;
+const FRAME_HTML = `<div class="fxframe" aria-hidden="true">
+  <div class="fx-bar t">${FX_BAR}</div>
+  <div class="fx-bar b">${FX_BAR}</div>
+  <div class="fx-rail l">${FX_RAIL}</div>
+  <div class="fx-rail r">${FX_RAIL}</div>
+</div>`;
+
 // 狀態色：暗底專用（原亮底的 #15803D/#CA8A04/#B91C1C 在 #080B10 上對比不足）。
 // 對比與色盲分離已用 poc/verify_gcpwatch_palette.mts 實測；沿用既有原則
 // ——顏色永遠搭配文字標籤（正常／偏高／危險），不用顏色單獨表意。
@@ -68,6 +98,55 @@ const STYLE = `
     --line:#1D2733; --line2:#161E28; --mut:#77889B;
     --accent:#7AA5F0; --ok:#2FCB8B; --err:#FF4D8D;
   }
+  /* ── 螢幕外框：position:fixed 貼在視窗（topbar 之下），內容在框內捲動 ──
+     --fxk 是整體縮放，所有尺寸都寫成它的倍數 ⇒ 等比縮放不會破壞 45° 角。 */
+  :root{--fxk:1; --fx:#7AA5F0; --tbh:50px}
+  .fxframe{position:fixed;left:0;right:0;top:var(--tbh);bottom:0;z-index:20;pointer-events:none;
+    filter:drop-shadow(0 0 calc(var(--fxk)*6px) rgba(122,165,240,.26))}
+  .fxframe i,.fxframe svg{display:block}
+  .fxframe polygon{fill:var(--fx)}
+  .fx-jog path{stroke:var(--fx);stroke-width:2.2;fill:none}
+  .fx-bar{position:absolute;left:0;right:0;height:calc(var(--fxk)*52px);
+    display:flex;align-items:flex-start;padding:0 calc(var(--fxk)*24px)}
+  .fx-bar.t{top:0}
+  .fx-bar.b{bottom:0;transform:scaleY(-1)}
+  .fx-bar svg{flex:none;height:calc(var(--fxk)*52px)}
+  .fx-cap{width:calc(var(--fxk)*42px)}
+  .fx-step{width:calc(var(--fxk)*25px)}
+  .fx-notch{width:calc(var(--fxk)*80px)}
+  .fx-m{transform:scaleX(-1)}
+  /* 直線段：flex 比例＝原圖的長度比（上層 358 : 下層 160），任何寬度下中央凹槽都置中 */
+  .fx-up{flex:358 1 0;min-width:0;height:calc(var(--fxk)*11px);margin-top:calc(var(--fxk)*28px);background:var(--fx)}
+  .fx-low{flex:160 1 0;min-width:0;height:calc(var(--fxk)*5px);margin-top:calc(var(--fxk)*38px);background:var(--fx)}
+  .fx-rail{position:absolute;top:0;bottom:0;width:calc(var(--fxk)*60px)}
+  .fx-rail.l{left:0}
+  .fx-rail.r{right:0;transform:scaleX(-1)}
+  .fx-half{position:absolute;left:0;right:0;top:0;height:calc(var(--fxk)*268px)}
+  .fx-half.b{top:auto;bottom:0;transform:scaleY(-1)}
+  .fx-ln{position:absolute;left:calc(var(--fxk)*25px);width:calc(var(--fxk)*2px);
+    top:calc(var(--fxk)*55px);height:calc(var(--fxk)*200px);background:var(--fx)}
+  .fx-tk{position:absolute;left:calc(var(--fxk)*22px);width:calc(var(--fxk)*5px);
+    top:calc(var(--fxk)*107px);height:calc(var(--fxk)*93px);background:var(--fx)}
+  .fx-jog{position:absolute;left:calc(var(--fxk)*20px);top:calc(var(--fxk)*250px);
+    width:calc(var(--fxk)*20px);height:calc(var(--fxk)*20px)}
+  .fx-mid{position:absolute;left:calc(var(--fxk)*31px);width:calc(var(--fxk)*2px);
+    top:calc(var(--fxk)*262px);bottom:calc(var(--fxk)*262px);background:var(--fx)}
+  /* 粗段夾在中段長度內：視窗變矮時不會突出到折角之外 */
+  .fx-midtk{position:absolute;left:0;width:calc(var(--fxk)*5px);top:50%;
+    height:min(calc(var(--fxk)*156px),100%);transform:translateY(-50%);background:var(--fx)}
+  /* 內容讓開外框：左右各留 76px、上下留出橫帶高度 */
+  .wrap{padding-left:calc(var(--fxk)*76px);padding-right:calc(var(--fxk)*76px)}
+  .crumb{padding-top:calc(var(--fxk)*78px)}
+  footer{padding-bottom:calc(var(--fxk)*88px)}
+  @media(max-width:900px){:root{--fxk:.72}}
+  /* 手機：外框會吃掉太多可用寬，直接關掉並還原共用外殼的間距 */
+  @media(max-width:600px){
+    .fxframe{display:none}
+    .wrap{padding-left:16px;padding-right:16px}
+    .crumb{padding-top:40px}
+    footer{padding-bottom:40px}
+  }
+
   .lv-ok{color:var(--ok2)} .lv-warn{color:var(--warn2)} .lv-crit{color:var(--crit2)} .lv-none{color:var(--mut)}
   .msg.hidden{display:none} /* sbui 的 .msg 是 flex，會蓋掉共用 .hidden，這裡補回來 */
 
@@ -275,8 +354,9 @@ const STYLE = `
   .tip{position:fixed;z-index:50;pointer-events:none;background:#05080C;color:var(--ink);
     border:1px solid var(--rail);border-radius:3px;padding:6px 9px;font-family:var(--mono);font-size:11.5px;
     line-height:1.45;white-space:nowrap;box-shadow:0 10px 26px -8px #000;font-variant-numeric:tabular-nums}
+  /* 加寬到 1480 後這段會拉成超長行 ⇒ 夾住閱讀寬度（其餘區塊是資料格，寬一點反而好） */
   .note-cost{font-family:var(--mono);font-size:10.5px;color:var(--mut);margin-top:28px;line-height:1.75;
-    border-top:1px solid var(--rail);padding-top:16px}
+    max-width:1040px;border-top:1px solid var(--rail);padding-top:16px}
   .note-cost b{color:var(--ink)}
 
   /* 跑道燈：原貌是空心線框，依序填滿發光後復原。5 秒週期＝約 3 秒追光＋約 2 秒靜止。 */
@@ -308,6 +388,13 @@ const STYLE = `
 
 const RENDER_JS = `
 (function(){
+  // 外框固定貼在 topbar 之下 ⇒ 需要 topbar 的實際高度（字級與 600px 斷點都會改變它）
+  var tbar=document.querySelector('.topbar');
+  if(tbar){
+    var setTb=function(){
+      document.documentElement.style.setProperty('--tbh',tbar.getBoundingClientRect().height+'px'); };
+    setTb(); window.addEventListener('resize',setTb);
+  }
   var NS='http://www.w3.org/2000/svg';
   var W=${SPARK_W}, H=${SPARK_H}, REFRESH=${REFRESH_MS};
   var el=function(tag,cls,txt){var n=document.createElement(tag);if(cls)n.className=cls;
@@ -704,6 +791,7 @@ const RENDER_JS = `
 export function renderGcpWatch(vm: DashboardVM): string {
   const bootstrap = JSON.stringify(vm).replace(/</g, '\\u003c');
   const body = `
+    ${FRAME_HTML}
     <div class="crumb"><a href="/">首頁</a> / 營運監控</div>
     <div class="hd">
       <h1>營運監控</h1>
@@ -760,6 +848,6 @@ export function renderGcpWatch(vm: DashboardVM): string {
     body,
     style: STYLE,
     script: `window.__VM__=${bootstrap};\n${RENDER_JS}`,
-    width: '1080px',
+    width: '1480px', // 2026-09-02 由 1080 加寬；扣掉外框讓出的左右各 76px ⇒ 內容實際 1328px
   });
 }
