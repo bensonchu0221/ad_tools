@@ -65,7 +65,9 @@ const CARD_HUD_SVG = `<svg class="hud-svg" viewBox="0 0 480 287" preserveAspectR
 //    整條邊做成一張 preserveAspectRatio=none 的 SVG 拉滿寬度的話，視窗一窄 45° 會被壓成 30°。
 //    直線段的長度比用 flex 比例（358:160）維持原圖比例。
 //    下／右一律鏡射同一份 markup（scaleY(-1) / scaleX(-1)）⇒ 對稱性由結構保證。
-// 參考圖有的斜紋帶（y 61..67）本頁刻意不用：它不承載任何資訊，只會增加雜訊。
+// 斜紋帶（y 61..67，左自 x=98 起、中央留空 220）：純裝飾，不承載任何資料。
+// ⚠️ 必須放在 .fxframe **之外**（另一個 .fxhatch 容器）：.fxframe 那層 11px 輝光會讓
+//    每一條斜紋各自暈開糊成一片；斜紋自己只給 3px 淡輝光。
 // 顏色／輝光與 Memorystore Redis 資源卡的 HUD 同一組（#01D7EB ＋ 3px/11px 兩層 drop-shadow）。
 const FX_CAP = '<svg class="fx-cap" viewBox="24 0 42 52"><polygon points="24,43 39,28 66,28 66,39 62,43"/></svg>';
 const FX_STEP = '<svg class="fx-step" viewBox="424 0 25 52"><polygon points="424,28 439,28 449,38 449,43 427,43 424,39"/></svg>';
@@ -83,6 +85,10 @@ const FRAME_HTML = `<div class="fxframe" aria-hidden="true">
   <div class="fx-bar b">${FX_BAR}</div>
   <div class="fx-rail l">${FX_RAIL}</div>
   <div class="fx-rail r">${FX_RAIL}</div>
+</div>
+<div class="fxhatch" aria-hidden="true">
+  <i class="fx-hz t l"></i><i class="fx-hz t r"></i>
+  <i class="fx-hz b l"></i><i class="fx-hz b r"></i>
 </div>`;
 
 // 狀態色：暗底專用（原亮底的 #15803D/#CA8A04/#B91C1C 在 #080B10 上對比不足）。
@@ -102,7 +108,7 @@ const STYLE = `
   /* ── 螢幕外框：position:fixed 貼在視窗（topbar 之下），內容在框內捲動 ──
      --fxk 是整體縮放，所有尺寸都寫成它的倍數 ⇒ 等比縮放不會破壞 45° 角。 */
   /* 外框色與輝光＝資源卡 HUD 同一組（.rcard 的 --hud 與 .hud-svg 的 filter），兩者必須一致 */
-  :root{--fxk:1; --fx:#01D7EB; --tbh:50px}
+  :root{--fxk:.75; --fx:#01D7EB; --tbh:50px}
   .fxframe{position:fixed;left:0;right:0;top:var(--tbh);bottom:0;z-index:20;pointer-events:none;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
   .fxframe i,.fxframe svg{display:block}
@@ -136,14 +142,25 @@ const STYLE = `
   /* 粗段夾在中段長度內：視窗變矮時不會突出到折角之外 */
   .fx-midtk{position:absolute;left:0;width:calc(var(--fxk)*5px);top:50%;
     height:min(calc(var(--fxk)*156px),100%);transform:translateY(-50%);background:var(--fx)}
+  /* 斜紋帶：pitch 10、線寬 4、-45°（＝參考圖的 / 方向），色相同 --fx 但壓到 52% */
+  .fxhatch{position:fixed;left:0;right:0;top:var(--tbh);bottom:0;z-index:20;pointer-events:none;
+    filter:drop-shadow(0 0 calc(var(--fxk)*3px) rgba(1,215,235,.35))}
+  .fx-hz{position:absolute;height:calc(var(--fxk)*7px);
+    background:repeating-linear-gradient(-45deg,
+      color-mix(in srgb,var(--fx) 52%,transparent) 0 calc(var(--fxk)*4px),
+      transparent calc(var(--fxk)*4px) calc(var(--fxk)*10px))}
+  .fx-hz.t{top:calc(var(--fxk)*61px)}
+  .fx-hz.b{bottom:calc(var(--fxk)*61px)}
+  .fx-hz.l{left:calc(var(--fxk)*98px);  right:calc(50% + var(--fxk)*110px)}
+  .fx-hz.r{right:calc(var(--fxk)*98px); left: calc(50% + var(--fxk)*110px)}
   /* 內容讓開外框：左右各留 76px、上下留出橫帶高度 */
   .wrap{padding-left:calc(var(--fxk)*76px);padding-right:calc(var(--fxk)*76px)}
-  .crumb{padding-top:calc(var(--fxk)*78px)}
-  footer{padding-bottom:calc(var(--fxk)*88px)}
-  @media(max-width:900px){:root{--fxk:.72}}
+  .crumb{padding-top:calc(var(--fxk)*100px)}   /* 讓開橫帶(43)＋斜紋帶(61..68) */
+  footer{padding-bottom:calc(var(--fxk)*105px)}
+  @media(max-width:900px){:root{--fxk:.6}}
   /* 手機：外框會吃掉太多可用寬，直接關掉並還原共用外殼的間距 */
   @media(max-width:600px){
-    .fxframe{display:none}
+    .fxframe,.fxhatch{display:none}
     .wrap{padding-left:16px;padding-right:16px}
     .crumb{padding-top:40px}
     footer{padding-bottom:40px}
