@@ -2,8 +2,10 @@
 // 跑法：npx tsx poc/verify_coupangads.mts
 import {
   planRotation, titleOf, descOf, budgetPerGroup, textMatches, imageMatches,
-  DAILY_BUDGET, MIN_GROUP_BUDGET, IMAGE_SIZE, aliasOf, type GroupView,
+  DAILY_BUDGET, MIN_GROUP_BUDGET, IMAGE_SIZE, aliasOf,
+  CAMPAIGNS, campaignBudget, campaignNoOf, groupNameOf, type GroupView,
 } from '../src/tools/coupangads/plan.js';
+import { aggregateForBq } from '../src/tools/coupangads/bq.js';
 import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
 import {
   rDeviceBucket, twDateFromUtc, attributesToCurrentProduct, attributeRRows, planStatOwnership,
@@ -49,7 +51,41 @@ check('MIN_GROUP_BUDGET 是 50', MIN_GROUP_BUDGET === 50);
 check('舊事故重現：500 元 67 檔也不再砍到 7 元', budgetPerGroup(500, 67, 1) === 50, budgetPerGroup(500, 67, 1));
 check('下限不會反過來灌大正常值', budgetPerGroup(3000, 20) === 300);
 check('DAILY_BUDGET 是 2500（2026-08-28 由 3000 調降）', DAILY_BUDGET === 2500);
-check('新預算下 20 檔 → 每檔 250', budgetPerGroup(DAILY_BUDGET, 20) === 250, budgetPerGroup(DAILY_BUDGET, 20));
+
+console.log('\n[兩支 campaign（2026-09-03）：總花費上限不變，每支拿一半]');
+check('剛好兩支 campaign', CAMPAIGNS.length === 2, CAMPAIGNS.map((c) => c.name));
+check('第一支名稱不可變（線上既有那支就叫這個，改了會另外建一支新的）',
+  CAMPAIGNS[0].name === '[Coupang] reco 自動投放', CAMPAIGNS[0].name);
+check('第一支 group 前綴不可變（改了會把線上每個 group 都改名）',
+  CAMPAIGNS[0].groupPrefix === '[Coupang]', CAMPAIGNS[0].groupPrefix);
+check('第二支名稱', CAMPAIGNS[1].name === '[Coupang] reco 自動投放 2', CAMPAIGNS[1].name);
+check('兩支的 campaign 名不同（R 帳戶內不可重複）', CAMPAIGNS[0].name !== CAMPAIGNS[1].name);
+check('兩支的 group 前綴不同（R 要求 group_name 帳戶內唯一）',
+  CAMPAIGNS[0].groupPrefix !== CAMPAIGNS[1].groupPrefix);
+check('每支日預算＝合計平分（2500 → 1250）', campaignBudget() === 1250, campaignBudget());
+check('兩支加起來不超過 DAILY_BUDGET（總花費上限沒有變大）',
+  campaignBudget() * CAMPAIGNS.length <= DAILY_BUDGET, campaignBudget() * CAMPAIGNS.length);
+check('奇數也不會超（無條件捨去）', campaignBudget(2501, 2) === 1250, campaignBudget(2501, 2));
+check('極小值也不會變成 0（0 元等於整支不投）', campaignBudget(1, 2) >= 1, campaignBudget(1, 2));
+check('單支 1250、20 檔 → 每檔 125', budgetPerGroup(campaignBudget(), 20) === 125, budgetPerGroup(campaignBudget(), 20));
+
+console.log('\n[group 命名：同一商品在兩支底下各一個 group，名字不能撞]');
+check('第一支維持原命名', groupNameOf('123') === '[Coupang] pid-123', groupNameOf('123'));
+check('第二支帶 2', groupNameOf('123', CAMPAIGNS[1]) === '[Coupang2] pid-123', groupNameOf('123', CAMPAIGNS[1]));
+check('同商品兩支的 group 名不同', groupNameOf('123', CAMPAIGNS[0]) !== groupNameOf('123', CAMPAIGNS[1]));
+
+console.log('\n[group 歸屬哪一支 campaign]');
+{
+  const ids = { 1: 194431, 2: 200001 };
+  check('cpg_id 命中第一支', campaignNoOf(194431, '[Coupang] pid-9', ids) === 1);
+  check('cpg_id 命中第二支', campaignNoOf(200001, '[Coupang2] pid-9', ids) === 2);
+  check('cpg_id 還沒回填 → 用 group 名前綴判斷（第二支）', campaignNoOf(null, '[Coupang2] pid-9', ids) === 2);
+  check('cpg_id 還沒回填 → 用 group 名前綴判斷（第一支）', campaignNoOf(null, '[Coupang] pid-9', ids) === 1);
+  check('⚠️ [Coupang2] 不可以被 [Coupang] 寬鬆比對吃掉', campaignNoOf(0, '[Coupang2] pid-9', ids) !== 1);
+  check('舊制 slot-NNN 命名 → 歸第一支（線上既有的都是它）', campaignNoOf(null, 'slot-001', ids) === 1);
+  check('什麼線索都沒有 → 歸第一支，不會變成 undefined', campaignNoOf(null, null, ids) === 1);
+  check('cpg_id 是別人的（R 上被刪掉重建）→ 退回看名字', campaignNoOf(999999, '[Coupang2] pid-9', ids) === 2);
+}
 
 console.log('\n[textMatches：同商品同文案才算沒變]');
 {
@@ -88,7 +124,7 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
   const r = planRotation(gs, ps);
   check('全部同商品同價、素材已是 native → 全 keep、零改動', r.keep.length === 2 && r.reimage.length === 0 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
-  check('在跑檔數＝2、每檔 2500（＝DAILY_BUDGET÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 2500);
+  check('在跑檔數＝2、每檔 1250（＝單支日預算 1250÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 1250, r.budgetPerGroup);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
@@ -166,7 +202,33 @@ console.log('\n[一支 campaign 不限 ad group 數（R 端 PM 確認無限制�
   const r = planRotation([], ps);
   check('400 檔全新商品照建，不會被容量擋下', r.create.length === 400);
   check('不再有「要開新 campaign」這件事', !('newCampaigns' in r), Object.keys(r));
-  check('在跑檔數＝400、每檔預算按 DAILY_BUDGET 分攤後吃下限 50', r.activeCount === 400 && r.budgetPerGroup === 50);
+  check('在跑檔數＝400、每檔預算分攤後吃下限 50', r.activeCount === 400 && r.budgetPerGroup === 50);
+}
+
+console.log('\n[兩支 campaign 必須分開算輪替（混在一起會少開一支）]');
+{
+  const ps = [P(1, '水杯', 100), P(2, '鍋子', 200)];
+  const CPG1 = 194431, CPG2 = 200001;
+  // 第一支已經有這兩檔的 group，第二支還沒有
+  const c1 = [G(101, '1', ps[0], true, CPG1), G(102, '2', ps[1], true, CPG1)];
+  const c2: GroupView[] = [];
+
+  const r1 = planRotation(c1, ps, campaignBudget());
+  const r2 = planRotation(c2, ps, campaignBudget());
+  check('第一支：兩檔都不動', r1.keep.length === 2 && r1.create.length === 0);
+  check('第二支：兩檔都要新開', r2.create.length === 2 && r2.keep.length === 0, r2.create.length);
+  check('第二支不會誤把第一支的 group 拿去暫停', r2.pause.length === 0);
+
+  // ⚠️ 這條是核心：兩支的 group 混在一起算，第二支的兩檔就永遠開不出來
+  const mixed = planRotation([...c1, ...c2], ps, campaignBudget());
+  check('混在一起算會漏開（所以 sync 一定要逐支跑）', mixed.create.length === 0, mixed.create.length);
+
+  // 兩支都已經有 group 之後，各自都回到「完全不動」
+  const c2b = [G(201, '1', ps[0], true, CPG2), G(202, '2', ps[1], true, CPG2)];
+  const r2b = planRotation(c2b, ps, campaignBudget());
+  check('第二支建完後也回到全 keep（不會每天重建）', r2b.keep.length === 2 && r2b.create.length === 0);
+  check('兩支合計在跑 4 個 group（＝2 商品 × 2 支）', r1.activeCount + r2b.activeCount === 4);
+  check('每檔預算兩支相同', r1.budgetPerGroup === r2b.budgetPerGroup);
 }
 
 console.log('\n[CTR 與排序]');
@@ -264,17 +326,47 @@ console.log('\n[裝置維度：同一天同一 group 依裝置拆列，但總數
   check('換商品前的日子：所有裝置列一起不寫', boundary.length === 1 && boundary[0].dt === '2026-08-27', boundary);
 }
 
+console.log('\n[兩支 campaign：同商品兩個 group 的成效要分開存、加總守恆]');
+{
+  // 同一個商品 B 在兩支 campaign 底下各一個 group
+  const slots: SlotMapping[] = [
+    { groupId: 101, productId: 'B', productSince: null },
+    { groupId: 201, productId: 'B', productSince: null },
+  ];
+  const R = (gid: number, imp: number, click = 0, spend = 0) =>
+    ({ day: '2026-09-02', group_id: gid, device_type: 1, impression: imp, click, payment_revenue: spend }) as any;
+  const got = attributeRRows([R(101, 1000, 10, 9.5), R(201, 400, 4, 3.5)], slots);
+  check('兩個 group 各出一列（不是併成一列後只留一個 group_id）', got.length === 2, got);
+  check('兩列都掛在同一個商品名下', got.every((r) => r.productId === 'B'));
+  check('group_id 各自正確', got.map((r) => r.groupId).sort((a, b) => a - b).join() === '101,201');
+  check('曝光合計守恆', got.reduce((s, r) => s + r.imp, 0) === 1400);
+  check('花費合計守恆', Math.round(got.reduce((s, r) => s + r.spend, 0) * 100) === 1300);
+
+  // 看板／BQ 都會把 group 維度加總掉 → 對外數字與「只有一支 campaign」時同形狀
+  const bq = aggregateForBq(got.map((r) => ({
+    dt: r.dt, productId: r.productId, groupId: r.groupId, device: r.device,
+    imp: r.imp, click: r.click, spend: r.spend,
+  })), '2026-09-01', '2026-09-02');
+  check('BQ 把兩支 campaign 併成一列（不分 campaign）', bq.length === 1, bq);
+  check('BQ 那列＝兩支加總', bq[0].impressions === 1400 && bq[0].clicks === 14);
+  check('BQ 花費＝兩支加總', bq[0].spend === 13, bq[0].spend);
+}
+
 console.log('\n[raw CSV：長格式，一列＝日 × 商品 × 裝置]');
 {
   const csv = rawStatsCsv([
-    { dt: '2026-08-27', productId: '4958404', groupId: 213708, device: 'Mobile', imp: 7100, click: 40, spend: 39.97 },
-    { dt: '2026-08-27', productId: '4958404', groupId: 213708, device: 'Tablet', imp: 105, click: 1, spend: 1 },
+    { dt: '2026-08-27', productId: '4958404', cpgId: 194431, groupId: 213708, device: 'Mobile', imp: 7100, click: 40, spend: 39.97 },
+    { dt: '2026-08-27', productId: '4958404', cpgId: 200001, groupId: 300001, device: 'Mobile', imp: 500, click: 3, spend: 2.5 },
+    { dt: '2026-08-27', productId: '4958404', cpgId: 194431, groupId: 213708, device: 'Tablet', imp: 105, click: 1, spend: 1 },
   ]);
   const lines = csv.replace(/^\uFEFF/, '').trim().split('\r\n');
-  check('標頭含 device 且在 group_id 之後',
-    lines[0] === 'dt,product_id,group_id,device,imp,click,spend', lines[0]);
-  check('每個裝置一列', lines.length === 3, lines.length);
-  check('裝置值寫得出來', lines[1] === '2026-08-27,4958404,213708,Mobile,7100,40,39.97', lines[1]);
+  check('標頭含 cpg_id（看板不分 campaign，只有 CSV 切得出來）',
+    lines[0] === 'dt,product_id,cpg_id,group_id,device,imp,click,spend', lines[0]);
+  check('每個 (裝置×group) 一列', lines.length === 4, lines.length);
+  check('裝置值寫得出來', lines[1] === '2026-08-27,4958404,194431,213708,Mobile,7100,40,39.97', lines[1]);
+  check('第二支 campaign 的列切得出來', lines[2] === '2026-08-27,4958404,200001,300001,Mobile,500,3,2.5', lines[2]);
+  check('cpg_id 缺值時留空不寫 undefined',
+    !rawStatsCsv([{ dt: '2026-08-27', productId: '1', groupId: 2, device: 'PC', imp: 0, click: 0, spend: 0 }]).includes('undefined'));
   check('Coupang 佣金/訂單欄已不存在', !lines[0].includes('commission') && !lines[0].includes('orders'));
   check('Excel 用的 UTF-8 BOM 還在', csv.startsWith('\uFEFF'));
 }
@@ -322,8 +414,10 @@ console.log('\n[R 管理 token 被踢掉的辨識：一帳只能有一個有效 
 
 console.log('\n[同步摘要]');
 {
-  const base: any = { campaignId: 1, recoCount: 20, unchanged: 20, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 300, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
-  check('什麼都沒動時不出現雜訊欄位', summarize(base) === '不動 20、在跑 20 檔／每檔 300 元、1.2s', summarize(base));
+  const base: any = { campaignIds: [1, 2], campaigns: [{ no: 1 }, { no: 2 }], recoCount: 20, unchanged: 40, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 125, activeCount: 40, needReview: [], errors: [], elapsedMs: 1234 };
+  check('什麼都沒動時不出現雜訊欄位',
+    summarize(base) === '不動 40、在跑 40 檔（2 支 campaign）／每檔 125 元、1.2s', summarize(base));
+  check('摘要要講清楚 40 檔是兩支加起來（不然會被誤讀成商品變兩倍）', summarize(base).includes('2 支 campaign'));
   check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
   check('換素材會列出', summarize({ ...base, reimaged: 12 }).includes('換素材 12'));
   check('有暫停會列出', summarize({ ...base, paused: 45 }).includes('暫停 45'));

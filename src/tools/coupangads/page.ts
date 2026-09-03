@@ -233,7 +233,7 @@ function render(){
   $('#kpis').innerHTML=[
     ['投放中商品','hero',data.running+' 檔',(data.pendingReview?('待審 '+data.pendingReview+' · '):'')+'暫停 '+data.paused],
     ['CTR','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
-    ['廣告花費','',money(t.spend),'Campaign 日預算 '+money(t.campaignBudget)],
+    ['廣告花費','',money(t.spend),'兩支 campaign 日預算合計 '+money(t.campaignBudget)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
   setSelectedRange(data.range.sd,data.range.ed);
@@ -283,7 +283,7 @@ function renderTable(){
     const tr=document.createElement('tr');
     tr.innerHTML=
       '<td>'+(p.imageUrl?'<img loading="lazy" src="'+esc(p.imageUrl)+'" alt="">':'')+'</td>'+
-      '<td class="muted" style="font-size:11px">'+(p.groupId?esc(String(p.groupId)):'—')+'</td>'+
+      '<td class="muted" style="font-size:11px">'+((p.groupIds&&p.groupIds.length)?p.groupIds.map(g=>esc(String(g))).join('<br>'):(p.groupId?esc(String(p.groupId)):'—'))+'</td>'+
       '<td><div class="nm">'+(p.landingUrl?'<a href="'+esc(p.landingUrl)+'" target="_blank" rel="noopener">'+esc(p.title||p.productId)+'</a>':esc(p.title||p.productId))+'</div>'+
         '<div class="muted" style="font-size:11px">'+esc(p.productId)+'</div></td>'+
       '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n"><b>'+pct(p.ctr)+'</b></td><td class="n">'+money(p.spend)+'</td>'+

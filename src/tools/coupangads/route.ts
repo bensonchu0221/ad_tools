@@ -8,15 +8,10 @@ import { syncCoupangAds, type SyncResult } from './sync.js';
 import { collectStats } from './collect.js';
 import { exportToBigQuery } from './bq.js';
 import {
-  checkSiriKey, parseRangeKind, parseAmount, siriSpend, siriSetBudget, siriAdvice,
-} from './siri.js';
-import {
   listCoupangDailyStats, listCoupangSyncRuns, type CoupangDailyStatRow,
 } from '../../core/store.js';
 
 export const BASE_PATH = '/tools/coupangads';
-/** Siri 捷徑專用前綴。auth.ts 的 OAuth 守衛用這個字串精確放行（捷徑做不了 Google 登入）。 */
-export const SIRI_PATH = BASE_PATH + '/siri';
 
 /** 同步結果 → 一行摘要（進 coupang_sync_runs 與 UI）。 */
 export function summarize(r: SyncResult): string {
@@ -29,7 +24,8 @@ export function summarize(r: SyncResult): string {
     r.paused ? '暫停 ' + r.paused : '',
     r.failed ? '失敗 ' + r.failed : '',
     r.review?.approved ? '自動審核 ' + r.review.approved : '',
-    '在跑 ' + r.activeCount + ' 檔／每檔 ' + r.budgetPerGroup + ' 元',
+    // activeCount 是兩支 campaign 的 group 合計（商品數 × 支數）→ 明講支數，免得被誤讀成商品變兩倍
+    '在跑 ' + r.activeCount + ' 檔（' + (r.campaigns?.length ?? 1) + ' 支 campaign）／每檔 ' + r.budgetPerGroup + ' 元',
     (r.elapsedMs / 1000).toFixed(1) + 's',
   ].filter(Boolean);
   return parts.join('、');
@@ -68,11 +64,13 @@ const csvCell = (value: unknown): string => {
 };
 
 /** 原始收集表逐列輸出；加 BOM 讓 Excel 直接開啟時可正確辨識 UTF-8。
- *  一列＝日期 × 商品 × 裝置（device 為 PC/Mobile/Tablet/Others），丟進樞紐分析可直接按裝置切。 */
+ *  一列＝日期 × 商品 × 裝置 × group（device 為 PC/Mobile/Tablet/Others），丟進樞紐分析可直接切。
+ *  ⚠️ 2026-09-03 加 `cpg_id`：看板與 BQ 都刻意不分 campaign（兩支投放內容相同），
+ *  真的要分開看哪一支帶的量時就用這欄——只有這裡切得出來。 */
 export function rawStatsCsv(rows: CoupangDailyStatRow[]): string {
-  const header = ['dt', 'product_id', 'group_id', 'device', 'imp', 'click', 'spend'];
+  const header = ['dt', 'product_id', 'cpg_id', 'group_id', 'device', 'imp', 'click', 'spend'];
   const body = rows.map((row) => [
-    row.dt, row.productId, row.groupId, row.device, row.imp, row.click, row.spend,
+    row.dt, row.productId, row.cpgId ?? '', row.groupId, row.device, row.imp, row.click, row.spend,
   ].map(csvCell).join(','));
   return '\uFEFF' + [header.join(','), ...body].join('\r\n') + '\r\n';
 }
@@ -145,61 +143,6 @@ export function registerCoupangAds(app: FastifyInstance): void {
       const error = String(e?.message ?? e);
       app.log.error({ marker: 'coupangads_sync', error, trigger: 'manual' }, 'coupangads sync failed');
       reply.send({ ok: false, error });
-    }
-  });
-
-  // ---------- Siri 捷徑 API（2026-08-28）----------
-  // 純加法：不改動輪替/收集/看板任何既有行為。認證走共享金鑰 COUPANG_SIRI_KEY
-  // （捷徑做不了 Google OAuth），金鑰優先讀 header `X-Siri-Key`——寫入端點是真的會花錢的，
-  // 而 Cloud Run 的 request log 會完整記下 URL，放 query 等於寫進日誌。
-  const siriGuard = (req: any, reply: any): boolean => {
-    const provided = req.headers['x-siri-key'] ?? (req.query as any)?.key;
-    if (checkSiriKey(typeof provided === 'string' ? provided : undefined, process.env.COUPANG_SIRI_KEY)) return true;
-    reply.code(404).send('not found'); // 不回 401：對外別暴露這條路徑存在
-    return false;
-  };
-
-  // 今天／最近 7 天花費（?range=today|7d）。讀 DB，不打 R。
-  app.get(SIRI_PATH + '/spend', async (req, reply) => {
-    if (!siriGuard(req, reply)) return;
-    try {
-      reply.send(await siriSpend(parseRangeKind((req.query as any).range)));
-    } catch (e: any) {
-      const error = String(e?.message ?? e);
-      app.log.error({ marker: 'coupangads_siri', error }, 'siri spend failed');
-      reply.code(500).send({ ok: false, error, text: '查詢花費失敗：' + error });
-    }
-  });
-
-  // 調日預算（?amount=3000，?dry=1 只算不寫）。先寫設定再推 R，見 siri.ts。
-  app.post(SIRI_PATH + '/budget', async (req, reply) => {
-    if (!siriGuard(req, reply)) return;
-    const q = req.query as any;
-    const body = (req.body ?? {}) as any;
-    const parsed = parseAmount(q.amount ?? body.amount);
-    if (!parsed.ok) return reply.code(400).send({ ok: false, error: parsed.error, text: parsed.error });
-    try {
-      const r = await siriSetBudget(parsed.value, { dryRun: q.dry === '1' });
-      app.log.info({ marker: 'coupangads_siri', action: 'budget', ...r }, 'siri budget');
-      reply.send(r);
-    } catch (e: any) {
-      const error = String(e?.message ?? e);
-      app.log.error({ marker: 'coupangads_siri', error }, 'siri budget failed');
-      reply.code(500).send({ ok: false, error, text: '調整日預算失敗：' + error });
-    }
-  });
-
-  // 近 7 天數據 → Gemini → 最多 3 條優化建議（唯讀，不會自動調整任何設定）
-  app.get(SIRI_PATH + '/advice', async (req, reply) => {
-    if (!siriGuard(req, reply)) return;
-    try {
-      const r = await siriAdvice(7);
-      app.log.info({ marker: 'coupangads_siri', action: 'advice', ok: r.ok, elapsedMs: r.elapsedMs }, 'siri advice');
-      reply.send(r);
-    } catch (e: any) {
-      const error = String(e?.message ?? e);
-      app.log.error({ marker: 'coupangads_siri', error }, 'siri advice failed');
-      reply.code(500).send({ ok: false, error, text: '取得 AI 建議失敗：' + error });
     }
   });
 

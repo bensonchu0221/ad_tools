@@ -1,4 +1,7 @@
 // 看板資料：改讀 coupang_daily_stats / coupang_slots（每小時 :30 由 collect.ts 更新），不再即時打外部 API。
+// ⚠️ 2026-09-03 起有兩支 campaign，同一個商品在兩支底下各有一個 group。**看板一律以商品為單位合併**
+//    （使用者指定不分 campaign）：KPI「投放中商品」數的是商品不是 group，商品列的曝光/點擊/花費是
+//    兩支加總、日預算是兩支在跑 group 的預算合計。要分 campaign 看就下載 raw CSV（有 cpg_id 欄）。
 // 好處是秒開、不受 Coupang 報表 T+1 延遲與 API 保留期影響；代價是資料延遲——但主要延遲來自 R
 // 自己（全平台每小時批次更新，實測約 :20），抓再密也拿不到更新的數字。
 import {
@@ -21,7 +24,10 @@ export interface DailyRow {
 export interface ProductRow {
   productId: string;
   slotNo: number | null;
+  /** 主 group（＝第一支 campaign 那個，group_id 較小者）。看板欄位與舊版相容用。 */
   groupId: number | null;
+  /** 這個商品底下所有 group（兩支 campaign 各一）。畫面顯示與除錯用。 */
+  groupIds: number[];
   title: string;
   imageUrl: string;
   landingUrl: string;
@@ -86,8 +92,16 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   ]);
 
   // 商品資料：先用 slot 上的（就是廣告上真正在跑的文案），沒有的再查商品表（已下架但期間有數據者）
-  const slotByProduct = new Map<string, typeof slots[number]>();
-  for (const s of slots) if (s.productId) slotByProduct.set(s.productId, s);
+  // 一個商品現在有兩個 slot（兩支 campaign 各一）⇒ 收成陣列，顯示用「主 slot」＝ group_id 較小者
+  // （＝第一支 campaign 先建的那個，文案／落地頁兩支本來就一樣）。
+  const slotsByProduct = new Map<string, typeof slots>();
+  for (const s of slots) {
+    if (!s.productId) continue;
+    const list = slotsByProduct.get(s.productId) ?? [];
+    list.push(s);
+    slotsByProduct.set(s.productId, list);
+  }
+  for (const list of slotsByProduct.values()) list.sort((a, b) => a.groupId - b.groupId);
   const allIds = [...new Set([...stats.map((r) => r.productId), ...slots.map((s) => s.productId).filter(Boolean) as string[]])];
   const meta = allIds.length ? await listCoupangProducts(allIds) : new Map();
 
@@ -98,19 +112,24 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const prodMap = new Map<string, ProductRow>();
   const prod = (pid: string): ProductRow => {
     if (!prodMap.has(pid)) {
-      const s = slotByProduct.get(pid);
+      const list = slotsByProduct.get(pid) ?? [];
+      const s = list[0];                              // 主 slot（第一支 campaign）
+      const live = list.filter((x) => x.active);
       const p = meta.get(pid);
       prodMap.set(pid, {
         productId: pid,
         slotNo: s?.slotNo ?? null,
         groupId: s?.groupId ?? null,
+        groupIds: list.map((x) => x.groupId),
         title: s?.title ?? p?.name ?? '',
         imageUrl: p?.imageUrl ?? '',
         landingUrl: s?.landingUrl ?? '',
-        dayBudget: s?.dayBudget ?? 0,
-        active: s?.active ?? false,
-        pendingReview: s?.summaryStatus === PENDING_REVIEW,
-        lastChangedAt: s?.lastChangedAt ?? null,
+        // 日預算＝在跑的那幾個 group 加總（＝這個商品一天最多花多少）；全停就顯示全部加總
+        dayBudget: (live.length ? live : list).reduce((a, x) => a + Number(x.dayBudget ?? 0), 0),
+        // 兩支只要有一支在跑就算投放中；待審同理（有一支待審就提醒去審）
+        active: live.length > 0,
+        pendingReview: live.some((x) => x.summaryStatus === PENDING_REVIEW),
+        lastChangedAt: list.map((x) => x.lastChangedAt).filter(Boolean).sort().pop() ?? null,
         imp: 0, click: 0, ctr: null, spend: 0,
       });
     }
@@ -142,8 +161,9 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
 
   const sum = (f: (d: DailyRow) => number) => daily.reduce((s, d) => s + f(d), 0);
   const spend = sum((d) => d.spend);
-  const running = slots.filter((s) => s.active && s.productId).length;
-  const pendingReview = slots.filter((s) => s.active && s.summaryStatus === PENDING_REVIEW).length;
+  // KPI 一律數「商品」不數 group（一個商品在兩支 campaign 底下各一個 group，數 group 會直接翻倍）
+  const running = products.filter((p) => p.active).length;
+  const pendingReview = products.filter((p) => p.pendingReview).length;
 
   if (!stats.length) warnings.push('這段期間還沒有收集到成效資料（收集器每小時 :30 跑一次）');
 
@@ -151,13 +171,13 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     range: { sd, ed },
     running,
     pendingReview,
-    paused: slots.filter((s) => !s.active).length,
+    paused: products.filter((p) => !p.active).length,
     totals: {
       spend, imp: sum((d) => d.imp), click: sum((d) => d.click),
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
-      // Campaign 的日預算（不是各 group 加總）：sync 每次都把它校正回這個生效值
-      // （plan.ts 的 DAILY_BUDGET，或 Siri 端點改過後存在 coupang_settings 的值），
-      // 所以它就是 R 上那支 campaign 當下的日預算，也是整體花費的硬上限。
+      // 兩支 campaign 的日預算**合計**（不是各 group 加總）：sync 每次都把兩支各校正回
+      // 「這個生效值 ÷ 2」（plan.ts 的 DAILY_BUDGET，或 coupang_settings 有那一列時以設定為準），
+      // 所以它就是整體花費的硬上限。
       campaignBudget,
     },
     daily,

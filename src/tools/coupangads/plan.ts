@@ -15,9 +15,18 @@
 //  - reco 裡、從沒見過的商品 → **建新 group**（絕不覆蓋任何既有 group）
 //  - 不在 reco、還開著的 → 暫停
 //
-// 容量：**一支 campaign 不限 ad group 數**（2026-08-27 向 R 端 PM 確認）。曾經自設 300 的安全閥、
-// 滿了就開新 campaign，但那會帶出「多支 campaign 的日預算怎麼分」的麻煩（每支都給 3000 的話
-// 總花費上限會變成 3000×N），既然平台沒限制就不自找麻煩——一支 campaign 吃 DAILY_BUDGET 就好。
+// 容量：**一支 campaign 不限 ad group 數**（2026-08-27 向 R 端 PM 確認），所以 campaign 的支數
+// 純粹是業務需求決定的，不是被容量逼出來的。
+//
+// ⚠️⚠️ **2026-09-03：改成兩支 campaign**（使用者需求）。兩支的投放內容完全一樣——同一批 reco 商品、
+// 同樣的文案／素材／落地頁，差別只在**使用者自己在 R 後台手動給第二支設定的「流量來源」**
+// （設在 campaign 層 ⇒ 底下的 group 自動吃到，程式完全不碰這件事）。
+// 因此本模組的規則對每一支 campaign 各跑一次：**每支 campaign 各自擁有「一商品一 group」的永久對映**，
+// 同一個商品在兩支 campaign 底下各有一個 group（不同 group_id、不同 group 名）。
+//   - 預算：`DAILY_BUDGET` 的語意由「單支 campaign 的日預算」改成 **兩支合計的上限**，
+//     每支拿 `campaignBudget()` ＝ 平分（2500 → 各 1250）⇒ **總花費上限維持 2500 不變**。
+//   - 報表：BQ 匯出把商品粒度加總掉、兩支 campaign 一起併成同一批 `popIn_network` 列（見 bq.ts），
+//     刻意**不分是哪一支 campaign**（使用者指定）。
 import type { CoupangProduct } from '../../core/coupang.js';
 
 /**
@@ -36,7 +45,12 @@ export const IMAGE_SIZE = '1200x628';
  */
 export const aliasOf = (productId: number | string) => `coupang_pid_${productId}_${IMAGE_SIZE}`;
 
-export const DAILY_BUDGET = 2500;      // 全域日預算（台幣），2026-08-28 由 3000 調降（使用者指定）
+/**
+ * 全域日預算（台幣）。2026-08-28 由 3000 調降（使用者指定）。
+ * ⚠️ **2026-09-03 語意改變**：這是**兩支 campaign 合計**的上限，不是單支的日預算——
+ * 改成兩支 campaign 時使用者指定「總花費維持不變」，所以每支拿 `campaignBudget()` ＝ 一半。
+ */
+export const DAILY_BUDGET = 2500;
 export const BUDGET_MULTIPLIER = 2;    // 每檔預算＝總預算÷在跑檔數×2（超出的部分由 campaign 日預算擋）
 export const CPC = 1;
 // ⚠️ 每檔預算下限（2026-08-27 加）：初版是「500 ÷ 在跑檔數」且每次同步都重算，檔數長到 67 時
@@ -44,7 +58,64 @@ export const CPC = 1;
 // ⇒ 幾乎標不到量。實證 8/26 全帳戶 54 組只花 107.94 元、曝光比 8/25 掉 5 倍（每小時口徑）。
 // 預算再怎麼分攤都不該低到「不可能出量」，寧可少開幾檔也不要每檔都跑不動。
 export const MIN_GROUP_BUDGET = 50;
-export const CAMPAIGN_NAME = '[Coupang] reco 自動投放';
+/**
+ * 一支 campaign 的規格。兩支的投放內容完全一樣，差別只在使用者手動設在第二支上的流量來源。
+ */
+export interface CampaignSpec {
+  /** 序號：1＝原本那支（線上既有的 group 全都屬於它）、2＝2026-09-03 新增。 */
+  no: 1 | 2;
+  /** R 上的 campaign 名稱（帳戶內不可重複，程式靠它找到／建立）。 */
+  name: string;
+  /**
+   * group 名前綴。**R 要求 `group_name` 帳戶內唯一** ⇒ 兩支 campaign 不能共用同一組名字。
+   * ⚠️ 第一支必須維持原本的 `[Coupang]`：改了會讓 sync 的 `alignGroup` 把線上既有的
+   * 每一個 group 全部改名（一次幾十支白打的 PUT，且 R 後台的歷史名字也跟著亂掉）。
+   */
+  groupPrefix: string;
+}
+
+/** 兩支 campaign。順序有意義：`CAMPAIGNS[0]` 是既有那支，新增的一律往後接。 */
+export const CAMPAIGNS: CampaignSpec[] = [
+  { no: 1, name: '[Coupang] reco 自動投放',   groupPrefix: '[Coupang]' },
+  { no: 2, name: '[Coupang] reco 自動投放 2', groupPrefix: '[Coupang2]' },
+];
+
+/** 既有 import 路徑相容：指第一支 campaign 的名稱。 */
+export const CAMPAIGN_NAME = CAMPAIGNS[0].name;
+
+/**
+ * 每支 campaign 分到的日預算＝總預算平分。
+ * 這是「總花費上限不變」這個決定的唯一落點：兩支各拿一半，加起來還是 DAILY_BUDGET。
+ */
+export function campaignBudget(total = DAILY_BUDGET, campaigns = CAMPAIGNS.length): number {
+  return Math.max(1, Math.floor(total / Math.max(1, campaigns)));
+}
+
+/** group 名以「campaign 前綴＋商品 ID」命名（永久對映 → 名字固定，在 R 後台好認是哪支的哪個商品）。 */
+export function groupNameOf(productId: number | string, campaign: CampaignSpec = CAMPAIGNS[0]): string {
+  return `${campaign.groupPrefix} pid-${productId}`;
+}
+
+/**
+ * 這個 group 屬於哪一支 campaign。**cpg_id 為準**；cpg_id 還沒回填（或那支 campaign 在 R 上被刪了）
+ * 就退回用 group 名前綴判斷，兩者都沒轍才歸第一支（線上既有的 group 全都是第一支的）。
+ * 純函式，離線可驗。
+ */
+export function campaignNoOf(
+  cpgId: number | null | undefined,
+  groupName: string | null | undefined,
+  cpgIdByNo: Record<number, number>,
+): number {
+  for (const spec of CAMPAIGNS) {
+    if (cpgId && Number(cpgIdByNo[spec.no] ?? 0) === Number(cpgId)) return spec.no;
+  }
+  // 前綴由長到短比對：'[Coupang2]' 若排在 '[Coupang]' 之後被寬鬆比對到就會全歸第一支
+  const name = String(groupName ?? '');
+  const hit = [...CAMPAIGNS]
+    .sort((a, b) => b.groupPrefix.length - a.groupPrefix.length)
+    .find((c) => name.startsWith(c.groupPrefix + ' '));
+  return hit?.no ?? CAMPAIGNS[0].no;
+}
 
 /** R 上一個 AdGroup 的現況。productId 建立後就固定，這是整套設計的不變量。 */
 export interface GroupView {
@@ -99,10 +170,14 @@ export function imageMatches(group: Pick<GroupView, 'mtName'>, productId: number
 }
 
 /**
- * @param totalBudget 這次要分攤的日預算。預設 DAILY_BUDGET；呼叫端（sync.ts）會傳入
- *   `settings.ts getDailyBudget()` 的生效值，讓 Siri 改過的預算能真的分到每一檔。
+ * 對**一支** campaign 算輪替計畫。兩支 campaign 就呼叫兩次，各自傳入自己的 group 清單
+ * （見 sync.ts）——兩支的 group 不能混在一起算，否則同一個商品的兩個 group 會互相被當成
+ * 「同商品已經有 group 了」而少開一支。
+ *
+ * @param campaignDayBudget **這一支** campaign 的日預算（不是兩支合計）。預設 `campaignBudget()`；
+ *   呼叫端（sync.ts）傳的是 `campaignBudget(await getDailyBudget())`。
  */
-export function planRotation(groups: GroupView[], products: CoupangProduct[], totalBudget = DAILY_BUDGET): RotationPlan {
+export function planRotation(groups: GroupView[], products: CoupangProduct[], campaignDayBudget = campaignBudget()): RotationPlan {
   const recoIds = new Set(products.map((p) => String(p.productId)));
   // 一個商品理論上只會有一個 group；真的撞到多個（例如歷史遺留）就優先用還開著、id 較新的那個
   const byProduct = new Map<string, GroupView>();
@@ -136,6 +211,6 @@ export function planRotation(groups: GroupView[], products: CoupangProduct[], to
   const activeCount = keep.length + reimage.length + retext.length + reactivate.length + create.length;
   return {
     keep, reimage, retext, reactivate, create, pause, activeCount,
-    budgetPerGroup: budgetPerGroup(totalBudget, activeCount),
+    budgetPerGroup: budgetPerGroup(campaignDayBudget, activeCount),
   };
 }

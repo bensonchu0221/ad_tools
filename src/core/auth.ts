@@ -162,16 +162,14 @@ export async function registerAuth(app: FastifyInstance) {
     reply.redirect('/login');
   });
 
-  // 守衛：未登入一律導向 /login（除外：登入相關、健康檢查、排程 webhook、Siri 捷徑、自架字體靜態檔）
+  // 守衛：未登入一律導向 /login（除外：登入相關、健康檢查、排程 webhook、自架字體靜態檔）
   // `/tools/*/cron`＝Cloud Scheduler 打的排程入口，沒有登入 cookie，靠各自 DIAG_KEY 守衛（同 /health 模式）
-  // `/tools/coupangads/siri/*`＝iPhone Siri 捷徑（做不了 Google OAuth），靠 COUPANG_SIRI_KEY 守衛。
-  //   ⚠️ 刻意寫成精確前綴而不是萬用比對（如 includes('/siri/')），避免以後不小心放行別的路徑。
   // `/fonts/*`＝首頁自架字體 woff2，非敏感且須在 cookie 失效時仍能載入，故放行
-  const SIRI_PREFIX = '/tools/coupangads/siri/';
+  // （2026-09-03 移除 `/tools/coupangads/siri/` 前綴：Siri 捷徑功能已整組刪除）
   app.addHook('preHandler', async (req, reply) => {
     const path = req.url.split('?')[0];
     if (path === '/login' || path.startsWith('/auth/') || path.startsWith('/health') || path.startsWith('/fonts/')
-        || path.startsWith(SIRI_PREFIX) || path.endsWith('/cron')) return;
+        || path.endsWith('/cron')) return;
     if (!currentUser(req)) return reply.redirect('/login');
   });
 }

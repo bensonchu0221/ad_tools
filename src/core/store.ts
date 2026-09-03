@@ -1544,6 +1544,8 @@ export interface CoupangDailyStatRow {
   dt: string;
   productId: string;
   groupId: number | null;
+  /** 這個 group 屬於哪支 campaign（讀取時由 coupang_slots join 出來，寫入端不需要）。 */
+  cpgId?: number | null;
   /** PC / Mobile / Tablet / Others（由 R 的 device_type 對照而來，口徑同整合週報）。 */
   device: string;
   imp: number; click: number; spend: number;
@@ -1590,7 +1592,7 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
   await p.query(`
     CREATE TABLE IF NOT EXISTS coupang_slots (
       group_id        BIGINT       NOT NULL PRIMARY KEY,
-      cpg_id          BIGINT       NULL COMMENT '所屬 campaign；一支最多 300 個 group，滿了開新的',
+      cpg_id          BIGINT       NULL COMMENT '所屬 campaign（2026-09-03 起有兩支，投放內容相同）',
       slot_no         INT          NOT NULL,
       product_id      VARCHAR(32)  NULL,
       cr_id           BIGINT       NULL,
@@ -1644,12 +1646,12 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
       dt            DATE         NOT NULL,
       product_id    VARCHAR(32)  NOT NULL,
       device        VARCHAR(8)   NOT NULL COMMENT 'PC/Mobile/Tablet/Others，由 R device_type 對照',
-      group_id      BIGINT       NULL,
+      group_id      BIGINT       NOT NULL DEFAULT 0,
       imp           BIGINT       NOT NULL DEFAULT 0,
       click         BIGINT       NOT NULL DEFAULT 0,
       spend         DECIMAL(16,4) NOT NULL DEFAULT 0,
       synced_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (dt, product_id, device),
+      PRIMARY KEY (dt, product_id, device, group_id),
       INDEX idx_dt (dt)
     ) DEFAULT CHARSET=utf8mb4
   `);
@@ -1671,6 +1673,24 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
       INDEX idx_ran (ran_at)
     ) DEFAULT CHARSET=utf8mb4
   `);
+  // 2026-09-03：改成兩支 campaign 後，一個商品在兩支底下各有一個 group ⇒ 主鍵必須帶 group_id，
+  // 否則兩個 group 的同一天同一裝置會互相覆蓋（只留最後寫入的那一筆，另一支的量整個不見）。
+  // ⚠️ 這次**可以就地 ALTER**（跟 2026-08-27 那次加 device 不同）：舊列每列本來就只來自一個 group，
+  //    加了 group_id 進主鍵不會讓任何一列變成兩列，也就不會被加總兩次。
+  if (await hasTable('coupang_daily_stats') && await hasColumn('coupang_daily_stats', 'device')) {
+    const [pk] = await p.query(
+      `SELECT COLUMN_NAME FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA=? AND TABLE_NAME='coupang_daily_stats' AND INDEX_NAME='PRIMARY'`,
+      [dbName]
+    );
+    const cols = (pk as any[]).map((r) => String(r.COLUMN_NAME));
+    if (cols.length && !cols.includes('group_id')) {
+      // 主鍵欄位不可為 NULL；歷史上 group_id 一律有值，保險起見還是先補 0
+      await p.query(`UPDATE coupang_daily_stats SET group_id = 0 WHERE group_id IS NULL`);
+      await p.query(`ALTER TABLE coupang_daily_stats MODIFY group_id BIGINT NOT NULL DEFAULT 0`);
+      await p.query(`ALTER TABLE coupang_daily_stats DROP PRIMARY KEY, ADD PRIMARY KEY (dt, product_id, device, group_id)`);
+    }
+  }
   // 既有表補 product_since：last_changed_at 連「只改文案」也會動，不能當成效歸屬邊界。
   // 回填用 assigned_at（現有資料最接近「這個商品換上來的時間」的欄位）。
   if (!(await hasColumn('coupang_slots', 'product_since'))) {
@@ -1678,11 +1698,11 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
                    COMMENT '一律存 UTC；只在 product_id 真的變動時才推進（成效歸屬邊界）'`);
     await p.query(`UPDATE coupang_slots SET product_since = COALESCE(assigned_at, last_changed_at)`);
   }
-  // 2026-08-27：group ↔ 商品改永久對映後，group 會累積 → 一支 campaign 最多 300 個，滿了開新的，
-  // 所以要知道每個 group 屬於哪支 campaign。既有列全是第一支 campaign。
+  // 2026-08-27：group ↔ 商品改永久對映後，group 會累積，要知道每個 group 屬於哪支 campaign。
+  // 既有列全是第一支 campaign（2026-09-03 起有兩支，第二支的 group 建立時就會寫 cpg_id）。
   if (!(await hasColumn('coupang_slots', 'cpg_id'))) {
     await p.query(`ALTER TABLE coupang_slots ADD COLUMN cpg_id BIGINT NULL
-                   COMMENT '所屬 campaign；一支最多 300 個 group，滿了開新的'`);
+                   COMMENT '所屬 campaign（2026-09-03 起有兩支，投放內容相同）'`);
   }
   // 2026-08-28：可在執行期改的設定（目前只有 daily_budget，給 Siri 捷徑用）。
   // ⚠️ 沒有這一列時，一切行為與加這張表之前完全相同——讀取端一律 fallback 回原始碼常數。
@@ -1878,14 +1898,19 @@ export async function listCoupangDailyStats(sd: string, ed: string): Promise<Cou
   // ⚠️ dt 一定要讓 MySQL 直接格式化成字串。原本是 `new Date(r.dt).toISOString().slice(0,10)`，
   // 而 mysql2 會用「行程所在時區」把 DATE 建成 Date 物件 → 在 UTC+8 的機器上 toISOString()
   // 會倒退一天，整份看板與 CSV 的日期全部左移（線上 Cloud Run 是 UTC 才剛好看不出來）。
+  // cpg_id 由 coupang_slots 帶出來（成效表本身只有 group_id）：CSV 要能按 campaign 切，
+  // 但看板與 BQ 都不分 campaign（使用者指定），所以只在這裡 join，不進主鍵也不另存一欄。
   const [rows] = await p.query(
-    `SELECT DATE_FORMAT(dt, '%Y-%m-%d') AS dt, product_id, device, group_id, imp, click, spend
-       FROM coupang_daily_stats WHERE dt BETWEEN ? AND ? ORDER BY dt, product_id, device`, [sd, ed]
+    `SELECT DATE_FORMAT(d.dt, '%Y-%m-%d') AS dt, d.product_id, d.device, d.group_id, s.cpg_id,
+            d.imp, d.click, d.spend
+       FROM coupang_daily_stats d
+       LEFT JOIN coupang_slots s ON s.group_id = d.group_id
+      WHERE d.dt BETWEEN ? AND ? ORDER BY d.dt, d.product_id, d.device, d.group_id`, [sd, ed]
   );
   return (rows as any[]).map((r) => ({
     dt: String(r.dt),
     productId: String(r.product_id), device: String(r.device),
-    groupId: num(r.group_id),
+    groupId: num(r.group_id), cpgId: num(r.cpg_id),
     imp: Number(r.imp), click: Number(r.click), spend: Number(r.spend),
   }));
 }

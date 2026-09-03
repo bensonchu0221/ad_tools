@@ -3,6 +3,8 @@
 //    所以 2026-08-27 由每 10 分鐘改成每小時 :30（留 ~10 分鐘餘裕）。
 // 看板改讀這張表＝秒開，也不受 API 保留期與延遲影響。
 // R 是 group 粒度、我們要商品粒度 → 用 slots 表的 group↔商品永久對映接起來。
+// ⚠️ 2026-09-03 起一個商品有兩個 group（兩支 campaign 各一），成效列**依 group 分開存**，
+//    看板與 BQ 都會把 group 維度加總掉 ⇒ 對外數字不變（見 attributeRRows 註解）。
 // 換素材當天該 group 全天的量會算給「當下掛的商品」（R 報表拆不出時段），這是刻意的取捨。
 //
 // ⚠️ 2026-08-27 移除 Coupang 聯盟報表（commission/orders/cancels）：實測從上線到現在
@@ -77,8 +79,14 @@ export interface AttributedRow {
   imp: number; click: number; spend: number;
 }
 
-/** R 報表列 → (日期 × 商品 × 裝置) 的曝光/點擊/花費。純函式：重複計數的防線在這裡，好驗。
- *  同一天同一 group 的多個 device_type 代碼可能落進同一桶（如 3/7 都歸 Others），要累加不能覆蓋。 */
+/** R 報表列 → (日期 × 商品 × 裝置 × group) 的曝光/點擊/花費。純函式：重複計數的防線在這裡，好驗。
+ *  同一天同一 group 的多個 device_type 代碼可能落進同一桶（如 3/7 都歸 Others），要累加不能覆蓋。
+ *
+ *  ⚠️ **2026-09-03 起 key 帶 group_id**：改成兩支 campaign 後，同一個商品在兩支底下各有一個 group
+ *  ⇒ 若照舊只用 (日期×商品×裝置) 當 key，兩個 group 的量會被併成一列、`groupId` 欄只留其中一個
+ *  （另一個的數字掛在錯的 group 名下）。那會讓 CSV 的 group_id 對不上，也讓 `clearForeignStatMetrics`
+ *  的「一個 (日期×group) 只能有一個商品持有數字」失去意義。分開存之後，看板與 BQ 照樣把兩列加總，
+ *  總數完全相同（兩者本來就會 sum 掉 group 維度）。 */
 export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow[] {
   const byGroup = new Map<number, { productId: string; changedTwDate: string | null }>();
   for (const s of slots) {
@@ -92,7 +100,7 @@ export function attributeRRows(rows: any[], slots: SlotMapping[]): AttributedRow
     const dt = normDate(r.day);
     if (!attributesToCurrentProduct(dt, m.changedTwDate)) continue; // 換商品之前的日子留給舊商品
     const device = rDeviceBucket(r.device_type);
-    const k = dt + '|' + m.productId + '|' + device;
+    const k = dt + '|' + m.productId + '|' + device + '|' + gid;
     if (!out.has(k)) out.set(k, { dt, productId: m.productId, groupId: gid, device, imp: 0, click: 0, spend: 0 });
     const c = out.get(k)!;
     c.imp += Number(r.impression ?? 0);

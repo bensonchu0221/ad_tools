@@ -11,6 +11,7 @@
 //
 // 因此本模組的規則是：
 //   ① **domain 分工**：`popIn_network` 這條只有我們寫，其餘 domain 只有他寫，各不相犯。
+//      （兩支 campaign 都寫進這同一條 domain，不分 campaign——2026-09-03 使用者指定。）
 //   ② **每次全量重寫**（START_DATE ~ T-1），不是只寫 T-1——因為他每天中午會把我們清光，
 //      只寫 T-1 的話表上永遠只剩最近一天，歷史會一天天不見。
 //   ③ **一定要排在他之後**（排程定在台北 12:30；他 12:00 跑、通常 12:01:15 結束，但實測有一次延遲到
@@ -63,7 +64,9 @@ export interface BqReportRow {
 }
 
 /**
- * coupang_daily_stats（日×商品×裝置）→ BQ 列（日×裝置）。**商品粒度加總掉**（使用者決定不保留）。
+ * coupang_daily_stats（日×商品×裝置×group）→ BQ 列（日×裝置）。**商品與 group 粒度都加總掉**
+ * （使用者決定不保留）。⚠️ 2026-09-03 起有兩支 campaign，同一商品在兩支底下各一個 group ⇒
+ * **兩支的量在這裡自然併成同一批 `popIn_network` 列，刻意不分是哪一支**（使用者指定）。
  * 純函式：日期上界由呼叫端給（T-1），今天的半天數字不能寫進去。
  */
 export function aggregateForBq(stats: CoupangDailyStatRow[], startDate: string, endDate: string): BqReportRow[] {

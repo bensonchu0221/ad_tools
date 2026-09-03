@@ -1,21 +1,21 @@
-// 執行期設定：目前只有「日預算」一項，因為 Siri 捷徑要能在外面改它。
+// 執行期設定：目前只有「日預算」一項。
 //
-// ⚠️ 設計重點是**加法式、不改變既有行為**：`plan.ts` 的 DAILY_BUDGET 原封不動留著當預設值，
-// 這裡只在 coupang_settings 真的有那一列時才覆蓋它。沒有人用 Siri 改過之前，
-// sync/stats 讀到的值與這個模組加進來之前逐字元相同。
+// ⚠️ 2026-09-03：原本是給 Siri 捷徑改預算用的，Siri 那組功能已整組移除，寫入端（setDailyBudget）
+// 跟著刪掉；**讀取端刻意保留**——線上要臨時調預算時，`INSERT INTO coupang_settings` 塞一列即可，
+// 不必改程式重新部署。沒有那一列時讀到的就是原始碼常數 `plan.ts DAILY_BUDGET`，
+// 行為與這張表不存在時完全相同。
 //
-// 為什麼不能只改 R 上那支 campaign 的 day_budget：sync.ts 每天 09:50 都會把它校正回程式裡的值
-// （見 sync.ts 第 6 步），所以不落地成設定的話，Siri 調的預算活不過隔天早上。
-import { getCoupangSetting, setCoupangSetting } from '../../core/store.js';
+// 為什麼不能只改 R 上那兩支 campaign 的 day_budget：sync.ts 每天 09:50 都會把它們校正回程式裡的值
+// （見 sync.ts 第 6 步），所以不落地成設定的話，手動調的預算活不過隔天早上。
+import { getCoupangSetting } from '../../core/store.js';
 import { DAILY_BUDGET } from './plan.js';
 
 export const KEY_DAILY_BUDGET = 'daily_budget';
 
-/** 日預算下限／上限：Siri 語音辨識會聽錯（300 聽成 30000），寫入端一律夾在這個區間內。 */
-export const BUDGET_MIN = 500;
-export const BUDGET_MAX = 10000;
-
-/** 目前生效的日預算。沒設定過（或值壞掉）就回原始碼常數。 */
+/**
+ * 目前生效的日預算。沒設定過（或值壞掉）就回原始碼常數。
+ * ⚠️ 語意是**兩支 campaign 合計**的上限（2026-09-03 起），不是單支的日預算。
+ */
 export async function getDailyBudget(): Promise<number> {
   let raw: string | null = null;
   try {
@@ -25,8 +25,4 @@ export async function getDailyBudget(): Promise<number> {
   }
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DAILY_BUDGET;
-}
-
-export async function setDailyBudget(value: number, updatedBy = 'siri'): Promise<void> {
-  await setCoupangSetting(KEY_DAILY_BUDGET, String(Math.floor(value)), updatedBy);
 }
