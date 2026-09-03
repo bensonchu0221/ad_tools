@@ -45,12 +45,7 @@ export const IMAGE_SIZE = '1200x628';
  */
 export const aliasOf = (productId: number | string) => `coupang_pid_${productId}_${IMAGE_SIZE}`;
 
-/**
- * 全域日預算（台幣）。2026-08-28 由 3000 調降（使用者指定）。
- * ⚠️ **2026-09-03 語意改變**：這是**兩支 campaign 合計**的上限，不是單支的日預算——
- * 改成兩支 campaign 時使用者指定「總花費維持不變」，所以每支拿 `campaignBudget()` ＝ 一半。
- */
-export const DAILY_BUDGET = 2500;
+// DAILY_BUDGET 移到 CAMPAIGNS 之後定義（它是兩支日預算的**加總**，不是各自的值）。
 export const BUDGET_MULTIPLIER = 2;    // 每檔預算＝總預算÷在跑檔數×2（超出的部分由 campaign 日預算擋）
 export const CPC = 1;
 // ⚠️ 每檔預算下限（2026-08-27 加）：初版是「500 ÷ 在跑檔數」且每次同步都重算，檔數長到 67 時
@@ -72,23 +67,41 @@ export interface CampaignSpec {
    * 每一個 group 全部改名（一次幾十支白打的 PUT，且 R 後台的歷史名字也跟著亂掉）。
    */
   groupPrefix: string;
+  /**
+   * 這支 campaign 的日預算（台幣）。**兩支不必相同**——2026-09-03 使用者指定 1000／1500
+   * （原本是 2500 平分各 1250）。改這裡就等於改線上：sync 每次都會把 R 上的 campaign 與
+   * 底下每個 group 的日預算校正回這組值。
+   */
+  dayBudget: number;
 }
 
 /** 兩支 campaign。順序有意義：`CAMPAIGNS[0]` 是既有那支，新增的一律往後接。 */
 export const CAMPAIGNS: CampaignSpec[] = [
-  { no: 1, name: '[Coupang] reco 自動投放',   groupPrefix: '[Coupang]' },
-  { no: 2, name: '[Coupang] reco 自動投放 2', groupPrefix: '[Coupang2]' },
+  { no: 1, name: '[Coupang] reco 自動投放',   groupPrefix: '[Coupang]',  dayBudget: 1000 },
+  { no: 2, name: '[Coupang] reco 自動投放 2', groupPrefix: '[Coupang2]', dayBudget: 1500 },
 ];
+
+/**
+ * 全域日預算（台幣）＝**兩支 campaign 的加總**，也就是整體花費的硬上限。
+ * 沿革：2026-08-28 由 3000 調降為 2500（單支）；2026-09-03 改成兩支後先平分各 1250，
+ * 同日使用者再指定改為 **第一支 1000、第二支 1500**（合計仍是 2500，總花費沒有變）。
+ * ⚠️ 這個值是**推導出來的**，要調預算請改 `CAMPAIGNS[*].dayBudget`，不要在這裡寫死。
+ */
+export const DAILY_BUDGET = CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0);
 
 /** 既有 import 路徑相容：指第一支 campaign 的名稱。 */
 export const CAMPAIGN_NAME = CAMPAIGNS[0].name;
 
 /**
- * 每支 campaign 分到的日預算＝總預算平分。
- * 這是「總花費上限不變」這個決定的唯一落點：兩支各拿一半，加起來還是 DAILY_BUDGET。
+ * 這支 campaign 生效的日預算。
+ * 平常就是 `spec.dayBudget`；只有在 `coupang_settings` 塞了 `daily_budget` 覆蓋總額時
+ * （唯一的免部署調預算手段，見 settings.ts），才按兩支原本的比例重新分配
+ * ——1000:1500 ＝ 40%:60%，改總額不會把使用者刻意設的偏重洗掉。
+ * 無條件捨去 ⇒ 兩支加總永遠不超過總額。
  */
-export function campaignBudget(total = DAILY_BUDGET, campaigns = CAMPAIGNS.length): number {
-  return Math.max(1, Math.floor(total / Math.max(1, campaigns)));
+export function campaignBudget(spec: CampaignSpec, total = DAILY_BUDGET): number {
+  if (total === DAILY_BUDGET) return spec.dayBudget;   // 沒被覆蓋就用設定值，不繞取整
+  return Math.max(1, Math.floor((total * spec.dayBudget) / Math.max(1, DAILY_BUDGET)));
 }
 
 /** group 名以「campaign 前綴＋商品 ID」命名（永久對映 → 名字固定，在 R 後台好認是哪支的哪個商品）。 */
@@ -174,10 +187,10 @@ export function imageMatches(group: Pick<GroupView, 'mtName'>, productId: number
  * （見 sync.ts）——兩支的 group 不能混在一起算，否則同一個商品的兩個 group 會互相被當成
  * 「同商品已經有 group 了」而少開一支。
  *
- * @param campaignDayBudget **這一支** campaign 的日預算（不是兩支合計）。預設 `campaignBudget()`；
- *   呼叫端（sync.ts）傳的是 `campaignBudget(await getDailyBudget())`。
+ * @param campaignDayBudget **這一支** campaign 的日預算（不是兩支合計）。預設是第一支的設定值；
+ *   呼叫端（sync.ts）傳的是 `campaignBudget(spec, await getDailyBudget())`。
  */
-export function planRotation(groups: GroupView[], products: CoupangProduct[], campaignDayBudget = campaignBudget()): RotationPlan {
+export function planRotation(groups: GroupView[], products: CoupangProduct[], campaignDayBudget = campaignBudget(CAMPAIGNS[0])): RotationPlan {
   const recoIds = new Set(products.map((p) => String(p.productId)));
   // 一個商品理論上只會有一個 group；真的撞到多個（例如歷史遺留）就優先用還開著、id 較新的那個
   const byProduct = new Map<string, GroupView>();

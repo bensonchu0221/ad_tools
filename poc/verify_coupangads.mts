@@ -50,7 +50,7 @@ check('MIN_GROUP_BUDGET 是 50', MIN_GROUP_BUDGET === 50);
 // 這就是 8/26 曝光崩掉的情境：舊公式 500÷67＝7 元，CPC 1 元一天最多 7 次點擊、pacing 攤 24 小時幾乎不出量
 check('舊事故重現：500 元 67 檔也不再砍到 7 元', budgetPerGroup(500, 67, 1) === 50, budgetPerGroup(500, 67, 1));
 check('下限不會反過來灌大正常值', budgetPerGroup(3000, 20) === 300);
-check('DAILY_BUDGET 是 2500（2026-08-28 由 3000 調降）', DAILY_BUDGET === 2500);
+check('DAILY_BUDGET 是 2500（兩支加總；2026-08-28 由 3000 調降）', DAILY_BUDGET === 2500, DAILY_BUDGET);
 
 console.log('\n[兩支 campaign（2026-09-03）：總花費上限不變，每支拿一半]');
 check('剛好兩支 campaign', CAMPAIGNS.length === 2, CAMPAIGNS.map((c) => c.name));
@@ -62,12 +62,27 @@ check('第二支名稱', CAMPAIGNS[1].name === '[Coupang] reco 自動投放 2', 
 check('兩支的 campaign 名不同（R 帳戶內不可重複）', CAMPAIGNS[0].name !== CAMPAIGNS[1].name);
 check('兩支的 group 前綴不同（R 要求 group_name 帳戶內唯一）',
   CAMPAIGNS[0].groupPrefix !== CAMPAIGNS[1].groupPrefix);
-check('每支日預算＝合計平分（2500 → 1250）', campaignBudget() === 1250, campaignBudget());
-check('兩支加起來不超過 DAILY_BUDGET（總花費上限沒有變大）',
-  campaignBudget() * CAMPAIGNS.length <= DAILY_BUDGET, campaignBudget() * CAMPAIGNS.length);
-check('奇數也不會超（無條件捨去）', campaignBudget(2501, 2) === 1250, campaignBudget(2501, 2));
-check('極小值也不會變成 0（0 元等於整支不投）', campaignBudget(1, 2) >= 1, campaignBudget(1, 2));
-check('單支 1250、20 檔 → 每檔 125', budgetPerGroup(campaignBudget(), 20) === 125, budgetPerGroup(campaignBudget(), 20));
+check('第一支日預算 1000（2026-09-03 使用者指定）', CAMPAIGNS[0].dayBudget === 1000, CAMPAIGNS[0].dayBudget);
+check('第二支日預算 1500（2026-09-03 使用者指定）', CAMPAIGNS[1].dayBudget === 1500, CAMPAIGNS[1].dayBudget);
+check('兩支不同額（不是平分——平分會把使用者刻意設的偏重抹掉）',
+  CAMPAIGNS[0].dayBudget !== CAMPAIGNS[1].dayBudget);
+check('DAILY_BUDGET 是推導出來的加總，不是另外寫死的數字',
+  DAILY_BUDGET === CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0));
+check('沒有覆蓋時就用設定值（第一支）', campaignBudget(CAMPAIGNS[0]) === 1000, campaignBudget(CAMPAIGNS[0]));
+check('沒有覆蓋時就用設定值（第二支）', campaignBudget(CAMPAIGNS[1]) === 1500, campaignBudget(CAMPAIGNS[1]));
+check('總額被覆蓋時按 40:60 比例分配（5000 → 2000/3000）',
+  campaignBudget(CAMPAIGNS[0], 5000) === 2000 && campaignBudget(CAMPAIGNS[1], 5000) === 3000,
+  [campaignBudget(CAMPAIGNS[0], 5000), campaignBudget(CAMPAIGNS[1], 5000)]);
+check('覆蓋後兩支加總不超過總額（無條件捨去）',
+  CAMPAIGNS.reduce((a, c) => a + campaignBudget(c, 999), 0) <= 999,
+  CAMPAIGNS.map((c) => campaignBudget(c, 999)));
+check('極小值也不會變成 0（0 元等於整支不投）', campaignBudget(CAMPAIGNS[0], 1) >= 1, campaignBudget(CAMPAIGNS[0], 1));
+check('第一支 1000、20 檔 → 每檔 100', budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) === 100, budgetPerGroup(CAMPAIGNS[0].dayBudget, 20));
+check('第二支 1500、20 檔 → 每檔 150', budgetPerGroup(CAMPAIGNS[1].dayBudget, 20) === 150, budgetPerGroup(CAMPAIGNS[1].dayBudget, 20));
+check('兩支的每檔預算不同（不能共用一個數字）',
+  budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) !== budgetPerGroup(CAMPAIGNS[1].dayBudget, 20));
+check('每檔預算仍在下限之上（不會低到標不到量）',
+  budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) > MIN_GROUP_BUDGET);
 
 console.log('\n[group 命名：同一商品在兩支底下各一個 group，名字不能撞]');
 check('第一支維持原命名', groupNameOf('123') === '[Coupang] pid-123', groupNameOf('123'));
@@ -124,7 +139,7 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
   const r = planRotation(gs, ps);
   check('全部同商品同價、素材已是 native → 全 keep、零改動', r.keep.length === 2 && r.reimage.length === 0 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
-  check('在跑檔數＝2、每檔 1250（＝單支日預算 1250÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 1250, r.budgetPerGroup);
+  check('在跑檔數＝2、每檔 1000（＝第一支日預算 1000÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 1000, r.budgetPerGroup);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
@@ -213,22 +228,24 @@ console.log('\n[兩支 campaign 必須分開算輪替（混在一起會少開一
   const c1 = [G(101, '1', ps[0], true, CPG1), G(102, '2', ps[1], true, CPG1)];
   const c2: GroupView[] = [];
 
-  const r1 = planRotation(c1, ps, campaignBudget());
-  const r2 = planRotation(c2, ps, campaignBudget());
+  const r1 = planRotation(c1, ps, campaignBudget(CAMPAIGNS[0]));
+  const r2 = planRotation(c2, ps, campaignBudget(CAMPAIGNS[1]));
   check('第一支：兩檔都不動', r1.keep.length === 2 && r1.create.length === 0);
   check('第二支：兩檔都要新開', r2.create.length === 2 && r2.keep.length === 0, r2.create.length);
   check('第二支不會誤把第一支的 group 拿去暫停', r2.pause.length === 0);
 
   // ⚠️ 這條是核心：兩支的 group 混在一起算，第二支的兩檔就永遠開不出來
-  const mixed = planRotation([...c1, ...c2], ps, campaignBudget());
+  const mixed = planRotation([...c1, ...c2], ps, campaignBudget(CAMPAIGNS[0]));
   check('混在一起算會漏開（所以 sync 一定要逐支跑）', mixed.create.length === 0, mixed.create.length);
 
   // 兩支都已經有 group 之後，各自都回到「完全不動」
   const c2b = [G(201, '1', ps[0], true, CPG2), G(202, '2', ps[1], true, CPG2)];
-  const r2b = planRotation(c2b, ps, campaignBudget());
+  const r2b = planRotation(c2b, ps, campaignBudget(CAMPAIGNS[1]));
   check('第二支建完後也回到全 keep（不會每天重建）', r2b.keep.length === 2 && r2b.create.length === 0);
   check('兩支合計在跑 4 個 group（＝2 商品 × 2 支）', r1.activeCount + r2b.activeCount === 4);
-  check('每檔預算兩支相同', r1.budgetPerGroup === r2b.budgetPerGroup);
+  check('兩支的每檔預算各算各的（日預算不同 ⇒ 不可以是同一個數字）',
+    r1.budgetPerGroup === 1000 && r2b.budgetPerGroup === 1500,
+    [r1.budgetPerGroup, r2b.budgetPerGroup]);
 }
 
 console.log('\n[CTR 與排序]');
@@ -414,9 +431,9 @@ console.log('\n[R 管理 token 被踢掉的辨識：一帳只能有一個有效 
 
 console.log('\n[同步摘要]');
 {
-  const base: any = { campaignIds: [1, 2], campaigns: [{ no: 1 }, { no: 2 }], recoCount: 20, unchanged: 40, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 125, activeCount: 40, needReview: [], errors: [], elapsedMs: 1234 };
+  const base: any = { campaignIds: [1, 2], campaigns: [{ no: 1 }, { no: 2 }], recoCount: 20, unchanged: 40, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 100, activeCount: 40, needReview: [], errors: [], elapsedMs: 1234 };
   check('什麼都沒動時不出現雜訊欄位',
-    summarize(base) === '不動 40、在跑 40 檔（2 支 campaign）／每檔 125 元、1.2s', summarize(base));
+    summarize(base) === '不動 40、在跑 40 檔（2 支 campaign）／每檔 100 元、1.2s', summarize(base));
   check('摘要要講清楚 40 檔是兩支加起來（不然會被誤讀成商品變兩倍）', summarize(base).includes('2 支 campaign'));
   check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
   check('換素材會列出', summarize({ ...base, reimaged: 12 }).includes('換素材 12'));

@@ -19,7 +19,8 @@
 // 我們只 patch `day_budget`，所以手動設定不會被洗掉）。
 //   - 上面那整套規則**對每一支 campaign 各跑一次**：每支各自有一份「一商品一 group」的永久對映，
 //     同一個商品在兩支底下各有一個 group（不同 group_id、不同 group 名——R 要求 group 名帳戶內唯一）。
-//   - **日預算總量不變**：`DAILY_BUDGET` 語意改成兩支合計，每支拿一半（2500 → 各 1250）。
+//   - **日預算兩支各自設定**：`CAMPAIGNS[*].dayBudget`＝第一支 1000、第二支 1500（合計 2500，
+//     總花費上限與只有一支時相同）。每檔 group 預算各支自己算 ⇒ 20 檔時 100／150 元。
 //   - **落地頁（deeplink）兩支共用同一個 subId**（使用者決定）：Coupang 端的點擊追蹤實測一路是 0，
 //     分開也看不出差別，共用還能省掉每個新商品多一次 deeplink API。
 import { fetchReco, createDeeplink, type CoupangProduct } from '../../core/coupang.js';
@@ -64,7 +65,7 @@ export interface CampaignSyncResult {
   /** 這支結束後在跑的 group 數。 */
   activeCount: number;
   budgetPerGroup: number;
-  /** 這支 campaign 的日預算（＝兩支合計 ÷ 2）。 */
+  /** 這支 campaign 的日預算（兩支不同：第一支 1000、第二支 1500）。 */
   dayBudget: number;
 }
 
@@ -82,7 +83,11 @@ export interface SyncResult {
   created: number;
   paused: number;
   failed: number;
-  /** 每檔 group 的日預算（兩支相同：各自的日預算 ÷ 各自在跑檔數 × 2）。 */
+  /**
+   * 每檔 group 的日預算。**兩支日預算不同 ⇒ 每檔預算也不同**（20 檔時 100／150）；
+   * 這裡放第一支的值（`coupang_sync_runs.budget_per_group` 只有一個 INT 欄），
+   * 完整明細看 `campaigns[]`，執行紀錄的 message 也會帶。
+   */
   budgetPerGroup: number;
   /** 兩支合計的在跑 group 數（商品數 × 2）。 */
   activeCount: number;
@@ -107,11 +112,12 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   const errors: string[] = [];
   const needReview: SyncResult['needReview'] = [];
 
-  // 日預算：兩支合計。預設是 plan.ts 的 DAILY_BUDGET，coupang_settings 有那一列就以設定為準。
+  // 日預算：每支各自設定（plan.ts CAMPAIGNS[*].dayBudget）。coupang_settings 有 daily_budget
+  // 那一列時，該值視為「總額覆蓋」，兩支按原比例重新分配（見 plan.ts campaignBudget）。
   const totalBudget = await getDailyBudget();
-  const perCampaignBudget = campaignBudget(totalBudget);
+  const budgetOf = (spec: CampaignSpec) => campaignBudget(spec, totalBudget);
 
-  // 1) 兩支 campaign：靠名稱找，沒有就建。日預算校正到「合計 ÷ 支數」。
+  // 1) 兩支 campaign：靠名稱找，沒有就建。日預算校正到各自設定的值（兩支不一樣）。
   //    ⚠️ 第二支建好之後，使用者要自己去 R 後台設流量來源——程式不碰那個欄位。
   const existing = await listCampaigns(email);
   const cpgIdByNo: Record<number, number> = {};
@@ -120,9 +126,9 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     let c = existing.find((x) => x.cpg_name === spec.name);
     if (!c && !dryRun) {
       const cpgId = await createCampaign(email, {
-        name: spec.name, dayBudget: perCampaignBudget, adomain: 'coupang.com', sponsored: 'Coupang',
+        name: spec.name, dayBudget: budgetOf(spec), adomain: 'coupang.com', sponsored: 'Coupang',
       });
-      c = { cpg_id: cpgId, cpg_name: spec.name, day_budget: perCampaignBudget };
+      c = { cpg_id: cpgId, cpg_name: spec.name, day_budget: budgetOf(spec) };
     }
     // dryRun 且那支還沒建：cpg_id 給 0 讓計畫照算（全部落在 create），不中止
     cpgIdByNo[spec.no] = c?.cpg_id ?? 0;
@@ -183,14 +189,14 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     // 4) 決策（純函式）
     const plan = planRotation(
       mine.map((s) => toView(s, crByGroup.get(s.groupId)?.cr_mt_name ?? null)),
-      products, perCampaignBudget,
+      products, budgetOf(spec),
     );
     const budget = plan.budgetPerGroup;
     const out: CampaignSyncResult = {
       no: spec.no, name: spec.name, campaignId: cpgId,
       unchanged: plan.keep.length, reimaged: plan.reimage.length, textUpdated: plan.retext.length,
       reactivated: plan.reactivate.length, created: plan.create.length, paused: plan.pause.length,
-      activeCount: plan.activeCount, budgetPerGroup: budget, dayBudget: perCampaignBudget,
+      activeCount: plan.activeCount, budgetPerGroup: budget, dayBudget: budgetOf(spec),
     };
     if (dryRun) return out;
 
@@ -305,8 +311,8 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
 
     // 6) campaign 日預算校正（程式初版從不更新它，會卡住整體花費）
     //    ⚠️ updateCampaign 是 GET 整包→合併→PUT，只 patch day_budget ⇒ 使用者手動設的流量來源不會被洗掉
-    if (campaignBudgets.get(cpgId) !== perCampaignBudget) {
-      try { await updateCampaign(email, cpgId, { day_budget: perCampaignBudget }); }
+    if (campaignBudgets.get(cpgId) !== budgetOf(spec)) {
+      try { await updateCampaign(email, cpgId, { day_budget: budgetOf(spec) }); }
       catch (e: any) { errors.push(`campaign ${spec.name} 預算校正失敗：${e.message}`); }
     }
     return out;
@@ -345,6 +351,7 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     reactivated: result.reactivated, created: result.created, paused: result.paused, failed: result.failed,
     budgetPerGroup: result.budgetPerGroup, elapsedMs: result.elapsedMs,
     message: [
+      campaigns.map((c) => `C${c.no} 日預算 ${c.dayBudget}／每檔 ${c.budgetPerGroup}`).join('、'),
       review.configured && review.approved ? `自動審核 ${review.approved} 檔` : '',
       errors.length ? errors.slice(0, 5).join('；') : '',
     ].filter(Boolean).join('；') || null,
