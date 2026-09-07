@@ -13,15 +13,15 @@
 //  - **舊商品回到 reco → 重啟它自己那個 group**；文案沒變連改都不用改 ⇒ 免重審、開啟即有量。
 //  - **不在 reco 的暫停**；全新商品才建新 group。
 //
-// ⚠️⚠️ **2026-09-03：兩支 campaign**（使用者需求，見 plan.ts CAMPAIGNS）。第二支的投放內容跟第一支
-// 完全一樣，差別只在使用者自己在 R 後台手動給它設定的**流量來源**（設在 campaign 層 ⇒ 底下的
-// group 自動吃到，程式從頭到尾不碰那個欄位；`updateCampaign` 是 GET 整包→合併→PUT，
-// 我們只 patch `day_budget`，所以手動設定不會被洗掉）。
-//   - 上面那整套規則**對每一支 campaign 各跑一次**：每支各自有一份「一商品一 group」的永久對映，
-//     同一個商品在兩支底下各有一個 group（不同 group_id、不同 group 名——R 要求 group 名帳戶內唯一）。
-//   - **日預算兩支各自設定**：`CAMPAIGNS[*].dayBudget`＝第一支 1000、第二支 1500（合計 2500，
-//     總花費上限與只有一支時相同）。每檔 group 預算各支自己算 ⇒ 20 檔時 100／150 元。
-//   - **落地頁（deeplink）兩支共用同一個 subId**（使用者決定）：Coupang 端的點擊追蹤實測一路是 0，
+// ⚠️⚠️ **campaign 支數**（見 plan.ts CAMPAIGNS 檔頭的沿革）：2026-09-03 為了讓使用者能單獨設
+// 「流量來源」而拆成兩支，2026-09-07 因為 R 端把流量調節改設在**帳戶層**又改回一支、日預算回到 2500。
+// 機制整套保留：
+//   - 上面那整套規則**對 `CAMPAIGNS` 裡每一支各跑一次**（現在只有一支）：每支各自有一份
+//     「一商品一 group」的永久對映；多支時同商品在各支底下各有一個 group（group 名前綴分開，
+//     因為 R 要求 group_name 帳戶內唯一）。
+//   - **`RETIRED_CAMPAIGNS` 只會被暫停**：不建、不改文案、不換素材，每次同步把它底下還開著的
+//     group 全部關掉，免得變成沒人管卻一直花錢的孤兒。campaign 與 group 都不刪（成效歷史留著）。
+//   - **落地頁（deeplink）跨 campaign 共用同一個 subId**：Coupang 端的點擊追蹤實測一路是 0，
 //     分開也看不出差別，共用還能省掉每個新商品多一次 deeplink API。
 import { fetchReco, createDeeplink, type CoupangProduct } from '../../core/coupang.js';
 import {
@@ -34,8 +34,8 @@ import {
   insertCoupangSyncRun, setCoupangSlotCampaign, type CoupangSlotRow,
 } from '../../core/store.js';
 import {
-  planRotation, titleOf, descOf, CPC, CAMPAIGNS, CAMPAIGN_NAME, campaignBudget, campaignNoOf,
-  groupNameOf, IMAGE_SIZE, aliasOf, type GroupView, type CampaignSpec,
+  planRotation, titleOf, descOf, CPC, CAMPAIGNS, RETIRED_CAMPAIGNS, CAMPAIGN_NAME,
+  campaignBudget, campaignNoOf, groupNameOf, IMAGE_SIZE, aliasOf, type GroupView, type CampaignSpec,
 } from './plan.js';
 import { getDailyBudget } from './settings.js';
 import { approveOwnCreatives, reviewConfigured, type ReviewResult } from './review.js';
@@ -44,7 +44,7 @@ export const ACCOUNT_EMAIL = process.env.COUPANG_R_EMAIL ?? 'benson@popin.cc';
 export const ACCOUNT_ID = process.env.COUPANG_R_USER_ID ?? '10222';
 export const SUBID_PREFIX = `r${ACCOUNT_ID}`;
 // 素材尺寸、素材別名、group 命名都在 plan.ts（純函式層，離線可驗）；這裡再匯出保持既有 import 路徑可用。
-export { IMAGE_SIZE, aliasOf, groupNameOf, campaignNoOf, CAMPAIGN_NAME, CAMPAIGNS };
+export { IMAGE_SIZE, aliasOf, groupNameOf, campaignNoOf, CAMPAIGN_NAME, CAMPAIGNS, RETIRED_CAMPAIGNS };
 
 /** ⚠️ 兩支 campaign 共用同一個 subId（落地頁也就同一條），見檔頭。 */
 export const subIdOf = (productId: number | string) => `${SUBID_PREFIX}_${productId}`;
@@ -70,11 +70,13 @@ export interface CampaignSyncResult {
 }
 
 export interface SyncResult {
-  /** 兩支 campaign 的 cpg_id（dryRun 時尚未建立者為 0）。 */
+  /** 在跑的 campaign 的 cpg_id（dryRun 時尚未建立者為 0）。 */
   campaignIds: number[];
   campaigns: CampaignSyncResult[];
+  /** 已退役 campaign 這次被關掉的 group 數（見 plan.ts RETIRED_CAMPAIGNS）。 */
+  retiredPaused: number;
   recoCount: number;
-  /** 以下計數皆為**兩支 campaign 的合計**（單支的明細看 campaigns）。 */
+  /** 以下計數皆為**所有在跑 campaign 的合計**（單支的明細看 campaigns）。 */
   unchanged: number;
   /** 文案沒變、只換素材的檔數（把 Display 舊圖換成 native 圖）。 */
   reimaged: number;
@@ -84,12 +86,11 @@ export interface SyncResult {
   paused: number;
   failed: number;
   /**
-   * 每檔 group 的日預算。**兩支日預算不同 ⇒ 每檔預算也不同**（20 檔時 100／150）；
-   * 這裡放第一支的值（`coupang_sync_runs.budget_per_group` 只有一個 INT 欄），
-   * 完整明細看 `campaigns[]`，執行紀錄的 message 也會帶。
+   * 每檔 group 的日預算。多支且日預算不同時每檔預算也會不同 ⇒ 這裡放第一支的值
+   * （`coupang_sync_runs.budget_per_group` 只有一個 INT 欄），完整明細看 `campaigns[]`。
    */
   budgetPerGroup: number;
-  /** 兩支合計的在跑 group 數（商品數 × 2）。 */
+  /** 所有在跑 campaign 合計的在跑 group 數（商品數 × 在跑 campaign 支數）。 */
   activeCount: number;
   needReview: { productId: string; groupId: number; campaignNo: number; reason: '改文案' | '換素材' | '新建' }[];
   /** 自動審核結果（沒設定 console 帳密時 configured=false，等於這功能沒開）。 */
@@ -122,6 +123,10 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
   const existing = await listCampaigns(email);
   const cpgIdByNo: Record<number, number> = {};
   const campaignBudgets = new Map<number, number>(); // cpg_id → R 上目前的 day_budget
+  // 退役的只查 id（要靠它把底下的 group 認出來），**絕不建立、也不校正預算**
+  for (const spec of RETIRED_CAMPAIGNS) {
+    cpgIdByNo[spec.no] = existing.find((x) => x.cpg_name === spec.name)?.cpg_id ?? 0;
+  }
   for (const spec of CAMPAIGNS) {
     let c = existing.find((x) => x.cpg_name === spec.name);
     if (!c && !dryRun) {
@@ -318,15 +323,33 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     return out;
   };
 
-  // 兩支 campaign **依序**跑：R 管理 API 全域序列化（250ms 一發），併發也不會比較快，
-  // 而且依序跑時第一支建好的落地頁可以直接被第二支重用。
+  // 多支 campaign **依序**跑：R 管理 API 全域序列化（250ms 一發），併發也不會比較快，
+  // 而且依序跑時前一支建好的落地頁可以直接被後一支重用。
   const campaigns: CampaignSyncResult[] = [];
   for (const spec of CAMPAIGNS) campaigns.push(await runCampaign(spec));
+
+  // 退役 campaign：只把還開著的 group 關掉，其他一概不動（不建、不改文案、不換素材、不校正預算）。
+  // ⚠️ 這步不能省——不關的話那些 group 會繼續曝光花錢，而且不再跟著 reco 更新＝沒人管的孤兒。
+  let retiredPaused = 0;
+  for (const spec of RETIRED_CAMPAIGNS) {
+    const mine = slots.filter(
+      (s) => campaignNoOf(s.cpgId, rById.get(s.groupId)?.group_name, cpgIdByNo) === spec.no && s.active
+    );
+    if (dryRun) { retiredPaused += mine.length; continue; }
+    for (const s of mine) {
+      try {
+        await setGroupStatus(email, s.groupId, 2);
+        await upsertCoupangSlot({ ...(s as any), groupId: s.groupId, active: false });
+        retiredPaused++;
+      } catch (e: any) { errors.push(`退役 group ${s.groupId} 暫停失敗：${e.message}`); }
+    }
+  }
 
   const sum = (f: (c: CampaignSyncResult) => number) => campaigns.reduce((a, c) => a + f(c), 0);
   const base: SyncResult = {
     campaignIds: CAMPAIGNS.map((s) => cpgIdByNo[s.no]),
     campaigns,
+    retiredPaused,
     recoCount: products.length,
     unchanged: sum((c) => c.unchanged), reimaged: sum((c) => c.reimaged),
     textUpdated: sum((c) => c.textUpdated), reactivated: sum((c) => c.reactivated),
@@ -352,6 +375,7 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     budgetPerGroup: result.budgetPerGroup, elapsedMs: result.elapsedMs,
     message: [
       campaigns.map((c) => `C${c.no} 日預算 ${c.dayBudget}／每檔 ${c.budgetPerGroup}`).join('、'),
+      retiredPaused ? `退役 campaign 關閉 ${retiredPaused} 檔` : '',
       review.configured && review.approved ? `自動審核 ${review.approved} 檔` : '',
       errors.length ? errors.slice(0, 5).join('；') : '',
     ].filter(Boolean).join('；') || null,

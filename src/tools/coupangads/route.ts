@@ -24,8 +24,11 @@ export function summarize(r: SyncResult): string {
     r.paused ? '暫停 ' + r.paused : '',
     r.failed ? '失敗 ' + r.failed : '',
     r.review?.approved ? '自動審核 ' + r.review.approved : '',
-    // activeCount 是兩支 campaign 的 group 合計（商品數 × 支數）→ 明講支數，免得被誤讀成商品變兩倍
-    '在跑 ' + r.activeCount + ' 檔（' + (r.campaigns?.length ?? 1) + ' 支 campaign）／每檔 ' + r.budgetPerGroup + ' 元',
+    r.retiredPaused ? '退役關閉 ' + r.retiredPaused : '',
+    // 多支 campaign 時 activeCount 是各支 group 的合計（商品數 × 支數）→ 明講支數，
+    // 免得被誤讀成商品數變多；只有一支時不加這段贅字。
+    '在跑 ' + r.activeCount + ' 檔' + ((r.campaigns?.length ?? 1) > 1 ? '（' + r.campaigns.length + ' 支 campaign）' : '')
+      + '／每檔 ' + r.budgetPerGroup + ' 元',
     (r.elapsedMs / 1000).toFixed(1) + 's',
   ].filter(Boolean);
   return parts.join('、');

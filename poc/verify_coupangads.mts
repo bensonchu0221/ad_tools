@@ -3,7 +3,8 @@
 import {
   planRotation, titleOf, descOf, budgetPerGroup, textMatches, imageMatches,
   DAILY_BUDGET, MIN_GROUP_BUDGET, IMAGE_SIZE, aliasOf,
-  CAMPAIGNS, campaignBudget, campaignNoOf, groupNameOf, type GroupView,
+  CAMPAIGNS, RETIRED_CAMPAIGNS, ALL_CAMPAIGNS, isRetiredCampaign,
+  campaignBudget, campaignNoOf, groupNameOf, type GroupView,
 } from '../src/tools/coupangads/plan.js';
 import { aggregateForBq } from '../src/tools/coupangads/bq.js';
 import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
@@ -52,52 +53,64 @@ check('舊事故重現：500 元 67 檔也不再砍到 7 元', budgetPerGroup(50
 check('下限不會反過來灌大正常值', budgetPerGroup(3000, 20) === 300);
 check('DAILY_BUDGET 是 2500（兩支加總；2026-08-28 由 3000 調降）', DAILY_BUDGET === 2500, DAILY_BUDGET);
 
-console.log('\n[兩支 campaign（2026-09-03）：總花費上限不變，每支拿一半]');
-check('剛好兩支 campaign', CAMPAIGNS.length === 2, CAMPAIGNS.map((c) => c.name));
+console.log('\n[campaign 支數（2026-09-07 由兩支改回一支，第二支退役）]');
+check('在跑的只有一支', CAMPAIGNS.length === 1, CAMPAIGNS.map((c) => c.name));
 check('第一支名稱不可變（線上既有那支就叫這個，改了會另外建一支新的）',
   CAMPAIGNS[0].name === '[Coupang] reco 自動投放', CAMPAIGNS[0].name);
 check('第一支 group 前綴不可變（改了會把線上每個 group 都改名）',
   CAMPAIGNS[0].groupPrefix === '[Coupang]', CAMPAIGNS[0].groupPrefix);
-check('第二支名稱', CAMPAIGNS[1].name === '[Coupang] reco 自動投放 2', CAMPAIGNS[1].name);
-check('兩支的 campaign 名不同（R 帳戶內不可重複）', CAMPAIGNS[0].name !== CAMPAIGNS[1].name);
-check('兩支的 group 前綴不同（R 要求 group_name 帳戶內唯一）',
-  CAMPAIGNS[0].groupPrefix !== CAMPAIGNS[1].groupPrefix);
-check('第一支日預算 1000（2026-09-03 使用者指定）', CAMPAIGNS[0].dayBudget === 1000, CAMPAIGNS[0].dayBudget);
-check('第二支日預算 1500（2026-09-03 使用者指定）', CAMPAIGNS[1].dayBudget === 1500, CAMPAIGNS[1].dayBudget);
-check('兩支不同額（不是平分——平分會把使用者刻意設的偏重抹掉）',
-  CAMPAIGNS[0].dayBudget !== CAMPAIGNS[1].dayBudget);
-check('DAILY_BUDGET 是推導出來的加總，不是另外寫死的數字',
-  DAILY_BUDGET === CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0));
-check('沒有覆蓋時就用設定值（第一支）', campaignBudget(CAMPAIGNS[0]) === 1000, campaignBudget(CAMPAIGNS[0]));
-check('沒有覆蓋時就用設定值（第二支）', campaignBudget(CAMPAIGNS[1]) === 1500, campaignBudget(CAMPAIGNS[1]));
-check('總額被覆蓋時按 40:60 比例分配（5000 → 2000/3000）',
-  campaignBudget(CAMPAIGNS[0], 5000) === 2000 && campaignBudget(CAMPAIGNS[1], 5000) === 3000,
-  [campaignBudget(CAMPAIGNS[0], 5000), campaignBudget(CAMPAIGNS[1], 5000)]);
-check('覆蓋後兩支加總不超過總額（無條件捨去）',
-  CAMPAIGNS.reduce((a, c) => a + campaignBudget(c, 999), 0) <= 999,
-  CAMPAIGNS.map((c) => campaignBudget(c, 999)));
+check('日預算回到 2500', CAMPAIGNS[0].dayBudget === 2500, CAMPAIGNS[0].dayBudget);
+check('DAILY_BUDGET 是在跑那幾支的加總（退役的不算進總額）',
+  DAILY_BUDGET === CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0) && DAILY_BUDGET === 2500, DAILY_BUDGET);
+check('20 檔 → 每檔 250（回到拆兩支之前的數字）',
+  budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) === 250, budgetPerGroup(CAMPAIGNS[0].dayBudget, 20));
+check('沒有覆蓋時就用設定值', campaignBudget(CAMPAIGNS[0]) === 2500, campaignBudget(CAMPAIGNS[0]));
+check('總額被覆蓋時照比例（單支＝全拿）', campaignBudget(CAMPAIGNS[0], 3000) === 3000, campaignBudget(CAMPAIGNS[0], 3000));
 check('極小值也不會變成 0（0 元等於整支不投）', campaignBudget(CAMPAIGNS[0], 1) >= 1, campaignBudget(CAMPAIGNS[0], 1));
-check('第一支 1000、20 檔 → 每檔 100', budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) === 100, budgetPerGroup(CAMPAIGNS[0].dayBudget, 20));
-check('第二支 1500、20 檔 → 每檔 150', budgetPerGroup(CAMPAIGNS[1].dayBudget, 20) === 150, budgetPerGroup(CAMPAIGNS[1].dayBudget, 20));
-check('兩支的每檔預算不同（不能共用一個數字）',
-  budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) !== budgetPerGroup(CAMPAIGNS[1].dayBudget, 20));
 check('每檔預算仍在下限之上（不會低到標不到量）',
   budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) > MIN_GROUP_BUDGET);
 
+console.log('\n[退役 campaign：不輪替、只暫停，且不能被當成在跑的那一支]');
+check('第二支被列為退役', RETIRED_CAMPAIGNS.length === 1 && RETIRED_CAMPAIGNS[0].no === 2, RETIRED_CAMPAIGNS.map((c) => c.name));
+check('退役的名稱就是當時建的那支（改了就對不到 R 上那支）',
+  RETIRED_CAMPAIGNS[0].name === '[Coupang] reco 自動投放 2', RETIRED_CAMPAIGNS[0].name);
+check('退役的不在 CAMPAIGNS 裡（在的話會被輪替、還會被建回來）',
+  !CAMPAIGNS.some((c) => c.no === RETIRED_CAMPAIGNS[0].no));
+check('isRetiredCampaign 認得出來', isRetiredCampaign(2) && !isRetiredCampaign(1));
+check('ALL_CAMPAIGNS 含在跑的＋退役的（group 歸屬判斷要用這份）',
+  ALL_CAMPAIGNS.length === CAMPAIGNS.length + RETIRED_CAMPAIGNS.length);
+check('退役的日預算不進 DAILY_BUDGET（總花費上限只看在跑的）',
+  DAILY_BUDGET === 2500 && RETIRED_CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0) === 0);
+{
+  // ⚠️ 核心：退役 campaign 的 group 不可以被當成「這個商品已經有 group 了」
+  const ps = [P(1, '水杯', 100)];
+  const retired = [G(201, '1', ps[0], true, 199965)];   // 第二支底下那個（已退役）
+  const r = planRotation([], ps, campaignBudget(CAMPAIGNS[0]));
+  check('第一支沒有這個商品的 group → 照樣要新開（退役那個不算數）', r.create.length === 1);
+  check('退役的 group 不會出現在第一支的計畫裡', !r.pause.some((g) => g.groupId === 201) && !r.keep.length, retired.length);
+}
+
 console.log('\n[group 命名：同一商品在兩支底下各一個 group，名字不能撞]');
 check('第一支維持原命名', groupNameOf('123') === '[Coupang] pid-123', groupNameOf('123'));
-check('第二支帶 2', groupNameOf('123', CAMPAIGNS[1]) === '[Coupang2] pid-123', groupNameOf('123', CAMPAIGNS[1]));
-check('同商品兩支的 group 名不同', groupNameOf('123', CAMPAIGNS[0]) !== groupNameOf('123', CAMPAIGNS[1]));
+check('第二支（現已退役）帶 2', groupNameOf('123', RETIRED_CAMPAIGNS[0]) === '[Coupang2] pid-123', groupNameOf('123', RETIRED_CAMPAIGNS[0]));
+check('同商品不同 campaign 的 group 名不同（R 要求帳戶內唯一）',
+  groupNameOf('123', CAMPAIGNS[0]) !== groupNameOf('123', RETIRED_CAMPAIGNS[0]));
 
 console.log('\n[group 歸屬哪一支 campaign]');
 {
-  const ids = { 1: 194431, 2: 200001 };
+  const ids = { 1: 194431, 2: 199965 };
   check('cpg_id 命中第一支', campaignNoOf(194431, '[Coupang] pid-9', ids) === 1);
-  check('cpg_id 命中第二支', campaignNoOf(200001, '[Coupang2] pid-9', ids) === 2);
+  check('cpg_id 命中第二支（已退役也要認得出來，否則會被誤判成第一支的）',
+    campaignNoOf(199965, '[Coupang2] pid-9', ids) === 2);
   check('cpg_id 還沒回填 → 用 group 名前綴判斷（第二支）', campaignNoOf(null, '[Coupang2] pid-9', ids) === 2);
   check('cpg_id 還沒回填 → 用 group 名前綴判斷（第一支）', campaignNoOf(null, '[Coupang] pid-9', ids) === 1);
   check('⚠️ [Coupang2] 不可以被 [Coupang] 寬鬆比對吃掉', campaignNoOf(0, '[Coupang2] pid-9', ids) !== 1);
   check('舊制 slot-NNN 命名 → 歸第一支（線上既有的都是它）', campaignNoOf(null, 'slot-001', ids) === 1);
+  // ⚠️ 只有 cpg_id 有線索時（group 名被改過／沒有前綴）也要認得出退役那支，
+  //    否則退役 campaign 的 group 會被當成第一支的、混進輪替計畫裡
+  check('cpg_id 認得退役 campaign，即使 group 名毫無前綴線索',
+    campaignNoOf(199965, 'slot-001', ids) === 2, campaignNoOf(199965, 'slot-001', ids));
+  check('同上，名字整個空的也一樣', campaignNoOf(199965, null, ids) === 2);
   check('什麼線索都沒有 → 歸第一支，不會變成 undefined', campaignNoOf(null, null, ids) === 1);
   check('cpg_id 是別人的（R 上被刪掉重建）→ 退回看名字', campaignNoOf(999999, '[Coupang2] pid-9', ids) === 2);
 }
@@ -139,7 +152,7 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
   const r = planRotation(gs, ps);
   check('全部同商品同價、素材已是 native → 全 keep、零改動', r.keep.length === 2 && r.reimage.length === 0 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
-  check('在跑檔數＝2、每檔 1000（＝第一支日預算 1000÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 1000, r.budgetPerGroup);
+  check('在跑檔數＝2、每檔 2500（＝日預算 2500÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 2500, r.budgetPerGroup);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
@@ -220,16 +233,16 @@ console.log('\n[一支 campaign 不限 ad group 數（R 端 PM 確認無限制�
   check('在跑檔數＝400、每檔預算分攤後吃下限 50', r.activeCount === 400 && r.budgetPerGroup === 50);
 }
 
-console.log('\n[兩支 campaign 必須分開算輪替（混在一起會少開一支）]');
+console.log('\n[多支 campaign 必須分開算輪替（混在一起會少開一支）——機制保留給下次要再開一支時用]');
 {
   const ps = [P(1, '水杯', 100), P(2, '鍋子', 200)];
-  const CPG1 = 194431, CPG2 = 200001;
+  const CPG1 = 194431, CPG2 = 199965;
   // 第一支已經有這兩檔的 group，第二支還沒有
   const c1 = [G(101, '1', ps[0], true, CPG1), G(102, '2', ps[1], true, CPG1)];
   const c2: GroupView[] = [];
 
   const r1 = planRotation(c1, ps, campaignBudget(CAMPAIGNS[0]));
-  const r2 = planRotation(c2, ps, campaignBudget(CAMPAIGNS[1]));
+  const r2 = planRotation(c2, ps, 1500);
   check('第一支：兩檔都不動', r1.keep.length === 2 && r1.create.length === 0);
   check('第二支：兩檔都要新開', r2.create.length === 2 && r2.keep.length === 0, r2.create.length);
   check('第二支不會誤把第一支的 group 拿去暫停', r2.pause.length === 0);
@@ -240,11 +253,11 @@ console.log('\n[兩支 campaign 必須分開算輪替（混在一起會少開一
 
   // 兩支都已經有 group 之後，各自都回到「完全不動」
   const c2b = [G(201, '1', ps[0], true, CPG2), G(202, '2', ps[1], true, CPG2)];
-  const r2b = planRotation(c2b, ps, campaignBudget(CAMPAIGNS[1]));
+  const r2b = planRotation(c2b, ps, 1500);
   check('第二支建完後也回到全 keep（不會每天重建）', r2b.keep.length === 2 && r2b.create.length === 0);
   check('兩支合計在跑 4 個 group（＝2 商品 × 2 支）', r1.activeCount + r2b.activeCount === 4);
-  check('兩支的每檔預算各算各的（日預算不同 ⇒ 不可以是同一個數字）',
-    r1.budgetPerGroup === 1000 && r2b.budgetPerGroup === 1500,
+  check('每支的每檔預算各算各的（日預算不同 ⇒ 不可以是同一個數字）',
+    r1.budgetPerGroup === 2500 && r2b.budgetPerGroup === 1500,
     [r1.budgetPerGroup, r2b.budgetPerGroup]);
 }
 
@@ -431,10 +444,14 @@ console.log('\n[R 管理 token 被踢掉的辨識：一帳只能有一個有效 
 
 console.log('\n[同步摘要]');
 {
-  const base: any = { campaignIds: [1, 2], campaigns: [{ no: 1 }, { no: 2 }], recoCount: 20, unchanged: 40, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 100, activeCount: 40, needReview: [], errors: [], elapsedMs: 1234 };
+  const base: any = { campaignIds: [1], campaigns: [{ no: 1 }], retiredPaused: 0, recoCount: 20, unchanged: 20, reimaged: 0, textUpdated: 0, reactivated: 0, created: 0, paused: 0, failed: 0, budgetPerGroup: 250, activeCount: 20, needReview: [], errors: [], elapsedMs: 1234 };
   check('什麼都沒動時不出現雜訊欄位',
-    summarize(base) === '不動 40、在跑 40 檔（2 支 campaign）／每檔 100 元、1.2s', summarize(base));
-  check('摘要要講清楚 40 檔是兩支加起來（不然會被誤讀成商品變兩倍）', summarize(base).includes('2 支 campaign'));
+    summarize(base) === '不動 20、在跑 20 檔／每檔 250 元、1.2s', summarize(base));
+  check('只有一支時不要加「1 支 campaign」的贅字', !summarize(base).includes('支 campaign'));
+  check('多支時才標明支數（不然 40 檔會被誤讀成商品變兩倍）',
+    summarize({ ...base, campaigns: [{ no: 1 }, { no: 2 }], activeCount: 40 }).includes('2 支 campaign'));
+  check('退役 campaign 關掉的檔數要看得到', summarize({ ...base, retiredPaused: 20 }).includes('退役關閉 20'));
+  check('沒有退役動作時不出現那段雜訊', !summarize(base).includes('退役關閉'));
   check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
   check('換素材會列出', summarize({ ...base, reimaged: 12 }).includes('換素材 12'));
   check('有暫停會列出', summarize({ ...base, paused: 45 }).includes('暫停 45'));

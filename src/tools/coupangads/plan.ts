@@ -18,15 +18,15 @@
 // 容量：**一支 campaign 不限 ad group 數**（2026-08-27 向 R 端 PM 確認），所以 campaign 的支數
 // 純粹是業務需求決定的，不是被容量逼出來的。
 //
-// ⚠️⚠️ **2026-09-03：改成兩支 campaign**（使用者需求）。兩支的投放內容完全一樣——同一批 reco 商品、
-// 同樣的文案／素材／落地頁，差別只在**使用者自己在 R 後台手動給第二支設定的「流量來源」**
-// （設在 campaign 層 ⇒ 底下的 group 自動吃到，程式完全不碰這件事）。
-// 因此本模組的規則對每一支 campaign 各跑一次：**每支 campaign 各自擁有「一商品一 group」的永久對映**，
-// 同一個商品在兩支 campaign 底下各有一個 group（不同 group_id、不同 group 名）。
-//   - 預算：`DAILY_BUDGET` 的語意由「單支 campaign 的日預算」改成 **兩支合計的上限**，
-//     每支拿 `campaignBudget()` ＝ 平分（2500 → 各 1250）⇒ **總花費上限維持 2500 不變**。
-//   - 報表：BQ 匯出把商品粒度加總掉、兩支 campaign 一起併成同一批 `popIn_network` 列（見 bq.ts），
-//     刻意**不分是哪一支 campaign**（使用者指定）。
+// ⚠️⚠️ **campaign 支數沿革（同一週內來回過一次，別再走冤枉路）**：
+//   - 2026-09-03：改成**兩支** campaign，投放內容完全一樣，目的只是讓使用者能在第二支上單獨設
+//     「流量來源」，預算 1000／1500 分兩包。
+//   - 2026-09-07：**改回一支**。R 端操作流量的人（Lulü）把流量調節改設在**帳戶層**了 ⇒
+//     不必再為了設流量來源而複製一整支 campaign，也不必把預算拆兩包。日預算回到 **2500**。
+//     第二支不刪、改列進 `RETIRED_CAMPAIGNS`：**程式不再輪替它，只負責把它底下還開著的 group 全部暫停**
+//     （留著 campaign 與 group ⇒ 成效歷史還在、看板與 BQ 的數字不會變；哪天要重開只是把它移回 CAMPAIGNS）。
+// 多支 campaign 的機制**整套保留**（`CAMPAIGNS` 是陣列、sync 逐支跑、group 名前綴分開），
+// 因為這需求已經來回過一次，下次再要多開一支只要往陣列裡加一筆。
 import type { CoupangProduct } from '../../core/coupang.js';
 
 /**
@@ -77,14 +77,33 @@ export interface CampaignSpec {
 
 /** 兩支 campaign。順序有意義：`CAMPAIGNS[0]` 是既有那支，新增的一律往後接。 */
 export const CAMPAIGNS: CampaignSpec[] = [
-  { no: 1, name: '[Coupang] reco 自動投放',   groupPrefix: '[Coupang]',  dayBudget: 1000 },
-  { no: 2, name: '[Coupang] reco 自動投放 2', groupPrefix: '[Coupang2]', dayBudget: 1500 },
+  { no: 1, name: '[Coupang] reco 自動投放', groupPrefix: '[Coupang]', dayBudget: 2500 },
 ];
 
 /**
- * 全域日預算（台幣）＝**兩支 campaign 的加總**，也就是整體花費的硬上限。
- * 沿革：2026-08-28 由 3000 調降為 2500（單支）；2026-09-03 改成兩支後先平分各 1250，
- * 同日使用者再指定改為 **第一支 1000、第二支 1500**（合計仍是 2500，總花費沒有變）。
+ * **已退役的 campaign**：程式不再對它輪替（不建、不改文案、不換素材），
+ * 每次同步只做一件事——**把它底下還開著的 group 全部暫停**，免得變成沒人管卻一直花錢的孤兒。
+ * 刻意不刪 campaign／group：成效歷史留著，看板與 BQ 的數字不會因為退役而改變；
+ * 要復活的話把它移回 `CAMPAIGNS` 就好（group ↔ 商品的永久對映原封不動）。
+ * `dayBudget` 對退役的沒有意義（不會拿來校正 R 上的值），填 0 表示「不管它」。
+ */
+export const RETIRED_CAMPAIGNS: CampaignSpec[] = [
+  { no: 2, name: '[Coupang] reco 自動投放 2', groupPrefix: '[Coupang2]', dayBudget: 0 },
+];
+
+/** 認得出來的所有 campaign（在跑的＋退役的）。**group 歸屬判斷一定要用這份**，
+ *  只看 `CAMPAIGNS` 的話退役 campaign 的 group 會被誤判成第一支的。 */
+export const ALL_CAMPAIGNS: CampaignSpec[] = [...CAMPAIGNS, ...RETIRED_CAMPAIGNS];
+
+/** 這個編號的 campaign 是不是已退役（退役的只會被暫停，不會被輪替）。 */
+export function isRetiredCampaign(no: number): boolean {
+  return RETIRED_CAMPAIGNS.some((c) => c.no === no);
+}
+
+/**
+ * 全域日預算（台幣）＝**在跑的 campaign 日預算加總**（退役的不算），也就是整體花費的硬上限。
+ * 沿革：2026-08-28 由 3000 調降為 2500；2026-09-03 拆兩支先平分 1250、同日改成 1000／1500；
+ * 2026-09-07 改回一支 ⇒ 又是 2500。**這幾次總額從頭到尾都是 2500，沒有變過。**
  * ⚠️ 這個值是**推導出來的**，要調預算請改 `CAMPAIGNS[*].dayBudget`，不要在這裡寫死。
  */
 export const DAILY_BUDGET = CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0);
@@ -110,21 +129,21 @@ export function groupNameOf(productId: number | string, campaign: CampaignSpec =
 }
 
 /**
- * 這個 group 屬於哪一支 campaign。**cpg_id 為準**；cpg_id 還沒回填（或那支 campaign 在 R 上被刪了）
- * 就退回用 group 名前綴判斷，兩者都沒轍才歸第一支（線上既有的 group 全都是第一支的）。
- * 純函式，離線可驗。
+ * 這個 group 屬於哪一支 campaign（**含已退役的**）。**cpg_id 為準**；cpg_id 還沒回填
+ * （或那支 campaign 在 R 上被刪了）就退回用 group 名前綴判斷，兩者都沒轍才歸第一支
+ * （線上既有的 group 全都是第一支的）。純函式，離線可驗。
  */
 export function campaignNoOf(
   cpgId: number | null | undefined,
   groupName: string | null | undefined,
   cpgIdByNo: Record<number, number>,
 ): number {
-  for (const spec of CAMPAIGNS) {
+  for (const spec of ALL_CAMPAIGNS) {
     if (cpgId && Number(cpgIdByNo[spec.no] ?? 0) === Number(cpgId)) return spec.no;
   }
   // 前綴由長到短比對：'[Coupang2]' 若排在 '[Coupang]' 之後被寬鬆比對到就會全歸第一支
   const name = String(groupName ?? '');
-  const hit = [...CAMPAIGNS]
+  const hit = [...ALL_CAMPAIGNS]
     .sort((a, b) => b.groupPrefix.length - a.groupPrefix.length)
     .find((c) => name.startsWith(c.groupPrefix + ' '));
   return hit?.no ?? CAMPAIGNS[0].no;
