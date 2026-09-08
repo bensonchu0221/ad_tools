@@ -1940,6 +1940,18 @@ export async function getCoupangSetting(key: string): Promise<string | null> {
 }
 
 /** 寫一個執行期設定（upsert）。updatedBy 只是給人看的來源標記。 */
+/**
+ * 刪掉一個執行期設定，讓讀取端退回原始碼常數。
+ * ⚠️ 存在的理由：`coupang_settings` 那一列會**安靜地蓋掉** `plan.ts` 的常數——2026-09-07 就踩到
+ * （8/28 測 Siri 時留下 `daily_budget=2500`，之後把常數改成 3000 完全沒生效）。
+ * 覆寫機制保留（要免部署調預算時還是塞一列），但一定要有辦法把它清掉。
+ */
+export async function deleteCoupangSetting(key: string): Promise<number> {
+  const p = await coupangPool();
+  const [res]: any = await p.query(`DELETE FROM coupang_settings WHERE k = ?`, [key]);
+  return Number(res.affectedRows ?? 0);
+}
+
 export async function setCoupangSetting(key: string, value: string, updatedBy = 'manual'): Promise<void> {
   const p = await coupangPool();
   await p.query(
