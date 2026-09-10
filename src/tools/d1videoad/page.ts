@@ -101,7 +101,7 @@ export function d1VideoAdPage(): string {
           </div>
         </div>
         <div class="field">
-          <div class="flabel"><span class="nm">開始</span><span class="hint">空＝開跑首日</span></div>
+          <div class="flabel"><span class="nm">開始</span><span class="hint">空＝開跑首日；全台必填</span></div>
           <input type="date" id="sd" value="">
         </div>
         <div class="field">
@@ -116,8 +116,10 @@ export function d1VideoAdPage(): string {
         <span class="spacer"></span>
         <button class="btn" id="go" disabled>查詢</button>
         <a class="btn ghost" id="dlTop" aria-disabled="true">下載 Excel</a>
+        <a class="btn ghost" id="dlAll" aria-disabled="true">下載全台 Excel</a>
       </div>
-      <div class="note-line">Action4 查詢區間上限 12 個月。折線是完整時間軸，沒有投放的日子畫在 0（hover 會標明）。</div>
+      <div class="note-line">Action4 查詢區間上限 12 個月。折線是完整時間軸，沒有投放的日子畫在 0（hover 會標明）。
+        「下載全台 Excel」不挑帳戶與活動，把區間內台灣所有影音活動一起出，只要填好日期就能按（實測全台一輪 7~9 秒）。</div>
     </div>
 
     <div id="board"><div class="empty-msg">選一個帳戶開始。</div></div>
@@ -134,7 +136,7 @@ export function d1VideoAdPage(): string {
   var $=function(s){return document.querySelector(s);};
   var accSearch=$('#accSearch'), accValue=$('#accValue'), accList=$('#accList');
   var cpTrigger=$('#cpTrigger'), cpPanel=$('#cpPanel'), cpLabel=$('#cpLabel'), cpCount=$('#cpCount');
-  var board=$('#board'), go=$('#go'), dlTop=$('#dlTop'), incDel=$('#incDel');
+  var board=$('#board'), go=$('#go'), dlTop=$('#dlTop'), dlAll=$('#dlAll'), incDel=$('#incDel');
 
   function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
   function nf(n){return Math.round(Number(n)||0).toLocaleString('en-US');}
@@ -231,15 +233,25 @@ export function d1VideoAdPage(): string {
     if(picked!==null) p+='&campaigns='+encodeURIComponent(ids.join(','));
     return p;
   }
+  // 全台：不帶 account/campaigns，開始日必填（後端也擋，這裡只是不讓他按下去才知道）
+  function queryAll(){
+    return 'all=1&sd='+encodeURIComponent($('#sd').value)+
+      '&ed='+encodeURIComponent($('#ed').value)+
+      '&includeDeleted='+(incDel.checked?'1':'0');
+  }
   function syncButtons(){
     var ok=!!accValue.value&&campaigns.length>0&&selectedIds().length>0;
     go.disabled=!ok;
     dlTop.setAttribute('aria-disabled',ok?'false':'true');
-    if(ok) dlTop.href=PATH+'/export.xlsx?'+query();
-    else dlTop.removeAttribute('href');
+    if(ok) dlTop.href=PATH+'/export.xlsx?'+query(); else dlTop.removeAttribute('href');
+
+    var okAll=!!$('#sd').value&&!!$('#ed').value&&$('#sd').value<=$('#ed').value;
+    dlAll.setAttribute('aria-disabled',okAll?'false':'true');
+    if(okAll) dlAll.href=PATH+'/export.xlsx?'+queryAll(); else dlAll.removeAttribute('href');
   }
   $('#sd').addEventListener('change',syncButtons);
   $('#ed').addEventListener('change',syncButtons);
+  incDel.addEventListener('change',syncButtons);
   go.addEventListener('click',load);
 
   function load(){
