@@ -22,9 +22,14 @@ const STYLE = `
   @media(max-width:560px){.row2{grid-template-columns:1fr}}
   .daterange{display:flex;align-items:center;gap:8px}
   .daterange span{color:var(--mut)}
-  /* 佇列的「狀態」「下載」欄文字/按鈕不換行（狀態徽章、下載＋再調整維持同一行） */
-  .qtable td:nth-child(2){white-space:nowrap}
+  /* 狀態徽章不換行；資料提醒可在同一格逐條換行，避免錯誤被藏在 tooltip。 */
+  .qtable td:nth-child(2){min-width:220px}
   .qtable td.ar{white-space:nowrap}
+  .job-status{white-space:nowrap}
+  .job-warnings{margin-top:7px;max-width:420px;padding:7px 9px;border-left:3px solid var(--accent);
+    background:#FFF7ED;color:#92400E;font-size:12px;line-height:1.45}
+  .job-warnings strong{font-family:var(--mono);font-size:11.5px}
+  .job-warnings ul{margin:4px 0 0;padding-left:18px;white-space:normal}
 `;
 
 export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: number): string {
@@ -38,7 +43,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
   const body = `
     <div class="crumb"><a href="/">// tools</a> / weekly</div>
     <h1>整合週報產生器</h1>
-    <p class="sub">抓取 Discovery（D）、Rixbee（R）、MGID（M）三平台報表整合後產出 Excel（日報／週報／素材／受眾／裝置／Raw）。D、R、M 至少擇一填寫。</p>
+    <p class="sub">抓取 Discovery（D）、Rixbee（R）、MGID（M）、Prism（P）四平台報表整合後產出 Excel（日報／週報／素材／受眾／裝置／Raw）。D、R、M、P 至少擇一填寫。</p>
 
     <div class="section-label">設定 · config</div>
     <form id="wrForm">
@@ -51,7 +56,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
             <div id="accList" class="combo-list"></div>
           </div>
           <div class="note">找不到帳號或 token？<a href="/tools/tokens#d" target="_blank">管理 D 帳號 token →</a></div>
-          ${hasDb ? '' : '<div class="warn">未設定資料庫，D 帳號暫不可用（仍可只跑 R）</div>'}
+          ${hasDb ? '' : '<div class="warn">未設定資料庫，D 帳號暫不可用（仍可只跑 R／P）</div>'}
         </div>
 
         <div class="field">
@@ -72,8 +77,14 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         </div>
 
         <div class="field">
+          <div class="flabel"><span class="src src-p">P</span><span class="nm">Prism Advertiser ID</span><span class="hint">可多組，逗號分隔</span></div>
+          <input type="text" name="pAdvertiserIds" id="pAdvertiserIds" placeholder="例如：233-688-3595 或 233-688-3595,292-462-3142">
+          <div class="note">P 平台目前沒有轉換與素材圖片；曝光、點擊、花費、活動、素材文案與裝置仍會併入報表。</div>
+        </div>
+
+        <div class="field">
           <div class="flabel"><span class="nm">轉換事件對應</span></div>
-          <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總，或點一下事件循環切換位置）。沒分配的事件不計入轉換。</p>
+          <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；P 目前沒有轉換事件）。同桶事件加總，沒分配的事件不計入轉換。</p>
           <div class="pool-label">事件池</div>
           <div id="eventPool" class="dnd-zone pool" data-bucket="pool">${dChips}${rChips}${mChips}</div>
           <div class="buckets">
@@ -127,7 +138,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         <tbody id="jobRows"><tr><td colspan="4" class="center">載入中…</td></tr></tbody>
       </table>
     </div>
-    <footer>popin ad-ops · d&amp;r weekly</footer>`;
+    <footer>popin ad-ops · d/r/m/p weekly</footer>`;
 
   const script = `
 (function () {
@@ -249,16 +260,20 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     var accountName = (search && !search.disabled ? search.value.trim() : '');
     var rAid = document.getElementById('rAid').value.trim();
     var mgidClientIds = (mHidden && mHidden.value) || '';
+    var pAdvertiserIds = document.getElementById('pAdvertiserIds').value.trim();
     var startDate = document.getElementById('startDate').value;
     var endDate = document.getElementById('endDate').value;
-    if (!account && !rAid && !mgidClientIds) { statusBox.innerHTML = '<div class="msg msg-warn">D 帳號、Rixbee Account ID、MGID 帳號至少填一個</div>'; return; }
+    if (!account && !rAid && !mgidClientIds && !pAdvertiserIds) { statusBox.innerHTML = '<div class="msg msg-warn">D、R、M、P 平台至少填一個</div>'; return; }
+    var invalidP = pAdvertiserIds.split(',').map(function (s) { return s.trim(); }).filter(Boolean)
+      .find(function (id) { return !/^\\d{3}-\\d{3}-\\d{4}$/.test(id); });
+    if (invalidP) { statusBox.innerHTML = '<div class="msg msg-warn">P advertiser ID 格式錯誤：' + invalidP + '（應為 000-000-0000）</div>'; return; }
     if (!startDate || !endDate) { statusBox.innerHTML = '<div class="msg msg-warn">請選擇日期範圍</div>'; return; }
     var days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
     if (days <= 0) { statusBox.innerHTML = '<div class="msg msg-warn">結束日不可早於開始日</div>'; return; }
     if (days > 31) { statusBox.innerHTML = '<div class="msg msg-warn">日期範圍最多 31 天</div>'; return; }
 
     var body = new URLSearchParams({
-      account: account, accountName: accountName, rAid: rAid, mgidClientIds: mgidClientIds,
+      account: account, accountName: accountName, rAid: rAid, mgidClientIds: mgidClientIds, pAdvertiserIds: pAdvertiserIds,
       bucketsJson: JSON.stringify({ cv1: bucketValues('cv1'), cv2: bucketValues('cv2'), cv3: bucketValues('cv3'), cv4: bucketValues('cv4') }),
       startDate: startDate, endDate: endDate, weekStart: document.getElementById('weekStart').value,
       adjust: document.getElementById('adjustMode').checked ? '1' : '',
@@ -286,12 +301,21 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
     });
   }
+  function warningBlock(j) {
+    var warnings = Array.isArray(j.warnings) ? j.warnings.filter(Boolean) : [];
+    if (!warnings.length) return '';
+    return '<div class="job-warnings"><strong>⚠ ' + warnings.length + ' 則資料提醒</strong><ul>'
+      + warnings.map(function (warning) { return '<li>' + esc(warning) + '</li>'; }).join('')
+      + '</ul></div>';
+  }
   function statusCell(j) {
-    if (j.status === 'queued') return '<span class="st st-queued">排隊中' + (j.queueAhead > 0 ? '（前面還有 ' + j.queueAhead + ' 份）' : '') + '</span>';
-    if (j.status === 'running') return '<span class="st st-run"><span class="spin"></span>' + esc(j.phase || '產生中…') + '</span>';
-    if (j.status === 'awaiting_adjustment') return '<span class="st st-part">待調整</span>';
-    if (j.status === 'done') return '<span class="st st-done">完成</span>';
-    return '<span class="st st-fail" title="' + esc(j.error || '') + '">失敗</span>';
+    var status;
+    if (j.status === 'queued') status = '<span class="st st-queued">排隊中' + (j.queueAhead > 0 ? '（前面還有 ' + j.queueAhead + ' 份）' : '') + '</span>';
+    else if (j.status === 'running') status = '<span class="st st-run"><span class="spin"></span>' + esc(j.phase || '產生中…') + '</span>';
+    else if (j.status === 'awaiting_adjustment') status = '<span class="st st-part">待調整</span>';
+    else if (j.status === 'done') status = '<span class="st st-done">完成</span>';
+    else status = '<span class="st st-fail" title="' + esc(j.error || '') + '">失敗</span>';
+    return '<div class="job-status">' + status + '</div>' + warningBlock(j);
   }
   function loadJobs() {
     fetch('${basePath}/jobs').then(function (r) { return r.json(); }).then(function (jobs) {

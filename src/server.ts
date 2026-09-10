@@ -43,7 +43,7 @@ const ICON = {
 };
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
-  { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 7 SHEETS' },
+  { name: '整合週報', desc: '整合 Discovery + Rixbee + MGID + Prism 報表產出 Excel 週報', href: WEEKLYREPORT, icon: ICON.chart, code: 'WEEKLY REPORT', tag: 'EXCEL · 8 SHEETS' },
   { name: 'Report Hub', desc: '多 D／R／MGID 帳戶 bulk 原始資料定期同步到 Google Sheet', href: ADSTREAM, icon: ICON.eye, code: 'ADSTREAM', tag: 'SYNC · DAILY T-1' },
   { name: '營運監控', desc: '每日清零排程與 GCP 資源健康度，異常發生時即時看見', href: GCPWATCH, icon: ICON.gauge, code: 'OPS WATCH', tag: 'MONITOR · LIVE' },
   { name: 'MGID 媒體報表', desc: '廣告主角度看各媒體 source 成效，每日同步 raw', href: MGIDSOURCE, icon: ICON.chart, code: 'MGID SOURCE', tag: 'MEDIA · DAILY' },

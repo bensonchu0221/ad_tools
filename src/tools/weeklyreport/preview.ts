@@ -3,7 +3,7 @@
 // 素材縮圖直接用原始 URL <img>（預覽不需下載 buffer；個別圖掛掉只影響縮圖顯示）。
 import type { ReportResult, MetricAgg, WeeklyReportInput } from './types.js';
 import { sumAgg } from './xlsx.js';
-import { RAW_HEADERS, DEV_HEADERS, dRawRowArray, rRawRowArray, mRawRowArray, deviceRawRowArray } from './rawrows.js';
+import { RAW_HEADERS, DEV_HEADERS, dRawRowArray, rRawRowArray, mRawRowArray, pRawRowArray, deviceRawRowArray } from './rawrows.js';
 
 const RAW_PREVIEW_LIMIT = 500;
 
@@ -89,6 +89,7 @@ export function renderPreviewHtml(result: ReportResult, buckets: WeeklyReportInp
     ...result.dRaw.map((v) => dRawRowArray(v, buckets)),
     ...result.rRaw.map((v) => rRawRowArray(v, buckets)),
     ...result.mRaw.map((v) => mRawRowArray(v, buckets)),
+    ...(result.pRaw ?? []).map((v) => pRawRowArray(v)),
   ];
   const raw = rawTable('Raw_Data', RAW_HEADERS, rawRows);
   const devRaw = rawTable('raw_data_device', DEV_HEADERS, result.deviceRaw.map((r) => deviceRawRowArray(r)));

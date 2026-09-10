@@ -1,4 +1,4 @@
-// D&R 週報資料管線：並行抓 R/D → 標準化 → 三桶轉換累加 → 五視角聚合
+// D/R/M/P 週報資料管線：並行抓四平台 → 標準化 → 四桶轉換累加 → 五視角聚合
 // 忠實移植自 dctool get/rd_weekly_report.php + components/{rixbee,discovery}.php
 import { fetchReport } from '../../core/rixbee.js';
 import {
@@ -13,6 +13,7 @@ import { getDAccountTokenById, getMgidTokenById, listMgidAccounts } from '../../
 import { downloadImages, clusterImageUrls } from './imagehash.js';
 import type { UserType } from '../../core/rixbee.js';
 import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidDeviceRow } from '../../core/mgid.js';
+import { fetchPrismReport, normalizePrismDate, type PrismReportRow } from '../../core/prism.js';
 import {
   R_BEHAVIOR_MAP,
   type WeeklyReportInput,
@@ -23,6 +24,7 @@ import {
   type DRow,
   type DeviceRawRow,
   type MRow,
+  type PRow,
   type WeeklyRawData,
 } from './types.js';
 
@@ -112,6 +114,10 @@ const D_DEVICES = [
 // （代碼 4 文件同時標「Mobile」與「Connected Device」自相矛盾、實測也未出現，一律歸 Others。）
 const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5': 'Tablet' };
 const rDeviceBucket = (code: any): string => R_DEVICE_BUCKET[String(code)] ?? 'Others';
+
+// P API 的 device 是英文名稱；未來若出現新值，安全歸到 Others。
+const P_DEVICE_BUCKET: Record<string, string> = { desktop: 'PC', mobile: 'Mobile', tablet: 'Tablet' };
+const pDeviceBucket = (value: any): string => P_DEVICE_BUCKET[String(value ?? '').toLowerCase()] ?? 'Others';
 
 /** 裝置桶零值聚合（PC/Mobile/Tablet/Others；無資料時用） */
 function emptyDeviceAgg(): Map<string, MetricAgg> {
@@ -232,6 +238,44 @@ export function buildMgidDevice(
     addTo(row.devices[bucket], r.imp, r.click, r.spend, cv1, cv2, cv3, cv4);
   }
   return { deviceAgg, raw: [...rawMap.values()] };
+}
+
+/** P 裝置報表列 → 裝置聚合＋campaign×日期寬列；P 沒有轉換，四桶固定為 0。 */
+export function buildPrismDevice(
+  rows: PrismReportRow[]
+): { deviceAgg: Map<string, MetricAgg>; raw: DeviceRawRow[]; invalidDateRows: number } {
+  const deviceAgg = emptyDeviceAgg();
+  const rawMap = new Map<string, DeviceRawRow>();
+  let invalidDateRows = 0;
+  for (const item of rows) {
+    const date = normalizePrismDate(item.date);
+    if (!date) {
+      invalidDateRows++;
+      continue;
+    }
+    const campaignId = String(item.campaign_id ?? '');
+    const advertiserId = String(item.advertiser ?? '');
+    const accountName = String(item.advertiser_name ?? advertiserId);
+    const campaignName = String(item.campaign_name ?? campaignId);
+    const bucket = pDeviceBucket(item.device);
+    const metric = {
+      imp: num(item.impressions), click: num(item.clicks), spend: num(item.spend),
+      cv1: 0, cv2: 0, cv3: 0, cv4: 0,
+    };
+    addTo(deviceAgg.get(bucket)!, metric.imp, metric.click, metric.spend, 0, 0, 0, 0);
+
+    const key = `${date}|${advertiserId}|${campaignId}`;
+    let row = rawMap.get(key);
+    if (!row) {
+      row = {
+        platform: 'P', date, account_name: accountName,
+        campaign_id: campaignId, campaign_name: campaignName, devices: emptyDeviceMap(),
+      };
+      rawMap.set(key, row);
+    }
+    addTo(row.devices[bucket], metric.imp, metric.click, metric.spend, 0, 0, 0, 0);
+  }
+  return { deviceAgg, raw: [...rawMap.values()], invalidDateRows };
 }
 
 /** 照舊 groupDatesByWeek：起始週前的零頭自成一組，之後每 7 天一組 */
@@ -581,7 +625,68 @@ async function fetchMData(
   return { rows, deviceAgg, deviceRaw };
 }
 
-/** 圖片 URL 收集（fetch 與 finalize 重抓共用；順序＝dRaw→rRaw→mRaw，與原 buildReport 一致） */
+/**
+ * 抓 P 報表：主報表維持素材層，裝置另抓 campaign×device 後樞紐成寬列。
+ * P 沒有轉換與素材圖，仍完整進入日／週／素材／受眾／裝置與 Raw 聚合。
+ */
+async function fetchPData(
+  input: WeeklyReportInput,
+  onWarn?: (msg: string) => void
+): Promise<{ rows: PRow[]; deviceAgg: Map<string, MetricAgg>; deviceRaw: DeviceRawRow[] }> {
+  const advertiserIds = input.pAdvertiserIds ?? [];
+  if (!advertiserIds.length) return { rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [] };
+
+  const metrics = ['impressions', 'clicks', 'spend'];
+  const [mainRows, deviceRows] = await Promise.all([
+    fetchPrismReport({
+      startDate: input.startDate,
+      endDate: input.endDate,
+      advertiserIds,
+      dimensions: ['date', 'campaign_id', 'adgroup_id', 'creative_id', 'advertiser', 'title'],
+      metrics,
+    }),
+    fetchPrismReport({
+      startDate: input.startDate,
+      endDate: input.endDate,
+      advertiserIds,
+      dimensions: ['date', 'campaign_id', 'advertiser', 'device'],
+      metrics,
+    }),
+  ]);
+
+  const rows: PRow[] = [];
+  let invalidDateRows = 0;
+  for (const item of mainRows) {
+    const date = normalizePrismDate(item.date);
+    if (!date) {
+      invalidDateRows++;
+      continue;
+    }
+    const creativeName = String(item.creative_name ?? item.creative_id ?? '');
+    const dynamicTitle = String(item.title ?? '').trim();
+    rows.push({
+      date,
+      advertiser_id: String(item.advertiser ?? ''),
+      account_name: String(item.advertiser_name ?? item.advertiser ?? ''),
+      campaign_id: String(item.campaign_id ?? ''),
+      campaign_name: String(item.campaign_name ?? item.campaign_id ?? ''),
+      adgroup_id: String(item.adgroup_id ?? ''),
+      adgroup_name: String(item.adgroup_name ?? item.adgroup_id ?? ''),
+      creative_id: String(item.creative_id ?? ''),
+      creative_name: creativeName,
+      creative_title: dynamicTitle && dynamicTitle !== 'Unknown' ? dynamicTitle : creativeName,
+      imp: num(item.impressions),
+      click: num(item.clicks),
+      spend: num(item.spend),
+    });
+  }
+  if (invalidDateRows) onWarn?.(`P 主報表有 ${invalidDateRows} 筆日期無法解析，已略過`);
+  const device = buildPrismDevice(deviceRows);
+  if (device.invalidDateRows) onWarn?.(`P 裝置報表有 ${device.invalidDateRows} 筆日期無法解析，已略過`);
+  return { rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
+}
+
+/** 圖片 URL 收集（fetch 與 finalize 重抓共用）；P 沒有素材圖片，無須加入。 */
 export function collectImageUrls(dRaw: DRow[], rRaw: RRow[], mRaw: MRow[]): string[] {
   return [
     ...dRaw.map((r) => r.ad_image ?? ''),
@@ -590,7 +695,7 @@ export function collectImageUrls(dRaw: DRow[], rRaw: RRow[], mRaw: MRow[]): stri
   ];
 }
 
-/** 階段①：並行抓 R+D+M ＋ 下載素材圖並分群 → 完整原始資料（不聚合）。
+/** 階段①：並行抓 R+D+M+P ＋ 下載素材圖並分群 → 完整原始資料（不聚合）。
  *  素材圖下載/分群提前到抓取階段，聚合（aggregateWeekly）就能是同步純函式、可被隨機調整重複套用。 */
 export async function fetchWeeklyRaw(
   input: WeeklyReportInput,
@@ -598,7 +703,7 @@ export async function fetchWeeklyRaw(
 ): Promise<WeeklyRawData> {
   const warnings: string[] = [];
 
-  onPhase?.('抓取 R / D 報表中…');
+  onPhase?.('抓取 D / R / M / P 報表中…');
   const fetchR = async (): Promise<{ rows: RRow[]; deviceAgg: Map<string, MetricAgg>; deviceRaw: DeviceRawRow[] }> => {
     if (!input.rUserIds.length) return { rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [] };
     const userType = await detectRUserType(input); // 三種類型自動偵測，查無資料會 throw
@@ -609,33 +714,54 @@ export async function fetchWeeklyRaw(
     ]);
     return { rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
   };
-  const [rResult, dResult, mResult] = await Promise.all([
+  const fetchP = async (): Promise<{
+    rows: PRow[];
+    deviceAgg: Map<string, MetricAgg>;
+    deviceRaw: DeviceRawRow[];
+    failed: boolean;
+  }> => {
+    try {
+      const result = await fetchPData(input, (m) => warnings.push(m));
+      return { ...result, failed: false };
+    } catch (e: any) {
+      // P 是附加資料源；單一平台故障不可讓已成功的 D/R/M 整份報表作廢。
+      warnings.push(`P 平台報表抓取失敗，已略過 P 資料：${String(e?.message ?? e)}`);
+      return { rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [], failed: true };
+    }
+  };
+  const [rResult, dResult, mResult, pResult] = await Promise.all([
     fetchR(),
     input.dAccountId
       ? fetchDData(input, onPhase)
       : Promise.resolve({ rows: [] as DRow[], deviceAgg: emptyDeviceAgg(), deviceRaw: [] as DeviceRawRow[] }),
     fetchMData(input, input.buckets, (m) => warnings.push(m)),
+    fetchP(),
   ]);
   const rRaw = rResult.rows;
   const dRaw = dResult.rows;
   const mRaw = mResult.rows;
+  const pRaw = pResult.rows;
   // 裝置分析：D 端 platform_cv 只填得了 PC/Mobile，R 端 device_type 補四桶，M 端 deviceType 補四桶（同桶累加）
   const deviceAgg = dResult.deviceAgg;
   mergeDeviceAgg(deviceAgg, rResult.deviceAgg);
   mergeDeviceAgg(deviceAgg, mResult.deviceAgg);
+  mergeDeviceAgg(deviceAgg, pResult.deviceAgg);
   // raw_data_device：D 寬列（campaign×日期，PC/Mobile）＋ R 寬列（campaign×日期，四桶）＋ M 寬列（每日一列，四桶）併排
-  const deviceRaw = [...dResult.deviceRaw, ...rResult.deviceRaw, ...mResult.deviceRaw];
+  const deviceRaw = [...dResult.deviceRaw, ...rResult.deviceRaw, ...mResult.deviceRaw, ...pResult.deviceRaw];
   if (input.dAccountId && dRaw.length === 0) {
     warnings.push(`D 帳號「${input.dAccountName || input.dAccountId}」在走期內查無報表資料`);
   }
   if (input.mgidClientIds?.length && mRaw.length === 0) {
     warnings.push('MGID 帳號在走期內查無報表資料');
   }
+  if (input.pAdvertiserIds?.length && !pResult.failed && pRaw.length === 0) {
+    warnings.push('P advertiser ID 在走期內查無報表資料');
+  }
 
   onPhase?.('下載素材縮圖中…');
   const images = await downloadImages(collectImageUrls(dRaw, rRaw, mRaw));
   const imageKeys = await clusterImageUrls(images); // URL → identity key（空 URL 不在 map 內）
-  return { dRaw, rRaw, mRaw, deviceAgg, deviceRaw, warnings, images, imageKeys };
+  return { dRaw, rRaw, mRaw, pRaw, deviceAgg, deviceRaw, warnings, images, imageKeys };
 }
 
 /**
@@ -657,7 +783,7 @@ export function audienceName(raw: string): string {
 
 /** 階段②：聚合（同步純函式）。吃 fetchWeeklyRaw（或調整後）的 raw → 日/週/素材/受眾聚合。 */
 export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): ReportResult {
-  const { dRaw, rRaw, mRaw, warnings, images, imageKeys, deviceAgg, deviceRaw } = raw;
+  const { dRaw, rRaw, mRaw, pRaw = [], warnings, images, imageKeys, deviceAgg, deviceRaw } = raw;
   const { buckets } = input;
   const start = new Date(`${input.startDate}T00:00:00`);
   const end = new Date(`${input.endDate}T00:00:00`);
@@ -685,6 +811,11 @@ export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): R
       const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
       if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
       addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
+    }
+    for (const row of pRaw) {
+      if (row.date !== dashKey) continue;
+      if (!daily.has(compactKey)) daily.set(compactKey, emptyAgg());
+      addTo(daily.get(compactKey)!, num(row.imp), num(row.click), num(row.spend), 0, 0, 0, 0);
     }
   }
   const sortedDaily = new Map([...daily.entries()].sort(([a], [b]) => a.localeCompare(b)));
@@ -730,9 +861,12 @@ export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): R
     const [cv1, cv2, cv3, cv4] = calcConversions(row, buckets);
     addAsset(row.teaser_image ?? '', row.teaser_title ?? '', num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
   }
+  for (const row of pRaw) {
+    addAsset('', row.creative_title ?? '', num(row.imp), num(row.click), num(row.spend), 0, 0, 0, 0);
+  }
   const assets = [...assetMap.values()].sort((a, b) => b.spend - a.spend);
 
-  // ---- Section 4：受眾分析（D／M 以 campaign 名、R 以廣告群組名為源，取第一個底線之後當受眾名）----
+  // ---- Section 4：受眾分析（D／M／P 以 campaign 名、R 以廣告群組名為源，依命名規則取受眾）----
   const audiences = new Map<string, MetricAgg>();
   const audRawNames = new Set<string>(); // 原始活動／群組名（去重）
   const audNoUnderscore = new Set<string>(); // 其中未含底線者＝未依「產品_受眾_隨意命名」命名
@@ -763,9 +897,14 @@ export function aggregateWeekly(raw: WeeklyRawData, input: WeeklyReportInput): R
     if (!audiences.has(key)) audiences.set(key, emptyAgg());
     addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.spend), cv1, cv2, cv3, cv4);
   }
+  for (const row of pRaw) {
+    const key = audKey(row.campaign_name ?? '');
+    if (!audiences.has(key)) audiences.set(key, emptyAgg());
+    addTo(audiences.get(key)!, num(row.imp), num(row.click), num(row.spend), 0, 0, 0, 0);
+  }
   const audienceNaming = { total: audRawNames.size, unparsed: audNoUnderscore.size };
 
-  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, audienceNaming, deviceAgg, deviceRaw, dRaw, rRaw, mRaw };
+  return { warnings, dateRangeString, daily: sortedDaily, weekly, periods, assets, images, audiences, audienceNaming, deviceAgg, deviceRaw, dRaw, rRaw, mRaw, pRaw };
 }
 
 /** 主流程（對外簽名不變）：fetch → aggregate */

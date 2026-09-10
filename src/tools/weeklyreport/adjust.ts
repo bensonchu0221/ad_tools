@@ -241,6 +241,13 @@ export function adjustWeeklyRaw(
     primaryUnits.push(unit);
     return unit;
   });
+  const pRows = raw.pRaw ?? [];
+  const pUnits = pRows.map((row) => {
+    const identity = campaignIdentity('P', row.account_name ?? '', row.campaign_id ?? '', row.campaign_name ?? '');
+    const unit = { ...identity, spend: num(row.spend), click: num(row.click), imp: num(row.imp), cvMax: 0 };
+    primaryUnits.push(unit);
+    return unit;
+  });
 
   const primaryGroups = groupUnits(primaryUnits);
   const primaryTargets = buildTargets(primaryGroups, params, rng);
@@ -257,6 +264,10 @@ export function adjustWeeklyRaw(
   });
   const mRaw = raw.mRaw.map((row, i) => {
     const update = primaryUpdates.get(mUnits[i]);
+    return update ? { ...row, click: update.click, imp: update.imp } : row;
+  });
+  const pRaw = pRows.map((row, i) => {
+    const update = primaryUpdates.get(pUnits[i]);
     return update ? { ...row, click: update.click, imp: update.imp } : row;
   });
 
@@ -279,5 +290,5 @@ export function adjustWeeklyRaw(
     return { ...row, devices };
   });
 
-  return { ...raw, dRaw, rRaw, mRaw, deviceRaw, deviceAgg: deviceAggFromRaw(deviceRaw) };
+  return { ...raw, dRaw, rRaw, mRaw, pRaw, deviceRaw, deviceAgg: deviceAggFromRaw(deviceRaw) };
 }

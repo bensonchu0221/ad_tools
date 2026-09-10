@@ -1,7 +1,7 @@
-// 週報 Excel 產出：5 個工作表，版型/樣式忠實照搬舊 rd_weekly_report.php（PhpSpreadsheet → ExcelJS）
+// 週報 Excel 產出：8 個工作表，版型/樣式延續舊 rd_weekly_report.php（PhpSpreadsheet → ExcelJS）
 import ExcelJS from 'exceljs';
 import type { ReportResult, MetricAgg, WeeklyReportInput } from './types.js';
-import { RAW_HEADERS, DEV_HEADERS, dRawRowArray, rRawRowArray, mRawRowArray, deviceRawRowArray } from './rawrows.js';
+import { RAW_HEADERS, DEV_HEADERS, dRawRowArray, rRawRowArray, mRawRowArray, pRawRowArray, deviceRawRowArray } from './rawrows.js';
 
 const FONT = { name: 'Microsoft JhengHei', size: 12 } as const;
 const HEAD_FONT = { name: 'Microsoft JhengHei', size: 13, bold: true } as const;
@@ -262,16 +262,16 @@ export async function buildXlsx(
   for (let r = 3; r <= r4; r++) s4.getRow(r).height = 40;
 
   // ---------- Sheet 5：裝置分析（裝置列 × 標準指標欄） ----------
-  // 沿用總覽版型。D 端 campaign 層 platform_cv 只填得了 PC/Mobile；R 端 device_type 補 PC/Mobile/Tablet/Others。
+  // 沿用總覽版型。D 端 campaign 層 platform_cv 只填得了 PC/Mobile；R/M/P 可補四個裝置桶。
   const sDevice = wb.addWorksheet('裝置分析');
   writeSummarySheet(
     sDevice,
     result.dateRangeString,
     [...result.deviceAgg.entries()].map(([label, m]) => ({ label, m }))
   );
-  sDevice.getCell('A1').value = `報表走期：${result.dateRangeString}（裝置：D 端僅 PC/Mobile，R 端 device_type 含 Tablet/Others）`;
+  sDevice.getCell('A1').value = `報表走期：${result.dateRangeString}（裝置：D 端僅 PC/Mobile，R/M/P 可含 Tablet/Others）`;
 
-  // ---------- Sheet 6：Raw_Data（D/R 合併原始列，欄位照舊 30 欄；無框線樣式照舊） ----------
+  // ---------- Sheet 6：Raw_Data（D/R/M/P 合併原始列；無框線樣式照舊） ----------
   onPhase?.('產生 Excel 中…');
   // Raw 列建構抽到 rawrows.ts（xlsx 與 HTML 預覽共用同一份 builder＝逐格一致）
   const s5 = wb.addWorksheet('Raw_Data');
@@ -279,6 +279,7 @@ export async function buildXlsx(
   for (const v of result.dRaw) s5.addRow(dRawRowArray(v, buckets));
   for (const v of result.rRaw) s5.addRow(rRawRowArray(v, buckets));
   for (const v of result.mRaw) s5.addRow(mRawRowArray(v, buckets));
+  for (const v of result.pRaw ?? []) s5.addRow(pRawRowArray(v));
 
   // ---------- Sheet 7：raw_data_device（裝置層原始寬列；每列＝平台×日期×campaign，4 裝置桶各 7 指標） ----------
   // device 是 campaign 層級資料（Raw_Data 是 ad 層級），故另開一頁。D 列只填 PC/Mobile（沿用裝置分析口徑）、

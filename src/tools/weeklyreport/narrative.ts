@@ -68,7 +68,7 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
   for (const m of result.daily.values()) { imp += m.imp; click += m.click; spend += m.spend; cv += m.cv1; }
   const ctr = imp > 0 ? click / imp : 0;
 
-  // 轉換事件明細：掃 D/R 原始列，依 EVENT_LABELS 累加（中文名相同者合併）
+  // 轉換事件明細：掃四平台原始列，依 EVENT_LABELS 累加（P 目前無事件，會自然略過）
   const cvDetail: Record<string, number> = {};
   const addEvents = (rows: Record<string, any>[]) => {
     for (const row of rows) {
@@ -81,6 +81,7 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
   addEvents(result.dRaw as any);
   addEvents(result.rRaw as any);
   addEvents(result.mRaw as any);
+  addEvents((result.pRaw ?? []) as any);
 
   // 最佳素材：取 CTR（click/imp）最高者（僅計有曝光的素材）。
   // 注意 result.assets 是按 spend 降序，直接取 [0] 會誤把「花費最高」當「CTR 最高」。
@@ -149,10 +150,13 @@ export function summarizeReport(result: ReportResult, input: WeeklyReportInput):
     ? input.dAccountId
     : input.rUserIds.length
       ? 'r:' + [...input.rUserIds].sort().join(',')
-      : 'm:' + [...(input.mgidClientIds ?? [])].sort().join(',');
+      : input.mgidClientIds?.length
+        ? 'm:' + [...input.mgidClientIds].sort().join(',')
+        : 'p:' + [...(input.pAdvertiserIds ?? [])].sort().join(',');
   const accountName = input.dAccountName
     || (input.rUserIds.length ? 'R:' + input.rUserIds.join(',') : '')
-    || (input.mgidClientIds?.length ? 'M:' + input.mgidClientIds.join(',') : '');
+    || (input.mgidClientIds?.length ? 'M:' + input.mgidClientIds.join(',') : '')
+    || (input.pAdvertiserIds?.length ? 'P:' + input.pAdvertiserIds.join(',') : '');
   const days = Math.round((Date.parse(input.endDate) - Date.parse(input.startDate)) / 86400000) + 1;
 
   return {
