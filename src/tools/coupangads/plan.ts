@@ -23,7 +23,7 @@
 //     「流量來源」，預算 1000／1500 分兩包。
 //   - 2026-09-07：**改回一支**。R 端操作流量的人（Lulü）把流量調節改設在**帳戶層**了 ⇒
 //     不必再為了設流量來源而複製一整支 campaign，也不必把預算拆兩包。日預算回到 **2500**。
-//     日預算隨後再由 2500 調高為 3000（使用者指定）。
+//     日預算隨後再由 2500 調高為 3000，2026-09-10 又調回 2500（皆使用者指定）。
 //     第二支不刪、改列進 `RETIRED_CAMPAIGNS`：**程式不再輪替它，只負責把它底下還開著的 group 全部暫停**
 //     （留著 campaign 與 group ⇒ 成效歷史還在、看板與 BQ 的數字不會變；哪天要重開只是把它移回 CAMPAIGNS）。
 // 多支 campaign 的機制**整套保留**（`CAMPAIGNS` 是陣列、sync 逐支跑、group 名前綴分開），
@@ -78,7 +78,7 @@ export interface CampaignSpec {
 
 /** 兩支 campaign。順序有意義：`CAMPAIGNS[0]` 是既有那支，新增的一律往後接。 */
 export const CAMPAIGNS: CampaignSpec[] = [
-  { no: 1, name: '[Coupang] reco 自動投放', groupPrefix: '[Coupang]', dayBudget: 3000 },
+  { no: 1, name: '[Coupang] reco 自動投放', groupPrefix: '[Coupang]', dayBudget: 2500 },
 ];
 
 /**
@@ -104,8 +104,8 @@ export function isRetiredCampaign(no: number): boolean {
 /**
  * 全域日預算（台幣）＝**在跑的 campaign 日預算加總**（退役的不算），也就是整體花費的硬上限。
  * 沿革：2026-08-28 由 3000 調降為 2500；2026-09-03 拆兩支先平分 1250、同日改成 1000／1500；
- * 2026-09-07 改回一支 ⇒ 又是 2500（拆兩支那幾天總額也一直是 2500）；
- * **同日再由 2500 調高為 3000**（使用者指定）⇒ 20 檔時每檔 300。
+ * 2026-09-07 改回一支 ⇒ 又是 2500（拆兩支那幾天總額也一直是 2500）、同日調高為 3000；
+ * **2026-09-10 再調回 2500**（使用者指定）⇒ 20 檔時每檔 250。
  * ⚠️ 這個值是**推導出來的**，要調預算請改 `CAMPAIGNS[*].dayBudget`，不要在這裡寫死。
  */
 export const DAILY_BUDGET = CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0);
