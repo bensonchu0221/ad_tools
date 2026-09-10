@@ -82,7 +82,8 @@ export function registerD1VideoAd(app: FastifyInstance): void {
     if (typeof input === 'string') return reply.code(400).send({ error: input });
     if (!d1FirestoreAvailable()) return reply.code(500).send({ error: '未設定 D1_FIRESTORE_URI' });
     try {
-      const rep = await buildReport(input);
+      // 下載才抓素材層（畫面不需要，多抓會白白拖慢）：〈逐日〉是日期 × 活動 × 素材的長格式
+      const rep = await buildReport({ ...input, includeAds: true });
       const buf = await buildVideoXlsx(rep);
       reply
         .header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
