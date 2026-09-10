@@ -70,7 +70,17 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     const rAid = (b.rAid ?? '').trim();
     const mgidRaw = (b.mgidClientIds ?? '').trim();
     const mgidClientIds = mgidRaw ? mgidRaw.split(',').map((s) => s.trim()).filter(Boolean) : [];
-    if (!account && !rAid && !mgidClientIds.length) return reply.send({ ok: false, error: 'D 帳號、Rixbee Account ID、MGID 帳號至少填一個' });
+    const pRaw = (b.pAdvertiserIds ?? '').trim();
+    const pAdvertiserIds = [...new Set(pRaw ? pRaw.split(',').map((s) => s.trim()).filter(Boolean) : [])];
+    // P API 直接把 advertiser_ids 帶進查詢，入口嚴格限制格式，避免錯字與不安全字串送到後端。
+    const invalidPId = pAdvertiserIds.find((id) => !/^\d{3}-\d{3}-\d{4}$/.test(id));
+    if (invalidPId) return reply.send({ ok: false, error: `P advertiser ID 格式錯誤：${invalidPId}（應為 000-000-0000）` });
+    if (pAdvertiserIds.length && !process.env.PRISM_API_TOKEN) {
+      return reply.send({ ok: false, error: 'P 平台尚未設定 PRISM_API_TOKEN' });
+    }
+    if (!account && !rAid && !mgidClientIds.length && !pAdvertiserIds.length) {
+      return reply.send({ ok: false, error: 'D、R、M、P 平台至少填一個' });
+    }
 
     let buckets: WeeklyReportInput['buckets'];
     try {
@@ -107,11 +117,15 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       // 賭「end_date 都可靠」風險不值得（end_date 過期但重啟投放的 campaign 設小會誤剪），故不再用最激進的 1
       expireMonths: 3,
       mgidClientIds,
+      pAdvertiserIds,
       adjust: b.adjust === '1', // 隨機調整模式：worker 只抓 raw、停在待調整
     };
 
-    // label：帳號（D 名 / R ids / M ids）＋日期區間，清單顯示用
-    const who = accountName || (input.rUserIds.length ? `R:${input.rUserIds.join(',')}` : '') || (mgidClientIds.length ? `M:${mgidClientIds.join(',')}` : '');
+    // label：帳號（D 名 / R ids / M ids / P ids）＋日期區間，清單顯示用
+    const who = accountName
+      || (input.rUserIds.length ? `R:${input.rUserIds.join(',')}` : '')
+      || (mgidClientIds.length ? `M:${mgidClientIds.join(',')}` : '')
+      || (pAdvertiserIds.length ? `P:${pAdvertiserIds.join(',')}` : '');
     const label = `${who} ${startDate}~${endDate}${b.adjust === '1' ? '（調整）' : ''}`.trim();
     const jobId = await enqueueWeeklyJob({
       label,
@@ -132,6 +146,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         label: j.label,
         phase: j.phase,
         error: j.error,
+        warnings: j.warnings,
         queueAhead: j.queueAhead ?? 0,
         canAdjust: !!j.rawGcsObject, // 有 raw 暫存（14 天內）＝可進調整頁（awaiting_adjustment 或 done 再調）
         createdAt: j.createdAt,
@@ -201,7 +216,14 @@ export async function registerWeeklyReport(app: FastifyInstance) {
     let prefill: Partial<AdjustParams> | null = null;
     try { prefill = job.adjustJson ? JSON.parse(job.adjustJson) : null; } catch { prefill = null; }
     reply.type('text/html').send(
-      weeklyAdjustPage({ jobId: job.id, label: job.label, basePath: BASE_PATH, prefill, status: job.status })
+      weeklyAdjustPage({
+        jobId: job.id,
+        label: job.label,
+        basePath: BASE_PATH,
+        prefill,
+        status: job.status,
+        warnings: job.warnings,
+      })
     );
   });
 

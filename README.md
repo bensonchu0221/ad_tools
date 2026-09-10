@@ -14,6 +14,7 @@ src/
     http.ts            # 併發批次 + popin rate-limit 重試
     popin.ts           # D（Discovery/popin）API 客戶端
     rixbee.ts          # R（rixbee/Broadciel）報表 API 客戶端
+    prism.ts           # P（Prism/PAC platform）報表 API 客戶端
     store.ts           # D 帳號 token（Cloud SQL/MySQL；未設定 DB 時降級）
   tools/adpreview/     # tool #1：route(表單/產圖) / shoot(Playwright 換素材截圖) / media(媒體+選擇器)
 ```
@@ -33,6 +34,7 @@ popin 自動抓素材模式需設定 DB（見下）；未設定時可用「手�
 | `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME` | D 帳號 token 的 Cloud SQL 連線（重用 internal-tool 執行個體） |
 | `DB_TOKEN_TABLE` | token 資料表名（預設 `dctool_token_list`） |
 | `RIXBEE_AGENCY_TOKEN`/`RIXBEE_DIRECT_TOKEN` 等 | R API token |
+| `PRISM_API_TOKEN` | P／Prism 報表 API 靜態 token |
 
 ## 部署
 git push `main` → Cloud Build（`cloudbuild.yaml`）→ Cloud Run 服務 `ad-tools`（asia-east1, popinpoc1）。

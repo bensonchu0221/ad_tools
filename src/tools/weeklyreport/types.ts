@@ -1,4 +1,4 @@
-// D&R 週報共用型別與事件對應表
+// D/R/M/P 整合週報共用型別與事件對應表
 // 移植自 dctool page/weeklyreport.php + get/rd_weekly_report.php
 
 export type RUserType = 'agency' | 'direct' | 'super';
@@ -14,6 +14,7 @@ export interface WeeklyReportInput {
   weekStart: number; // 週起始日 1(一)~7(日)
   expireMonths: number; // campaign 結束超過 N 個月不抓報表（1/3/6）
   mgidClientIds: string[]; // MGID api_client_id 陣列（空陣列 = 不抓 M）
+  pAdvertiserIds: string[]; // Prism advertiser ID 陣列（空陣列 = 不抓 P）
   adjust?: boolean; // 隨機調整模式：worker 只抓 raw 存 GCS、停在待調整，不直接產 xlsx
 }
 
@@ -109,6 +110,23 @@ export interface MRow {
   conv_buy: number;
 }
 
+/** P 平台標準化列。P 沒有轉換與素材圖，僅帶整合週報共用的成效與素材文字。 */
+export interface PRow {
+  date: string; // YYYY-MM-DD（由 P JSON 的 RFC 日期正規化）
+  advertiser_id: string;
+  account_name: string;
+  campaign_id: string;
+  campaign_name: string;
+  adgroup_id: string;
+  adgroup_name: string;
+  creative_id: string;
+  creative_name: string;
+  creative_title: string;
+  imp: number;
+  click: number;
+  spend: number;
+}
+
 /** D 報表列（date_reporting 回傳 + campaign/ad 補欄位，照舊 discovery.php enrich） */
 export interface DRow {
   date: string; // YYYY-MM-DD
@@ -146,10 +164,10 @@ export interface AssetAgg extends MetricAgg {
 /**
  * 裝置原始寬列（raw_data_device 工作表）：每列＝一個 (平台, 日期, campaign)，
  * 4 裝置桶（PC/Mobile/Tablet/Others）各放標準 6 指標。
- * D 端只填 PC/Mobile（tablet/xbox 無 base 指標，沿用裝置分析口徑），R 端 device_type 樞紐補滿四桶。
+ * D 端只填 PC/Mobile（tablet/xbox 無 base 指標）；R/M/P 依各平台裝置維度樞紐到四桶。
  */
 export interface DeviceRawRow {
-  platform: 'D' | 'R' | 'M';
+  platform: 'D' | 'R' | 'M' | 'P';
   date: string; // D: YYYY-MM-DD；R: YYYY-MM-DD（xlsx 統一格式化）
   account_name: string;
   campaign_id: string;
@@ -169,10 +187,11 @@ export interface ReportResult {
   // 受眾命名規範統計：total=原始活動／群組名去重數、unparsed=其中未含底線者。narrative 據此註明（舊 fixture 可不帶）
   audienceNaming?: { total: number; unparsed: number };
   deviceAgg: Map<string, MetricAgg>; // key=裝置(PC/Mobile/Tablet/Others)；D 端只填 PC/Mobile，R 端 device_type 補滿四桶
-  deviceRaw: DeviceRawRow[]; // 裝置層原始寬列（raw_data_device 工作表）；D+R 各列、每列一個 平台×日期×campaign
+  deviceRaw: DeviceRawRow[]; // 裝置層原始寬列（raw_data_device 工作表）；每列一個 平台×日期×campaign
   dRaw: DRow[];
   rRaw: RRow[];
   mRaw: MRow[]; // MGID 標準化列（Raw_Data 的 M 列來源）
+  pRaw: PRow[]; // Prism 標準化列（Raw_Data 的 P 列來源）
 }
 
 /** 抓取階段的完整原始資料（fetchWeeklyRaw 產出；聚合與隨機調整的共同輸入）。
@@ -181,6 +200,7 @@ export interface WeeklyRawData {
   dRaw: DRow[];
   rRaw: RRow[];
   mRaw: MRow[];
+  pRaw: PRow[];
   deviceAgg: Map<string, MetricAgg>;
   deviceRaw: DeviceRawRow[];
   warnings: string[];

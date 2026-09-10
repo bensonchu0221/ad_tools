@@ -19,6 +19,10 @@ const STYLE = `
     letter-spacing:.04em;padding:5px 11px;border-radius:999px;border:1px solid var(--line);color:var(--mut);background:var(--slot)}
   .seed-chip.live{border-color:var(--accent);color:var(--accent)}
   .seed-chip .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .job-warning-box{margin:16px 0 0;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:5px;background:#FFF7ED;color:#92400E;font-size:12.5px;line-height:1.5}
+  .job-warning-box strong{font-family:var(--mono);font-size:12px}
+  .job-warning-box ul{margin:5px 0 0;padding-left:20px}
   .adj-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
   .adj-actions .btn-pri:focus-visible,.adj-actions .btn-line:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   #msg{margin-top:14px}
@@ -60,16 +64,21 @@ export function weeklyAdjustPage(o: {
   basePath: string;
   prefill: Partial<AdjustParams> | null;
   status: string; // awaiting_adjustment | done
+  warnings: string[];
 }): string {
   const p = o.prefill ?? {};
   const v = (x: any) => (x != null ? String(x) : '');
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const seedInit = p.seed != null ? `SEED · ${p.seed}` : 'SEED · —';
+  const warningHtml = o.warnings.length
+    ? `<div class="job-warning-box"><strong>⚠ ${o.warnings.length} 則資料提醒</strong><ul>${o.warnings.map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul></div>`
+    : '';
   const body = `
     <div class="crumb"><a href="/">// tools</a> / <a href="${o.basePath}">weekly</a> / adjust</div>
     <h1>報表數字調整</h1>
     <p class="sub">花費與轉換數維持真實。系統依 campaign 原始成效保留好壞排序與相對差距，再展開到你設定的 CPC、CTR 範圍——不滿意就重抽，滿意才產出 Excel。</p>
     <p class="note" style="margin-top:8px">任務 #${o.jobId}　${esc(o.label)}${o.status === 'done' ? '　·　已產出過，可再調整後重新產出' : ''}</p>
+    ${warningHtml}
 
     <div class="section-label">調整參數 · console</div>
     <div class="card">

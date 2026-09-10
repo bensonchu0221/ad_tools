@@ -14,6 +14,7 @@ export function serializeWeeklyRaw(input: WeeklyReportInput, raw: WeeklyRawData)
     dRaw: raw.dRaw,
     rRaw: raw.rRaw,
     mRaw: raw.mRaw,
+    pRaw: raw.pRaw,
     deviceRaw: raw.deviceRaw,
     imageKeys: [...raw.imageKeys.entries()],
   });
@@ -29,6 +30,7 @@ export function deserializeWeeklyRaw(json: string): { input: WeeklyReportInput; 
       dRaw: o.dRaw ?? [],
       rRaw: o.rRaw ?? [],
       mRaw: o.mRaw ?? [],
+      pRaw: o.pRaw ?? [],
       deviceRaw,
       deviceAgg: deviceAggFromRaw(deviceRaw),
       warnings: o.warnings ?? [],

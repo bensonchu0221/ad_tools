@@ -1,6 +1,6 @@
 // Raw_Data / raw_data_device 的表頭與「列陣列」建構。
 // xlsx.ts 與 preview.ts 共用同一份 builder → 保證 Excel 與 HTML 預覽逐格一致。
-import type { DRow, RRow, MRow, DeviceRawRow, WeeklyReportInput } from './types.js';
+import type { DRow, RRow, MRow, PRow, DeviceRawRow, WeeklyReportInput } from './types.js';
 import { calcConversions } from './report.js';
 
 export const RAW_HEADERS = [
@@ -56,6 +56,18 @@ export function mRawRowArray(v: MRow, buckets: WeeklyReportInput['buckets']): an
     0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
     0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
     v.conv_interest ?? 0, v.conv_decision ?? 0, v.conv_buy ?? 0, // MGID 三階轉換
+  ];
+}
+
+/** P 列 → Raw_Data 35 欄；P 沒有轉換與素材圖，相關欄位補 0／空字串。 */
+export function pRawRowArray(v: PRow): any[] {
+  return [
+    'P', fmtRawDate(String(v.date ?? '')), v.account_name ?? '', v.campaign_id ?? '', v.campaign_name ?? '',
+    v.adgroup_name ?? '', v.creative_name ?? '', v.creative_name ?? '', v.creative_title ?? '', '',
+    v.imp ?? 0, v.click ?? 0, v.spend ?? 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, // R 專屬事件欄補 0
+    0, 0, 0, 0, 0, 0, 0, 0, // D 專屬事件欄補 0
+    0, 0, 0, // MGID 專屬轉換欄補 0
   ];
 }
 
