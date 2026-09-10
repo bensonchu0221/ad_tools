@@ -111,7 +111,13 @@ export interface ReportResult {
 }
 
 export interface ReportInput {
+  /** `allAccounts` 為 true 時忽略這欄 */
   account: string;
+  /**
+   * 全台模式：不挑帳戶、不挑活動，台灣所有影音活動一起出。
+   * 只走下載路徑（畫面不支援）。實測 312 支活動＋有量活動底下的素材，全程 7~9 秒。
+   */
+  allAccounts?: boolean;
   /** 空＝該帳戶全部（不含已刪除） */
   campaignIds?: string[];
   /** YYYY-MM-DD；空＝自動用「開跑第一天」 */
@@ -124,6 +130,22 @@ export interface ReportInput {
    * 開啟後 Action4 呼叫數 ≈ campaign 數 + 素材數（實測全台最多的帳戶是 9 支活動 41 支素材）。
    */
   includeAds?: boolean;
+}
+
+/**
+ * 依輸入挑出要抓的 campaign。純函式。
+ *
+ * `allAccounts`（全台模式）時**完全不看 account**，台灣所有影音活動都進來；
+ * 否則只留該帳戶的。已刪除的預設濾掉，`campaignIds` 有給才再收斂。
+ */
+export function pickCampaigns(all: D1VideoCampaign[], input: ReportInput): D1VideoCampaign[] {
+  const includeDeleted = input.includeDeleted ?? false;
+  const scoped = all.filter(
+    (c) => (input.allAccounts || c.account === input.account) && (includeDeleted || !c.deleted)
+  );
+  return input.campaignIds && input.campaignIds.length
+    ? scoped.filter((c) => input.campaignIds!.includes(c.id))
+    : scoped;
 }
 
 /** 併發跑 worker pool，保留輸入順序。 */
@@ -146,18 +168,15 @@ export async function buildReport(input: ReportInput): Promise<ReportResult> {
   const includeDeleted = input.includeDeleted ?? false;
 
   const all = await listD1VideoCampaigns();
-  const inAccount = all.filter((c) => c.account === input.account && (includeDeleted || !c.deleted));
-  const picked: D1VideoCampaign[] =
-    input.campaignIds && input.campaignIds.length
-      ? inAccount.filter((c) => input.campaignIds!.includes(c.id))
-      : inAccount;
+  const label = input.allAccounts ? '全台' : input.account;
+  const picked = pickCampaigns(all, input);
 
   if (!picked.length) {
     return {
-      account: input.account, sd: input.sd || ed, ed, autoStart: !input.sd,
+      account: label, sd: input.sd || ed, ed, autoStart: !input.sd,
       rows: [], daily: [], totals: sumMetrics([]), totalsCtr: null, totalsPlayRate: null,
       adRows: [],
-      warnings: ['這個帳戶沒有符合條件的影音 campaign'],
+      warnings: [input.allAccounts ? '台灣沒有符合條件的影音 campaign' : '這個帳戶沒有符合條件的影音 campaign'],
     };
   }
 
@@ -186,7 +205,7 @@ export async function buildReport(input: ReportInput): Promise<ReportResult> {
   const edYmd = toYmd(ed);
   const clipped: CampaignSeries[] = seriesList.map((s) => clipSeries(s, sdYmd, edYmd));
 
-  const rows: ReportRow[] = picked.map((c, i) => ({
+  const allRows: ReportRow[] = picked.map((c, i) => ({
     account: c.account,
     campaignId: c.id,
     campaignName: c.name,
@@ -195,6 +214,10 @@ export async function buildReport(input: ReportInput): Promise<ReportResult> {
     ctr: ctr(clipped[i].total),
     playRate: playRate(clipped[i].total),
   }));
+  // 全台模式只列「這段期間真的有跑」的活動：312 支裡 12 個月內有量的只有 55 支，
+  // 其餘 257 支全 0 的列純粹是雜訊。單一帳戶模式維持原樣——那是使用者自己挑的活動，
+  // 「這支沒跑」本身就是他要看的資訊。
+  const rows = filterRanRows(allRows, !!input.allAccounts);
   // 花費由高到低（0 花費的排後面），與看板慣例一致
   rows.sort((a, b) => b.metrics.charge - a.metrics.charge || b.metrics.imp - a.metrics.imp);
 
@@ -207,7 +230,7 @@ export async function buildReport(input: ReportInput): Promise<ReportResult> {
     : [];
 
   return {
-    account: input.account,
+    account: label,
     sd, ed, autoStart,
     rows,
     // ⚠️ Action4 只回「有量的日子」，直接畫會讓 X 軸變成「有量日的序號」而不是時間軸
@@ -236,15 +259,22 @@ async function fetchAdRows(
   sd: string,
   warnings: string[]
 ): Promise<AdDailyRow[]> {
+  // ⚠️ 只抓「這段期間真的有量」的活動。campaign 層總和＝底下素材總和（已實證），
+  //    所以活動整段是 0 就代表它每一支素材也都是 0，抓了也會被 isEmpty 丟掉。
+  //    全台模式差很多：312 支活動裡 12 個月內有量的只有 55 支，不剪枝要多打 500 多次
+  //    per-ad（實測 24.1s → 7~9s）。
+  const hot = picked.filter((c) => !isEmpty(clipped.find((x) => x.campaignId === c.id)?.total ?? ZERO_METRICS));
+  if (!hot.length) return [];
+
   let ads: Awaited<ReturnType<typeof listD1VideoAds>>;
   try {
-    ads = await listD1VideoAds(picked.map((c) => c.id));
+    ads = await listD1VideoAds(hot.map((c) => c.id));
   } catch (e: any) {
     warnings.push(`素材清單讀取失敗，逐日表只會有活動層：${String(e?.message ?? e)}`);
     return [];
   }
 
-  const nameById = new Map(picked.map((c) => [c.id, c.name]));
+  const nameById = new Map(hot.map((c) => [c.id, c.name]));
   const targets = ads.filter((a) => nameById.has(a.campaignId));
   if (!targets.length) return [];
 
@@ -275,7 +305,7 @@ async function fetchAdRows(
   for (const u of units) {
     byCampaign.set(u.campaignId, addMetrics(byCampaign.get(u.campaignId) ?? ZERO_METRICS, u.series.total));
   }
-  for (const c of picked) {
+  for (const c of hot) {
     const camp = clipped.find((x) => x.campaignId === c.id)?.total ?? ZERO_METRICS;
     const sum = byCampaign.get(c.id);
     if (!sum) {
@@ -305,7 +335,17 @@ export function clipSeries(s: CampaignSeries, sdYmd: string, edYmd: string): Cam
   };
 }
 
-/** 這段期間完全沒有任何量（七個指標全 0）。 */
+/**
+ * 全台模式只留「這段期間真的有跑」的活動列；單一帳戶模式原樣回傳。純函式。
+ *
+ * 全台 312 支活動裡 12 個月內有量的只有 55 支，其餘全 0 的列是雜訊；
+ * 但單一帳戶是使用者自己挑的活動，「這支沒跑」本身就是他要看的資訊，不能一起濾掉。
+ */
+export function filterRanRows(rows: ReportRow[], allAccounts: boolean): ReportRow[] {
+  return allAccounts ? rows.filter((r) => !isEmpty(r.metrics)) : rows;
+}
+
+/** 這段期間完全沒有任何量（七個指標全 0）。剪枝與「只列有跑的活動」都靠它。 */
 function isEmpty(m: VideoMetrics): boolean {
   return m.imp === 0 && m.click === 0 && m.charge === 0 && m.v25 === 0 && m.v50 === 0 && m.v75 === 0 && m.v100 === 0;
 }
