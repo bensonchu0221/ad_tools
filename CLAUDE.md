@@ -232,13 +232,17 @@ popin 內部工具集（取代舊 dctool）。
 - campaign 多選**預設不含已刪除**、可勾選顯示（393 支裡 87 支 `deleted`，它們被刪之前是有數字的）
 - **⚠️⚠️ 素材（creative）層拿得到，2026-09-10 加進下載**：**Action4 的 `nid` 直接吃素材 mongo id**，回的欄位與 campaign 層一模一樣——這就是 D1 後台自己的做法（`AdVideoService::getAdsWithStat` → `Library\getStatsFromApi($ad['mongo_id'])` → 同一支 `op=article&nid=`）。素材清單在 **Firestore `article-action` 的 `ad` collection**（影音素材帶 `video` 子物件；**沒有 `ad_video` collection**，那張在 D1 的 MySQL 內網進不去）。台灣現存 312 支影音 campaign 共 676 支素材、平均 2.2 支/活動，素材最多的帳戶是 3flower（9 支活動 41 支素材）。
   - **只改下載、畫面零改動**（使用者指定）：`ReportInput.includeAds` 只有 `/export.xlsx` 傳 true，`/data` 走原路徑 ⇒ 畫面速度不受影響。**campaign 層照抓不動**，〈影音成效〉與折線圖逐格維持原樣；素材層只是多一份明細，兩者對不起來時出 warning（**不靜默採用比較小的那個**），warning 另外寫進 Excel 第一張表的紅字說明列（下載路徑看不到畫面上的橫幅）。
-  - **〈逐日〉工作表改成長格式**（14 欄）：日期／廣告活動／素材／**素材ID**／**素材建立時間**＋九個指標，一列＝日 × 活動 × 素材，丟樞紐分析可任意切。舊的「一天一列的活動合計」已不在檔案裡，用樞紐照日期加總可重建。〈影音成效〉維持 11 欄不動。
+  - **〈逐日〉工作表改成長格式**（**15 欄**）：日期／廣告活動／素材／**文案**／**素材ID**／**素材建立時間**＋九個指標，一列＝日 × 活動 × 素材，丟樞紐分析可任意切。舊的「一天一列的活動合計」已不在檔案裡，用樞紐照日期加總可重建。〈影音成效〉維持 11 欄不動。
   - **⚠️ 素材ID 與建立時間不能省**：素材標題撞名率極高，實測 139 支多素材活動裡有 96 支（69%）標題重複，EVOX 那支四支素材全叫「EVOX」。`createdtime` 676 支全部有值。
+  - **文案＝`video.description`（2026-09-10 加）**，D1 上稿表單叫**影音說明文**（`LC_VIDEO_EXPLANATORY`，選填）。**素材自己的 `description` 與 `creativeAdText` 676 支全是空字串**、`content` 只有 106 支有值且裝的是文章內文不是文案 ⇒ **取錯欄位會靜默變成一整欄空白**，`mapVideoAdDoc` 抽成純函式就是為了讓這條被驗證蓋到。填寫率：2026 年建立的素材 80%、全部 676 支 76%（另有 `video.btn`＝連結按鈕名，填寫率僅 32%，沒收）。
+  - **⚠️ 文案不是鍵**：同一段文案會掛在多支素材上。實測 juliArt `juliat_Video_橫式` 三支素材文案一模一樣、其中兩支連 `tag` 都一樣，差別只在影片檔本身（沒有任何文字欄位分得開）。分辨力：只看標題 43/139、只看文案 49/139、標題＋文案 63/139、再加按鈕 75/139 ⇒ **素材ID 仍是唯一可靠的鍵**。
+  - **⚠️ D1 後台素材卡上方那個中括號是 `tag`（廣告標籤）不是標題**（實測 ad `6a966db6b2a71a5c3e708306`：`tag=產品形象_淨化液`、`title=juliArt`、`video.description=夏天頭皮油悶癢？…`）。現在〈逐日〉的「素材」欄放的是 `title`，這個帳戶就會整欄都是品牌名 `juliArt`；哪天覺得不夠辨識，`tag` 是下一個候選（676 支只有 160 支有值）。
+  - **⚠️ `ad` collection 的 `_id` 是 ObjectId 不是字串**（`ad.campaign` 才是字串）。用字串查 `_id` 會靜默回 null；程式只做 `String(d._id)` 投影所以不受影響，但要手動撈單筆時記得用 `new ObjectId(...)`。
   - **⚠️ 停用與已刪除的素材一定要一起抓**：676 支裡 350 支 `status=0`，量常常主要在它們身上（EVOX_CPM_Video_直1 四支素材有三支已停用、占六成以上曝光）。`listD1VideoAds` 刻意不過濾 status/deleted。
   - **⚠️ 有 35 支現存活動在 Firestore 查不到素材**（全是測試活動，實測近 12 個月曝光 0）。程式留了「查不到素材明細且該活動真的有量才出 warning」的保險；`adRows` 整個空時 Excel 退回活動合計並把活動/素材欄標成`（全部活動合計）／（無素材明細）`，不會給一張空表。
   - **兩個刻意的取捨**：①**每支素材補齊 sd~ed 每一天、缺的填 0**（使用者指定），列數＝天數 × 素材數，實測 Pixar 帳戶 30 天 19 支素材＝570 列、其中 86% 是補零列；②**整段期間完全沒量的素材整支不出**（那不是日期軸的洞，是這支素材沒跑過）。
   - **實測對帳全等**：素材加總與 campaign 層曝光/花費逐欄相同、差 0（EVOX_CPM 3 支活動 8 支素材 412,656 曝光；CPM_MundoPixarExperience 18 支活動 19 支素材 305,236 曝光／21,976.99 元）。抓取時間 1.0~1.7 秒，與只抓 campaign 層同一量級。
-- 驗證：`poc/verify_d1videoad.mts` **96 項全離線**（真實 8/31 語料回歸／PC 不得滲入／vertical 相加／null 比率／12 個月邊界／日期工具／Excel 欄序與檔名／`clipSeries` 區間切割／`buildAdDailyRows` 補零與排序），已做 **12 個變異測試**（把 PC 加進曝光、金額不除 1000、無曝光 ctr 回 0、不丟全 0 日、vertical 沒加、上限誤植 13 個月；素材層那批：不補零只出有量日、整段零量素材照出、改成日期優先排序、`clipSeries` 不切區間、逐日表拿掉素材ID、`byDay` 用 `YYYY-MM-DD` 當鍵沒轉 `YYYYMMDD`）**全部被抓到**。端到端 `poc/probe_d1videoad.mts`、視覺檢視 `poc/_shot_d1videoad.mts`（Playwright 走完整流程截圖）
+- 驗證：`poc/verify_d1videoad.mts` **125 項全離線**（真實 8/31 語料回歸／PC 不得滲入／vertical 相加／null 比率／12 個月邊界／日期工具／Excel 欄序與檔名／`clipSeries` 區間切割／`buildAdDailyRows` 補零與排序／`mapVideoAdDoc` 文案取法／**實際產 xlsx 再讀回比對欄位對齊與 numFmt**），已做 **18 個變異測試**（把 PC 加進曝光、金額不除 1000、無曝光 ctr 回 0、不丟全 0 日、vertical 沒加、上限誤植 13 個月；素材層那批：不補零只出有量日、整段零量素材照出、改成日期優先排序、`clipSeries` 不切區間、逐日表拿掉素材ID、`byDay` 用 `YYYY-MM-DD` 當鍵沒轉 `YYYYMMDD`；文案那批：文案沒帶進列、文案相同就併列、表頭加了欄但寫入沒加、numFmt 欄號沒跟著右移、文案改讀素材 `description`、文案誤取 `video.btn`）**全部被抓到**。⚠️ **產檔再讀回那組是後來補的**——加文案欄時 `applyFormats` 的欄號要跟著右移，純看常數陣列的斷言蓋不到這種位移。端到端 `poc/probe_d1videoad.mts`、視覺檢視 `poc/_shot_d1videoad.mts`（Playwright 走完整流程截圖）
 
 ## Token 管理頁（`/tools/tokens`，`src/tools/tokens/route.ts`）
 - **2026-07-11 從 adpreview 搬出**成獨立工具（舊 `/tools/adpreview/tokens` 已移除）。單頁、以 hash（`#d`／`#mgid`）分頁切換，表單送出後 redirect 回同分頁。不進頂部導覽列（非主工具）；入口＝首頁「快捷」區兩個站內連結（D／MGID token 管理）＋各工具表單內「管理 D 帳號 token →」連結（改指 `/tools/tokens#d`）
