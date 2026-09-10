@@ -33,9 +33,11 @@ export const SHEET_HEADERS = [
 /**
  * 〈逐日〉工作表＝長格式：一列＝日期 × 廣告活動 × 素材。丟進樞紐分析就能任意切。
  * 素材標題撞名率高（實測多素材活動有 69% 標題重複），所以一定要帶素材ID與建立時間。
+ * 〈文案〉＝D1 的「影音說明文」（`video.description`）。**同一段文案會掛在多支素材上**
+ * （實測 juliArt 那支活動三支素材文案完全相同），所以它是給人看的、不是鍵，鍵仍是素材ID。
  */
 export const DAILY_HEADERS = [
-  '日期', '廣告活動', '素材', '素材ID', '素材建立時間',
+  '日期', '廣告活動', '素材', '文案', '素材ID', '素材建立時間',
   '收費曝光', '點擊數', '點擊率', '金額',
   '25%播放', '50%播放', '75%播放', '已播放數', '已播放率',
 ] as const;
@@ -59,6 +61,7 @@ interface DailyLine {
   date: string;
   campaign: string;
   ad: string;
+  copy: string;
   adId: string;
   createdAt: string;
   m: ReportResult['totals'];
@@ -120,10 +123,12 @@ export async function buildVideoXlsx(rep: ReportResult): Promise<Buffer> {
   // 素材明細抓不到時（Firestore 查無素材／讀取失敗）退回活動合計，欄位標清楚而不是給一張空表。
   const dailyRows: DailyLine[] = rep.adRows.length
     ? rep.adRows.map((r) => ({
-      date: r.date, campaign: r.campaignName, ad: r.adTitle, adId: r.adId, createdAt: r.adCreatedAt, m: r.metrics,
+      date: r.date, campaign: r.campaignName, ad: r.adTitle, copy: r.adCopy,
+      adId: r.adId, createdAt: r.adCreatedAt, m: r.metrics,
     }))
     : rep.daily.map((p) => ({
-      date: p.date, campaign: '（全部活動合計）', ad: '（無素材明細）', adId: '', createdAt: '', m: p.metrics,
+      date: p.date, campaign: '（全部活動合計）', ad: '（無素材明細）', copy: '',
+      adId: '', createdAt: '', m: p.metrics,
     }));
 
   for (const r of dailyRows) {
@@ -131,14 +136,14 @@ export async function buildVideoXlsx(rep: ReportResult): Promise<Buffer> {
     const c = m.imp > 0 ? (m.click * 100) / m.imp : null;
     const pr = m.imp > 0 ? (m.v100 * 100) / m.imp : null;
     const row = ds.addRow([
-      r.date, r.campaign, r.ad, r.adId, r.createdAt,
+      r.date, r.campaign, r.ad, r.copy, r.adId, r.createdAt,
       m.imp, m.click, rate(c), m.charge, m.v25, m.v50, m.v75, m.v100, rate(pr),
     ]);
-    styleRow(ds, row.number, false, 5);
+    styleRow(ds, row.number, false, 6);
   }
-  applyFormats(ds, dHead.number + 1, ds.rowCount, [6, 7, 10, 11, 12, 13], [9], [8, 14]);
+  applyFormats(ds, dHead.number + 1, ds.rowCount, [7, 8, 11, 12, 13, 14], [10], [9, 15]);
   ds.columns = [
-    { width: 13 }, { width: 34 }, { width: 26 }, { width: 26 }, { width: 20 },
+    { width: 13 }, { width: 34 }, { width: 26 }, { width: 46 }, { width: 26 }, { width: 20 },
     { width: 12 }, { width: 10 }, { width: 10 }, { width: 12 },
     { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 },
   ];

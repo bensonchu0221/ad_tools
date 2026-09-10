@@ -85,6 +85,8 @@ export interface AdDailyRow {
   campaignName: string;
   adId: string;
   adTitle: string;
+  /** 文案＝D1 的「影音說明文」。同一段文案會掛在多支素材上，所以它不是鍵、adId 才是 */
+  adCopy: string;
   /** 素材建立時間。素材標題撞名率高（實測多素材活動有 69% 標題重複），靠它與 adId 才分得開 */
   adCreatedAt: string;
   metrics: VideoMetrics;
@@ -261,6 +263,7 @@ async function fetchAdRows(
       campaignName: nameById.get(a.campaignId) ?? a.campaignId,
       adId: a.id,
       adTitle: a.title,
+      adCopy: a.copy,
       adCreatedAt: a.createdAt,
       series: clipSeries(series, sdYmd, edYmd),
     };
@@ -312,6 +315,7 @@ export interface AdUnit {
   campaignName: string;
   adId: string;
   adTitle: string;
+  adCopy: string;
   adCreatedAt: string;
   series: CampaignSeries;
 }
@@ -337,6 +341,7 @@ export function buildAdDailyRows(units: AdUnit[], sd: string, ed: string): AdDai
         campaignName: u.campaignName,
         adId: u.adId,
         adTitle: u.adTitle,
+        adCopy: u.adCopy,
         adCreatedAt: u.adCreatedAt,
         metrics: u.series.byDay[toYmd(date)] ?? ZERO_METRICS,
       });

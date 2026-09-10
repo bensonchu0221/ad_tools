@@ -84,6 +84,12 @@ export interface D1VideoAd {
   /** 1＝在跑、0＝停用。**停用的一定要抓**：實測 676 支素材有 350 支是 0，量常常主要在它們身上 */
   status: number;
   deleted: boolean;
+  /**
+   * 文案＝`video.description`，D1 上稿表單的**影音說明文**（`LC_VIDEO_EXPLANATORY`，選填）。
+   * 素材本身的 `description`／`creativeAdText` 676 支全空、`content` 裝的是文章內文不是文案，
+   * 能當文案用的只有這一欄。實測 2026 年建立的素材有 80% 有填。
+   */
+  copy: string;
   /** 建立時間（D1 存的字串，如 `2026/06/01 20:05:45`）。素材標題大量撞名，靠這欄與 id 才分得開 */
   createdAt: string;
 }
@@ -104,17 +110,28 @@ export async function listD1VideoAds(campaignIds: string[]): Promise<D1VideoAd[]
   const docs = await col
     .find(
       { campaign: { $in: campaignIds } },
-      { projection: { title: 1, campaign: 1, status: 1, deleted: 1, createdtime: 1 } }
+      { projection: { title: 1, campaign: 1, status: 1, deleted: 1, createdtime: 1, video: 1 } }
     )
     .toArray();
-  return docs.map((d) => ({
+  return docs.map(mapVideoAdDoc);
+}
+
+/**
+ * `ad` 文件 → `D1VideoAd`。純函式，供離線驗證欄位取法。
+ *
+ * ⚠️ 文案要取 **`video.description`**（上稿表單的「影音說明文」），不是素材本身的 `description`
+ *    ——後者 676 支全是空字串，取錯會靜默變成一整欄空白。
+ */
+export function mapVideoAdDoc(d: Document): D1VideoAd {
+  return {
     id: String(d._id),
     campaignId: String(d.campaign ?? ''),
     title: String(d.title ?? ''),
     status: Number(d.status ?? 0),
     deleted: d.deleted === true,
+    copy: String((d.video as Record<string, unknown> | undefined)?.description ?? ''),
     createdAt: String(d.createdtime ?? ''),
-  }));
+  };
 }
 
 export interface D1RedisRecord {
