@@ -30,16 +30,21 @@ export const SHEET_HEADERS = [
   '25%播放', '50%播放', '75%播放', '已播放數', '已播放率',
 ] as const;
 
-const DAILY_HEADERS = [
-  '日期', '收費曝光', '點擊數', '點擊率', '金額',
+/**
+ * 〈逐日〉工作表＝長格式：一列＝日期 × 廣告活動 × 素材。丟進樞紐分析就能任意切。
+ * 素材標題撞名率高（實測多素材活動有 69% 標題重複），所以一定要帶素材ID與建立時間。
+ */
+export const DAILY_HEADERS = [
+  '日期', '廣告活動', '素材', '素材ID', '素材建立時間',
+  '收費曝光', '點擊數', '點擊率', '金額',
   '25%播放', '50%播放', '75%播放', '已播放數', '已播放率',
 ] as const;
 
-function styleRow(ws: ExcelJS.Worksheet, rowNo: number, head = false) {
+function styleRow(ws: ExcelJS.Worksheet, rowNo: number, head = false, leftUpTo = 2) {
   const row = ws.getRow(rowNo);
   row.eachCell((cell, col) => {
     cell.font = head ? { ...HEAD_FONT } : { ...FONT };
-    cell.alignment = col <= 2 && !head ? { ...LEFT } : { ...CENTER };
+    cell.alignment = col <= leftUpTo && !head ? { ...LEFT } : { ...CENTER };
     cell.border = { ...THIN };
     if (head) cell.fill = GREY_FILL;
   });
@@ -48,6 +53,15 @@ function styleRow(ws: ExcelJS.Worksheet, rowNo: number, head = false) {
 /** 點擊率／已播放率：null（無曝光算不出來）寫成 '—' 而不是 0，避免被讀成「0%」。 */
 function rate(v: number | null): number | string {
   return v === null ? '—' : v;
+}
+
+interface DailyLine {
+  date: string;
+  campaign: string;
+  ad: string;
+  adId: string;
+  createdAt: string;
+  m: ReportResult['totals'];
 }
 
 export async function buildVideoXlsx(rep: ReportResult): Promise<Buffer> {
@@ -64,6 +78,12 @@ export async function buildVideoXlsx(rep: ReportResult): Promise<Buffer> {
   ws.addRow(['口徑：只計 mobile（對齊 D1 後台），資料來源 Action4']);
   ws.mergeCells(2, 1, 2, SHEET_HEADERS.length);
   ws.getRow(2).font = { name: 'Microsoft JhengHei', size: 10, color: { argb: 'FF6B7280' } };
+  // 對帳不一致／素材抓取失敗只在下載路徑算得出來，畫面看不到 ⇒ 一定要留在檔案裡
+  if (rep.warnings.length) {
+    const warn = ws.addRow([`注意：${rep.warnings.join('；')}`]);
+    ws.mergeCells(warn.number, 1, warn.number, SHEET_HEADERS.length);
+    warn.font = { name: 'Microsoft JhengHei', size: 10, color: { argb: 'FFB42318' } };
+  }
   ws.addRow([]);
 
   const headRow = ws.addRow([...SHEET_HEADERS]);
@@ -92,22 +112,34 @@ export async function buildVideoXlsx(rep: ReportResult): Promise<Buffer> {
     { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 },
   ];
 
-  // ---- 工作表 2：逐日（對照折線圖） ----
+  // ---- 工作表 2：逐日（日期 × 廣告活動 × 素材，缺的日子補 0） ----
   const ds = wb.addWorksheet('逐日');
   const dHead = ds.addRow([...DAILY_HEADERS]);
   styleRow(ds, dHead.number, true);
-  for (const p of rep.daily) {
-    const m = p.metrics;
+
+  // 素材明細抓不到時（Firestore 查無素材／讀取失敗）退回活動合計，欄位標清楚而不是給一張空表。
+  const dailyRows: DailyLine[] = rep.adRows.length
+    ? rep.adRows.map((r) => ({
+      date: r.date, campaign: r.campaignName, ad: r.adTitle, adId: r.adId, createdAt: r.adCreatedAt, m: r.metrics,
+    }))
+    : rep.daily.map((p) => ({
+      date: p.date, campaign: '（全部活動合計）', ad: '（無素材明細）', adId: '', createdAt: '', m: p.metrics,
+    }));
+
+  for (const r of dailyRows) {
+    const m = r.m;
     const c = m.imp > 0 ? (m.click * 100) / m.imp : null;
     const pr = m.imp > 0 ? (m.v100 * 100) / m.imp : null;
     const row = ds.addRow([
-      p.date, m.imp, m.click, rate(c), m.charge, m.v25, m.v50, m.v75, m.v100, rate(pr),
+      r.date, r.campaign, r.ad, r.adId, r.createdAt,
+      m.imp, m.click, rate(c), m.charge, m.v25, m.v50, m.v75, m.v100, rate(pr),
     ]);
-    styleRow(ds, row.number);
+    styleRow(ds, row.number, false, 5);
   }
-  applyFormats(ds, dHead.number + 1, ds.rowCount, [2, 3, 6, 7, 8, 9], [5], [4, 10]);
+  applyFormats(ds, dHead.number + 1, ds.rowCount, [6, 7, 10, 11, 12, 13], [9], [8, 14]);
   ds.columns = [
-    { width: 13 }, { width: 12 }, { width: 10 }, { width: 10 }, { width: 12 },
+    { width: 13 }, { width: 34 }, { width: 26 }, { width: 26 }, { width: 20 },
+    { width: 12 }, { width: 10 }, { width: 10 }, { width: 12 },
     { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 },
   ];
 

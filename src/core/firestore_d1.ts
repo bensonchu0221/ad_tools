@@ -75,6 +75,48 @@ export async function listD1VideoCampaigns(): Promise<D1VideoCampaign[]> {
   }));
 }
 
+export interface D1VideoAd {
+  /** 素材 mongo id（24 碼 hex），**直接餵給 Action4 的 nid**（D1 後台 AdVideoService::getAdsWithStat 就是這樣做的） */
+  id: string;
+  /** 所屬 campaign mongo id */
+  campaignId: string;
+  title: string;
+  /** 1＝在跑、0＝停用。**停用的一定要抓**：實測 676 支素材有 350 支是 0，量常常主要在它們身上 */
+  status: number;
+  deleted: boolean;
+  /** 建立時間（D1 存的字串，如 `2026/06/01 20:05:45`）。素材標題大量撞名，靠這欄與 id 才分得開 */
+  createdAt: string;
+}
+
+/**
+ * 取指定 campaign 底下的影音素材。
+ *
+ * ⚠️ 影音素材就在 `ad` 這張 collection 裡（帶 `video` 子物件），**沒有 `ad_video` collection**
+ *    （那張在 D1 的 MySQL、內網進不去）。這裡不過濾 status/deleted，全部回：
+ *    停用與已刪除的素材帶著歷史量，濾掉就跟 campaign 層對不起來。
+ *
+ * ⚠️ 實測 312 支現存台灣影音 campaign 裡有 35 支在這裡查無素材（全是測試活動、近 12 個月曝光 0）。
+ *    呼叫端要有「查無素材就退回 campaign 層」的保險，不能假設每支都有。
+ */
+export async function listD1VideoAds(campaignIds: string[]): Promise<D1VideoAd[]> {
+  if (!campaignIds.length) return [];
+  const col = await d1Collection('ad');
+  const docs = await col
+    .find(
+      { campaign: { $in: campaignIds } },
+      { projection: { title: 1, campaign: 1, status: 1, deleted: 1, createdtime: 1 } }
+    )
+    .toArray();
+  return docs.map((d) => ({
+    id: String(d._id),
+    campaignId: String(d.campaign ?? ''),
+    title: String(d.title ?? ''),
+    status: Number(d.status ?? 0),
+    deleted: d.deleted === true,
+    createdAt: String(d.createdtime ?? ''),
+  }));
+}
+
 export interface D1RedisRecord {
   date: string;
   key: string;
