@@ -1,7 +1,8 @@
 // tool#6 自動審核：純函式驗證（離線，不打 API、不碰 DB、不需要帳密）。
 // 跑法：npx tsx poc/verify_coupang_review.mts
 import {
-  consoleSign, pickSessionCookie, cookieExpireAt, isNotLoggedIn, X_VERSION,
+  consoleSign, pickSessionCookie, cookieExpireAt, isNotLoggedIn, getConsoleVersion, DEFAULT_X_VERSION,
+  parseBundlePath, parseConsoleVersion, isStaleVersion,
 } from '../src/core/rixbee_console.js';
 import { pickOwnCreativeIds, chunk, REVIEW_BATCH } from '../src/tools/coupangads/review.js';
 
@@ -21,26 +22,63 @@ console.log('\n[x-sign：對照使用者 2026-08-31 從瀏覽器複製的真實�
     ids: [486685, 486686],
   };
   const REAL_SIGN = '0cec8719454232a40c0fd08bc6d4f58b299db3f80474b4061f50ecd865dbdc4c';
-  check('真實請求的簽章逐字元相符', consoleSign(REAL_BODY) === REAL_SIGN, consoleSign(REAL_BODY));
+  // 這組向量是用當時的 x-version（2f3be1d77…）簽的；console 2026-09-14 改版換了版本號，演算法沒變，
+  // 所以帶舊金鑰驗演算法、另外斷言預設金鑰已經不是舊的。
+  const OLD_KEY = '2f3be1d77';
+  const sign = (d: Record<string, unknown>) => consoleSign(d, OLD_KEY);
+  check('真實請求的簽章逐字元相符', sign(REAL_BODY) === REAL_SIGN, sign(REAL_BODY));
+  check('預設金鑰＝現行版本的金鑰（不是 8/31 那版）', consoleSign(REAL_BODY) === consoleSign(REAL_BODY, getConsoleVersion().signKey) && consoleSign(REAL_BODY) !== REAL_SIGN);
 
   // key 的順序不影響簽章（前端一定會先 sort）
   const shuffled = { ids: [486685, 486686], mt_status: 1, target_status: 1, title_status: 1, desc_status: 1, status: 1, mt_url: 1, target_info: 1, cr_desc: 1, cr_title: 1 };
-  check('body 的 key 順序不影響簽章', consoleSign(shuffled) === REAL_SIGN);
+  check('body 的 key 順序不影響簽章', sign(shuffled) === REAL_SIGN);
 
   // 陣列要用逗號串，不能用 JSON.stringify（[1,2] 不是 "[1,2]"）
   check('陣列值用逗號串', consoleSign({ ids: [1, 2] }) === consoleSign({ ids: '1,2' } as any));
   check('陣列不是 JSON 字串', consoleSign({ ids: [1, 2] }) !== consoleSign({ ids: '[1,2]' } as any));
   check('單筆陣列＝純值', consoleSign({ ids: [7] }) === consoleSign({ ids: 7 } as any));
 
-  check('換一組 id 就換一個簽章', consoleSign({ ...REAL_BODY, ids: [486685] }) !== REAL_SIGN);
-  check('換一個欄位值就換一個簽章', consoleSign({ ...REAL_BODY, status: 2 }) !== REAL_SIGN);
+  check('換一組 id 就換一個簽章', sign({ ...REAL_BODY, ids: [486685] }) !== REAL_SIGN);
+  check('換一個欄位值就換一個簽章', sign({ ...REAL_BODY, status: 2 }) !== REAL_SIGN);
   check('空物件回空字串（同前端）', consoleSign({}) === '');
   check('全部 undefined 也回空字串', consoleSign({ a: undefined }) === '');
   check('undefined 欄位不參與簽章', consoleSign({ ids: [1], x: undefined }) === consoleSign({ ids: [1] }));
   check('布林用 true/false 不是 1/0', consoleSign({ a: true }) !== consoleSign({ a: 1 } as any));
 
-  check('簽章金鑰＝x-version 前 9 碼', X_VERSION.startsWith('2f3be1d77'));
+  check('開機預設版本＝2026-09-14 改版後', DEFAULT_X_VERSION.startsWith('488cf11f1'));
+  check('開機預設金鑰＝版本前 9 碼', getConsoleVersion().signKey === '488cf11f1');
   check('簽章是 64 碼 hex（SHA256）', /^[0-9a-f]{64}$/.test(consoleSign(REAL_BODY)));
+}
+
+console.log('\n[console 版本自動偵測：解析首頁與 bundle（2026-09-14 真實片段）]');
+{
+  // 真實首頁 HTML（2026-09-11 部署、09-14 抓）
+  const HTML = '<!DOCTYPE html><html><head><script async src="https://www.googletagmanager.com/gtag/js?id=G-NFMJNZ94P1"></script><script charset="utf-8">window.dataLayer=[]</script></head><body><div id="root"></div><script src="/umi.e76a21c2.js"></script></body></html>';
+  check('首頁找得到主 bundle', parseBundlePath(HTML) === '/umi.e76a21c2.js', parseBundlePath(HTML));
+  check('不會誤抓 gtag 的 script', !String(parseBundlePath(HTML)).includes('googletagmanager'));
+  check('沒有 umi bundle → null', parseBundlePath('<script src="/app.js"></script>') === null);
+
+  // 真實 bundle 片段：request interceptor ＋ generateSignature（webpack module 13737）
+  const INTERCEPTOR = 'Xe.headers["x-time-zone"]=Gt;var Jt=(0,me.generateSignature)(Xe.data||{});Xe.headers["x-sign"]=Jt,Xe.headers["x-version"]="488cf11f162de415b8f5ddc47c012c28d572e43f";var sn=localStorage.getItem("cur_user_id")||""';
+  const SIGNFN = '13737:function(p,v,e){"use strict";e.r(v),e.d(v,{generateSignature:function(){return u}});var t=e(88010),n=e.n(t),o=e(63465),r=e.n(o);function u(l){var c="488cf11f1",d=Object.keys(l).sort();if(!d.length)return"";var g=[];';
+  const OTHER = 'function k(a){var b="deadbeef",x=a.map(String);return x}';
+  const JS = OTHER + ';' + INTERCEPTOR + ';' + SIGNFN;
+  const v = parseConsoleVersion(JS);
+  check('解析出版本', v?.version === '488cf11f162de415b8f5ddc47c012c28d572e43f', v);
+  check('解析出簽章金鑰', v?.signKey === '488cf11f1', v);
+  check('解析結果＝開機預設（現在的 bundle 就是這版）', v?.version === DEFAULT_X_VERSION);
+
+  // 金鑰直接讀 generateSignature，不假設是版本前 9 碼
+  const js2 = INTERCEPTOR.replace('488cf11f162de415b8f5ddc47c012c28d572e43f', 'aaaaaaaaaa2de415b8f5ddc47c012c28d572e43f') + ';' + SIGNFN.replace('488cf11f1', 'KeyXyz123');
+  check('金鑰與版本前綴不同時照 bundle 的金鑰', parseConsoleVersion(js2)?.signKey === 'KeyXyz123', parseConsoleVersion(js2));
+  check('不會把別的函式的字串常數當金鑰', parseConsoleVersion(OTHER + INTERCEPTOR)?.signKey === '488cf11f1');
+  check('找不到簽章函式 → 退回版本前 9 碼', parseConsoleVersion(INTERCEPTOR)?.signKey === '488cf11f1');
+  check('找不到版本 → null（寧可報錯不用猜的）', parseConsoleVersion(SIGNFN) === null);
+  check('出現兩個不同版本 → null', parseConsoleVersion(INTERCEPTOR + ';' + INTERCEPTOR.replace('488cf11f1', '111111111')) === null);
+  check('同一版本出現兩次仍可用', parseConsoleVersion(INTERCEPTOR + ';' + INTERCEPTOR)?.version === DEFAULT_X_VERSION);
+
+  check('-6＝版本過期', isStaleVersion(-6) && isStaleVersion('-6'));
+  check('-1／0／1101 不是版本過期', !isStaleVersion(-1) && !isStaleVersion(0) && !isStaleVersion(1101) && !isStaleVersion(undefined));
 }
 
 console.log('\n[session cookie]');

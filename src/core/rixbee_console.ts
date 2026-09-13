@@ -8,14 +8,25 @@
 //     試過 7 個全 404，見 CLAUDE.md tool#6）。
 //
 // 簽章演算法出自 console 前端 bundle 的 `generateSignature`（webpack module 13737）：
-//   把 body 的 key 排序 → 串成 `a=1&b=2&…`（陣列值用逗號串）→ HmacSHA256(msg, "2f3be1d77") 取 hex。
-// 金鑰就是 `x-version` 的前 9 碼。已用真實請求對過（見 poc/verify_coupang_review.mts 的測試向量）。
+//   把 body 的 key 排序 → 串成 `a=1&b=2&…`（陣列值用逗號串）→ HmacSHA256(msg, 金鑰) 取 hex。
+//   金鑰目前是 `x-version` 的前 9 碼。已用真實請求對過（見 poc/verify_coupang_review.mts 的測試向量）。
+//
+// ⚠️ console 改版會換 `x-version`（連帶換簽章金鑰），舊值送出去一律回 `code=-6 請重新加載頁面`
+//   （前端收到會自動 reload，所以人在後台察覺不到）。2026-09-14 踩到：2f3be1d77… → 488cf11f1…，
+//   自動審核整批失敗。**現在遇到 -6 會自動抓首頁引用的 `umi.*.js` 解析新版本號與金鑰再重送一次**
+//   （`refreshConsoleVersion`）；解析不出來才真的報錯，屆時手動看 bundle 更新下面的預設值。
 import { createHmac } from 'node:crypto';
 
 const BASE = process.env.RIXBEE_CONSOLE_BASE ?? 'https://broadciel.console.rixbeedesk.com';
-/** bundle 裡寫死的版本字串；前 9 碼同時是簽章金鑰。console 改版時這兩個要一起換。 */
-export const X_VERSION = process.env.RIXBEE_CONSOLE_VERSION ?? '2f3be1d77499dd2646130a9f5afb215a7cded91a';
-const SIGN_KEY = X_VERSION.slice(0, 9);
+/** 開機時用的版本字串（bundle 裡寫死的那個）；console 改版後會在執行期被自動偵測值取代。 */
+export const DEFAULT_X_VERSION = process.env.RIXBEE_CONSOLE_VERSION ?? '488cf11f162de415b8f5ddc47c012c28d572e43f';
+
+export interface ConsoleVersion { version: string; signKey: string }
+
+/** 執行期現行版本（module 內共用；自動偵測到新版就整個換掉）。 */
+let current: ConsoleVersion = { version: DEFAULT_X_VERSION, signKey: DEFAULT_X_VERSION.slice(0, 9) };
+
+export function getConsoleVersion(): ConsoleVersion { return current; }
 
 /**
  * 值的字串化要跟 JS 的模板字串一致（`${v}`）：
@@ -27,13 +38,70 @@ function signValue(v: unknown): string {
 }
 
 /** x-sign：key 排序後串起來做 HmacSHA256。`undefined` 的欄位不參與（同前端）。 */
-export function consoleSign(data: Record<string, unknown>): string {
+export function consoleSign(data: Record<string, unknown>, key: string = current.signKey): string {
   const keys = Object.keys(data).sort();
   if (!keys.length) return '';
   const parts = keys.filter((k) => data[k] !== undefined).map((k) => `${k}=${signValue(data[k])}`);
   if (!parts.length) return '';
-  return createHmac('sha256', SIGN_KEY).update(parts.join('&'), 'utf8').digest('hex');
+  return createHmac('sha256', key).update(parts.join('&'), 'utf8').digest('hex');
 }
+
+// ── 版本自動偵測 ─────────────────────────────────────────────
+
+/** 純函式：從 console 首頁 HTML 找出主 bundle 路徑（`<script src="/umi.xxxxxxxx.js">`）。 */
+export function parseBundlePath(html: string): string | null {
+  const m = html.match(/<script[^>]*\bsrc="([^"]*\/umi\.[0-9a-f]+\.js)"/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * 純函式：從 bundle 解析 `x-version` 與簽章金鑰。
+ * - 版本：request interceptor 的 `headers["x-version"]="<hex>"`
+ * - 金鑰：`generateSignature` 那支函式開頭的字串常數（形如 `function u(l){var c="488cf11f1",d=Object.keys(l).sort()`）。
+ *   **直接讀金鑰、不假設它一定是版本前 9 碼**——這個對應只是觀察，哪天拆開了照樣要對。
+ *   函式形狀比對不到時才退回「版本前 9 碼」。
+ * 兩者任何一個長得不對（版本不是 hex、出現不只一個版本值）就回 null＝不採用，寧可報錯也不要用猜的簽。
+ */
+export function parseConsoleVersion(js: string): ConsoleVersion | null {
+  const versions = [...js.matchAll(/headers\[["']x-version["']\]\s*=\s*["']([0-9a-f]{16,64})["']/g)].map((m) => m[1]);
+  const uniq = [...new Set(versions)];
+  if (uniq.length !== 1) return null;
+  const version = uniq[0];
+  const k = js.match(/function\s*[\w$]*\(([\w$]+)\)\{var\s+[\w$]+\s*=\s*"([0-9A-Za-z]{4,64})"\s*,\s*[\w$]+\s*=\s*Object\.keys\(\1\)\.sort\(\)/);
+  return { version, signKey: k ? k[2] : version.slice(0, 9) };
+}
+
+let refreshing: Promise<ConsoleVersion> | null = null;
+
+/**
+ * 抓 console 首頁 → 主 bundle → 解析新版本與金鑰，換掉 `current`。
+ * 同時有多個請求撞到 -6 時共用同一次抓取（快取進行中的 Promise）。
+ * 解析結果跟現行一樣＝-6 不是版本問題，直接報錯（不要無限重試）。
+ */
+export function refreshConsoleVersion(): Promise<ConsoleVersion> {
+  refreshing ??= (async () => {
+    const htmlRes = await fetch(`${BASE}/`, { headers: { accept: 'text/html' } });
+    const path = parseBundlePath(await htmlRes.text());
+    if (!path) throw new Error('console 版本自動偵測失敗：首頁找不到 umi.*.js');
+    const jsRes = await fetch(new URL(path, BASE));
+    const next = parseConsoleVersion(await jsRes.text());
+    if (!next) throw new Error(`console 版本自動偵測失敗：${path} 解析不出 x-version／簽章金鑰`);
+    if (next.version === current.version && next.signKey === current.signKey) {
+      throw new Error(`console 回 -6 但前端版本沒變（${current.version.slice(0, 9)}），不是版本號問題`);
+    }
+    console.warn(`[rixbee_console] console 已改版，x-version ${current.version.slice(0, 9)} → ${next.version.slice(0, 9)}（${path}）`);
+    current = next;
+    return next;
+  })().finally(() => { refreshing = null; });
+  return refreshing;
+}
+
+/** 前端「版本過期、請重新加載」的回應碼。 */
+export function isStaleVersion(code: unknown): boolean {
+  return Number(code) === -6;
+}
+
+// ── 登入與請求 ──────────────────────────────────────────────
 
 export interface ConsoleSession { cookie: string; userId: number; expireAt: number }
 
@@ -65,6 +133,18 @@ export function cookieExpireAt(cookie: string): number | null {
 
 export class ConsoleAuthError extends Error {}
 
+function consoleHeaders(data: Record<string, unknown>, extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    accept: 'application/json, text/plain, */*',
+    'x-sign': consoleSign(data),
+    'x-version': current.version,
+    'x-currency': 'TWD', 'x-language': 'zh-TW', 'x-time-zone': 'Etc/GMT-8',
+    origin: BASE,
+    ...extra,
+  };
+}
+
 /** email/密碼登入拿 session cookie。帳密走 env（線上放 Secret Manager），不進程式碼也不進 DB。 */
 export async function consoleLogin(): Promise<ConsoleSession> {
   const account = process.env.RIXBEE_CONSOLE_ACCOUNT;
@@ -73,29 +153,21 @@ export async function consoleLogin(): Promise<ConsoleSession> {
     throw new ConsoleAuthError('未設定 RIXBEE_CONSOLE_ACCOUNT / RIXBEE_CONSOLE_PASSWORD（自動審核需要 console 帳密）');
   }
   const data = { account_name: account, password };
-  const res = await fetch(`${BASE}/api/user/logIn`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json, text/plain, */*',
-      'x-sign': consoleSign(data),
-      'x-version': X_VERSION,
-      'x-currency': 'TWD', 'x-language': 'zh-TW', 'x-time-zone': 'Etc/GMT-8',
-      origin: BASE,
-    },
-    body: JSON.stringify(data),
-  });
-  const j: any = await res.json().catch(() => ({}));
-  // 帳密錯回 code 1101（實測），欄位名錯回 -1
-  if (j?.code !== 200 && j?.code !== 0) {
-    throw new ConsoleAuthError(`console 登入失敗 code=${j?.code} ${j?.message ?? ''}`);
+  for (let refreshed = false; ; refreshed = true) {
+    const res = await fetch(`${BASE}/api/user/logIn`, { method: 'POST', headers: consoleHeaders(data), body: JSON.stringify(data) });
+    const j: any = await res.json().catch(() => ({}));
+    if (isStaleVersion(j?.code) && !refreshed) { await refreshConsoleVersion(); continue; }
+    // 帳密錯回 code 1101（實測），欄位名錯回 -1
+    if (j?.code !== 200 && j?.code !== 0) {
+      throw new ConsoleAuthError(`console 登入失敗 code=${j?.code} ${j?.message ?? ''}`);
+    }
+    const cookie = pickSessionCookie(res.headers.getSetCookie?.() ?? []);
+    if (!cookie) throw new ConsoleAuthError('console 登入成功卻沒拿到 session cookie');
+    const userId = Number(j?.data?.user_id ?? j?.data?.userId ?? 0);
+    const expire = cookieExpireAt(cookie) ?? Date.now() + 18 * 3600 * 1000;
+    session = { cookie, userId, expireAt: expire - SESSION_SLACK_MS };
+    return session;
   }
-  const cookie = pickSessionCookie(res.headers.getSetCookie?.() ?? []);
-  if (!cookie) throw new ConsoleAuthError('console 登入成功卻沒拿到 session cookie');
-  const userId = Number(j?.data?.user_id ?? j?.data?.userId ?? 0);
-  const expire = cookieExpireAt(cookie) ?? Date.now() + 18 * 3600 * 1000;
-  session = { cookie, userId, expireAt: expire - SESSION_SLACK_MS };
-  return session;
 }
 
 async function ensureSession(): Promise<ConsoleSession> {
@@ -110,27 +182,32 @@ export function isNotLoggedIn(status: number, code?: unknown, message?: string):
   return /not\s*log|unauthor|登入|登录|未登錄|未登录|session/i.test(m) || Number(code) === 1001;
 }
 
-/** 打一支 console API（POST + body 簽章）。session 掉了就重登一次再打。 */
+/**
+ * 打一支 console API（POST + body 簽章）。
+ * session 掉了就重登一次再打；回 -6（console 改版）就自動抓新版本號再打一次。兩種各最多一次。
+ */
 export async function consoleRequest<T = any>(path: string, data: Record<string, unknown>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
+  let relogged = false;
+  let refreshed = false;
+  for (;;) {
     const s = await ensureSession();
     const res = await fetch(`${BASE}${path}`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/plain, */*',
+      headers: consoleHeaders(data, {
         cookie: s.cookie,
-        'x-sign': consoleSign(data),
-        'x-version': X_VERSION,
-        'x-currency': 'TWD', 'x-language': 'zh-TW', 'x-time-zone': 'Etc/GMT-8',
         ...(s.userId ? { 'x-page-u-id': String(s.userId) } : {}),
-        origin: BASE,
         referer: `${BASE}/manage-review/cr`,
-      },
+      }),
       body: JSON.stringify(data),
     });
     const j: any = await res.json().catch(() => ({}));
-    if (isNotLoggedIn(res.status, j?.code, j?.message) && attempt < 1) {
+    if (isStaleVersion(j?.code) && !refreshed) {
+      refreshed = true;
+      await refreshConsoleVersion();
+      continue;
+    }
+    if (isNotLoggedIn(res.status, j?.code, j?.message) && !relogged) {
+      relogged = true;
       session = null;
       continue;
     }
