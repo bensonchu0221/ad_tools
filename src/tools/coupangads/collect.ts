@@ -30,6 +30,9 @@ import {
 } from '../../core/store.js';
 import { ACCOUNT_ID, refreshSlotStatus } from './sync.js';
 import { enumDays } from './stats.js';
+import { getAdvertiserBalance } from '../../core/rixbee_console.js';
+import { reviewConfigured } from './review.js';
+import { saveBalance } from './settings.js';
 
 /** R 帳號型別：10222 實測是 direct（4A）。env 可覆蓋，避免每次跑都花 3 支 probe。 */
 const R_USER_TYPE = (process.env.COUPANG_R_USER_TYPE ?? 'direct') as 'agency' | 'direct' | 'super';
@@ -137,15 +140,33 @@ export function planStatOwnership(days: string[], slots: SlotMapping[]): StatOwn
   return out;
 }
 
-export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number }> {
+/**
+ * 查 R 帳戶餘額寫進 coupang_settings（看板「廣告花費」那格的小字）。
+ * 走 console 後台（跟自動審核同一組帳密），沒設定帳密就不查。
+ * **失敗不影響成效收集**：回傳字串進 collect 的結果／log，看板繼續顯示上一次查到的值與時間。
+ */
+export async function refreshBalance(): Promise<string> {
+  if (!reviewConfigured()) return 'skip：未設定 console 帳密';
+  try {
+    const b = await getAdvertiserBalance(Number(ACCOUNT_ID));
+    if (!b) return `失敗：getAdvList 裡找不到 ${ACCOUNT_ID} 或 balance 不是數字`;
+    await saveBalance(b.balance, b.isBalanceWarning);
+    return String(b.balance);
+  } catch (e: any) {
+    return `失敗：${e?.message ?? e}`;
+  }
+}
+
+export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number; balance: string }> {
   const now = new Date();
   const ed = twYmd(now);
   const sd = twYmd(new Date(now.getTime() - (BACKFILL_DAYS - 1) * 86400000));
 
   // slot 對映（group → 當下掛的商品）＋順便把 R 的開關/審核狀態同步回 DB
-  const [slots, status] = await Promise.all([
+  const [slots, status, balance] = await Promise.all([
     listCoupangSlots(),
     refreshSlotStatus().catch(() => ({ updated: 0, pendingReview: 0 })),
+    refreshBalance(),
   ]);
 
   // 只打這一支：day × group_id × device_type。實測裝置分項加總與不帶 device 的總數守恆
@@ -166,5 +187,5 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
   await upsertCoupangDailyStats(rows);
   // 先寫再掃：中途掛掉頂多多留一次髒列，下次跑就會清掉（反過來先清後寫會留下空窗）
   const cleared = await clearForeignStatMetrics(planStatOwnership(enumDays(sd, ed), slots));
-  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview };
+  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview, balance };
 }

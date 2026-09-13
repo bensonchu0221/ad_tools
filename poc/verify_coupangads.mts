@@ -14,6 +14,9 @@ import {
 } from '../src/tools/coupangads/collect.js';
 import { summarize, rawStatsCsv } from '../src/tools/coupangads/route.js';
 import { isInvalidToken } from '../src/core/rixbee_admin.js';
+import { pickAdvBalance } from '../src/core/rixbee_console.js';
+import { encodeBalance, decodeBalance } from '../src/tools/coupangads/settings.js';
+import { coupangAdsPage } from '../src/tools/coupangads/page.js';
 
 let pass = 0, fail = 0;
 const check = (name: string, ok: boolean, got?: unknown) => {
@@ -454,6 +457,39 @@ console.log('\n[同步摘要]');
   check('重啟舊 group 會列出', summarize({ ...base, reactivated: 3 }).includes('重啟 3'));
   check('換素材會列出', summarize({ ...base, reimaged: 12 }).includes('換素材 12'));
   check('有暫停會列出', summarize({ ...base, paused: 45 }).includes('暫停 45'));
+}
+
+console.log('\n[帳戶餘額：取代「兩支 campaign 日預算合計」（2026-09-14）]');
+{
+  // getAdvList 真實回應形狀（節錄欄位；另一筆是別的廣告主）
+  const LIST = [
+    { user_id: 9999, account_name: 'other', balance: 1, is_balance_warning: true },
+    { user_id: 10222, account_name: 'coupang', display_name: 'coupang', status: 1, disabled: false, balance: 11237.67, is_balance_warning: false, day_budget: 0 },
+  ];
+  const b = pickAdvBalance(LIST, 10222);
+  check('挑出自己那筆的餘額', b?.balance === 11237.67 && b?.isBalanceWarning === false, b);
+  check('不會拿到別的廣告主的', pickAdvBalance(LIST, 9999)?.balance === 1 && pickAdvBalance(LIST, 10222)?.isBalanceWarning === false);
+  check('user_id 是字串也認得', pickAdvBalance([{ user_id: '10222', balance: '500.5' }], 10222)?.balance === 500.5);
+  check('找不到帳戶 → null（不是 0）', pickAdvBalance(LIST, 1) === null);
+  check('balance 缺值 → null（不是 0）', pickAdvBalance([{ user_id: 10222 }], 10222) === null && pickAdvBalance([{ user_id: 10222, balance: null }], 10222) === null && pickAdvBalance([{ user_id: 10222, balance: '' }], 10222) === null);
+  check('餘額真的是 0 要照實回 0', pickAdvBalance([{ user_id: 10222, balance: 0 }], 10222)?.balance === 0);
+  check('回應不是陣列 → null', pickAdvBalance({ data: LIST }, 10222) === null && pickAdvBalance(null, 10222) === null);
+  check('低餘額警示帶得出來', pickAdvBalance([{ user_id: 10222, balance: 3, is_balance_warning: true }], 10222)?.isBalanceWarning === true);
+
+  const at = new Date('2026-09-14T01:30:12Z');
+  const round = decodeBalance(encodeBalance(11237.67, false, at));
+  check('存讀來回一致', round?.balance === 11237.67 && round?.warning === false && round?.at === '2026-09-14T01:30:12.000Z', round);
+  check('存的字串塞得進 VARCHAR(255)', encodeBalance(123456789.12, true, at).length < 255);
+  check('沒查過 → null', decodeBalance(null) === null && decodeBalance('') === null);
+  check('壞 JSON → null', decodeBalance('{oops') === null);
+  check('balance 是字串 → null', decodeBalance('{"balance":"1","warning":false,"at":"2026-09-14T01:30:12Z"}') === null);
+  check('缺時間 → null（顯示不出多久前查的就不顯示）', decodeBalance('{"balance":1,"warning":false}') === null);
+
+  const html = coupangAdsPage();
+  check('畫面不再有「兩支 campaign 日預算合計」', !html.includes('日預算合計'));
+  check('廣告花費那格改顯示帳戶餘額', html.includes("['廣告花費','',money(t.spend),balanceText(data.balance)]"));
+  check('沒查過顯示 — 不顯示 NT$0', html.includes("if(!b) return '帳戶餘額 —'"));
+  check('附上查到的台北時間', html.includes("timeZone:'Asia/Taipei'") && html.includes("' 更新'"));
 }
 
 console.log('\n' + (fail === 0 ? '✅ 全部通過' : '❌ 有失敗') + '：' + pass + ' 過 / ' + fail + ' 失敗\n');

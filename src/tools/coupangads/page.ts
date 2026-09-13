@@ -190,6 +190,13 @@ let selectedStart='', selectedEnd='', draftStart='', draftEnd='', calendarBase=n
 const $=(s)=>document.querySelector(s);
 const nf=(n,d=0)=>Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d});
 const money=(n)=>'NT$'+nf(n,0);
+// R 帳戶餘額（每小時 :30 由 collect 查一次存 DB）；附上查到的台北時間，數字舊不舊一眼看得出來。
+// 從沒查到過顯示「—」，不能顯示 NT$0（會被讀成餘額用完）。
+function balanceText(b){
+  if(!b) return '帳戶餘額 —';
+  const at=new Date(b.at).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+  return '帳戶餘額 '+(b.warning?'<b style="color:#c62828">'+money(b.balance)+'（餘額偏低）</b>':money(b.balance))+' · '+esc(at)+' 更新';
+}
 const pct=(v)=>v==null?'—':(v*100).toFixed(2)+'%';
 
 function setLoading(on){
@@ -233,7 +240,7 @@ function render(){
   $('#kpis').innerHTML=[
     ['投放中商品','hero',data.running+' 檔',(data.pendingReview?('待審 '+data.pendingReview+' · '):'')+'暫停 '+data.paused],
     ['CTR','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
-    ['廣告花費','',money(t.spend),'兩支 campaign 日預算合計 '+money(t.campaignBudget)],
+    ['廣告花費','',money(t.spend),balanceText(data.balance)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
   setSelectedRange(data.range.sd,data.range.ed);

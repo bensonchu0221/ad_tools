@@ -233,6 +233,31 @@ export async function approveCreatives(ids: number[]): Promise<void> {
   });
 }
 
+export interface AdvBalance { balance: number; isBalanceWarning: boolean }
+
+/**
+ * 純函式：從 `getAdvList` 的回應挑出指定廣告主的餘額。
+ * 找不到那個 user_id、或 balance 不是數字就回 null——**不能回 0**，0 會被讀成「餘額用完了」。
+ */
+export function pickAdvBalance(list: unknown, userId: number): AdvBalance | null {
+  if (!Array.isArray(list)) return null;
+  const me = list.find((x: any) => Number(x?.user_id) === userId);
+  if (!me) return null;
+  const raw = (me as any).balance;
+  const balance = raw === null || raw === undefined || raw === '' ? NaN : Number(raw);
+  if (!Number.isFinite(balance)) return null;
+  return { balance, isBalanceWarning: Boolean((me as any).is_balance_warning) };
+}
+
+/**
+ * 查一個廣告主的帳戶餘額。**餘額只有 console 查得到**（投放管理 API 28 支端點沒有任何餘額端點）。
+ * `getAdvList` body 空、x-sign 也是空字串；回的是審核帳號底下**所有廣告主**（實測 467 筆），
+ * 這裡只取指定那一筆，其他廣告主的資料不往外傳。
+ */
+export async function getAdvertiserBalance(userId: number): Promise<AdvBalance | null> {
+  return pickAdvBalance(await consoleRequest('/api/advUser/getAdvList', {}), userId);
+}
+
 /** 待審清單（給「掃一次」用；目前 tool#6 走的是自家 DB 的 cr_id，不依賴這支）。 */
 export async function listCrReview(params: Record<string, unknown> = {}): Promise<any> {
   return consoleRequest('/api/manage-review/getCrReviewList', params);

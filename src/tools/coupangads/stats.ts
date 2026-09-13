@@ -8,7 +8,7 @@ import {
   listCoupangDailyStats, listCoupangSlots, listCoupangProducts,
 } from '../../core/store.js';
 import { PENDING_REVIEW } from './sync.js';
-import { getDailyBudget } from './settings.js';
+import { readBalance, type StoredBalance } from './settings.js';
 
 export interface DailyRow {
   date: string;
@@ -43,7 +43,9 @@ export interface StatsResult {
   running: number;
   pendingReview: number;
   paused: number;
-  totals: { spend: number; imp: number; click: number; ctr: number | null; campaignBudget: number };
+  totals: { spend: number; imp: number; click: number; ctr: number | null };
+  /** R 帳戶餘額（每小時 :30 collect 查一次）；從沒查到過＝null */
+  balance: StoredBalance | null;
   daily: DailyRow[];
   products: ProductRow[];
   warnings: string[];
@@ -87,8 +89,8 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const { sd, ed } = range ?? rangeOf(days);
   const warnings: string[] = [];
 
-  const [stats, slots, campaignBudget] = await Promise.all([
-    listCoupangDailyStats(sd, ed), listCoupangSlots(), getDailyBudget(),
+  const [stats, slots, balance] = await Promise.all([
+    listCoupangDailyStats(sd, ed), listCoupangSlots(), readBalance(),
   ]);
 
   // 商品資料：先用 slot 上的（就是廣告上真正在跑的文案），沒有的再查商品表（已下架但期間有數據者）
@@ -175,11 +177,9 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     totals: {
       spend, imp: sum((d) => d.imp), click: sum((d) => d.click),
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
-      // 兩支 campaign 的日預算**合計**（不是各 group 加總）：sync 每次都把兩支各校正回
-      // 「這個生效值 ÷ 2」（plan.ts 的 DAILY_BUDGET，或 coupang_settings 有那一列時以設定為準），
-      // 所以它就是整體花費的硬上限。
-      campaignBudget,
     },
+    // 2026-09-14 取代原本「兩支 campaign 日預算合計」（2026-09-07 起只剩一支 campaign，那句已失真）
+    balance,
     daily,
     products,
     warnings,
