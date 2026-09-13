@@ -348,20 +348,38 @@ function drawCharts(){
     g+='<text x="'+x.toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10.5" fill="var(--mut)">'+label+'</text>';
   });
 
-  // 每個點都標上數值（花費在點上方、CTR 在點下方，兩條線的標籤才不會互相蓋）。
+  // 每個點都標上數值：同一天兩個點「上面那個的標籤放上方、下面那個放下方」，
+  // 兩個標籤中間永遠隔著兩個點。不能寫死花費在上／CTR 在下——兩條線交叉後
+  // CTR 跑到花費上面，CTR 往下標、花費往上標就會撞在兩點之間（09-13 那種情況）。
   // 天數多的時候字級自動縮小，並用底色描邊（paint-order）當外框，密集時仍讀得出來。
   let lab='';
   const labFont=per>=34?10:(per>=22?9:8);
-  const yOfKey=(key)=>key==='spend'?spendY:ctrY;
-  const labelPoints=(key,color,fmt,dy)=>{
-    d.forEach((row,i)=>{
-      const v=row.hasData?row[key]:null;
-      if(v==null) return;
-      const y=Math.max(T+9,Math.min(T+ih+11,yOfKey(key)(v)+dy));
-      lab+='<text x="'+X(i).toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="middle" font-size="'+labFont+'"'+
-           ' fill="'+color+'" stroke="var(--slot)" stroke-width="2.6" paint-order="stroke" stroke-linejoin="round">'+fmt(v)+'</text>';
-    });
-  };
+  const LAB_TOP=T+9, LAB_BOTTOM=T+ih+11, LAB_GAP=labFont+3;
+  const clampLab=(y)=>Math.max(LAB_TOP,Math.min(LAB_BOTTOM,y));
+  const labelText=(x,y,color,text)=>'<text x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="middle" font-size="'+labFont+'"'+
+    ' fill="'+color+'" stroke="var(--slot)" stroke-width="2.6" paint-order="stroke" stroke-linejoin="round">'+text+'</text>';
+  const fmtSpend=(v)=>nf(v,v<100?1:0), fmtCtr=(v)=>(v*100).toFixed(2)+'%';
+  d.forEach((row,i)=>{
+    const x=X(i);
+    const sv=row.hasData?row.spend:null, cv=row.hasData?row.ctr:null;
+    const items=[];
+    if(sv!=null) items.push({y:spendY(sv),color:C_SPEND,text:fmtSpend(sv)});
+    if(cv!=null) items.push({y:ctrY(cv),color:C_CTR,text:fmtCtr(cv)});
+    if(!items.length) return;
+    if(items.length===1){
+      // 只有一條線有值：沿用原本慣例（花費上方、CTR 下方）
+      const it=items[0], above=it.color===C_SPEND;
+      lab+=labelText(x,clampLab(it.y+(above?-10:16)),it.color,it.text);
+      return;
+    }
+    // y 越小越上面；等高時花費算上面
+    const [up,low]=items[1].y<items[0].y?[items[1],items[0]]:items;
+    let upY=clampLab(up.y-10), lowY=clampLab(low.y+16);
+    // 兩點都貼近上緣／下緣被夾住時，標籤仍可能疊在一起 → 先把下面的往下推，推不動再把上面的往上推
+    if(lowY-upY<LAB_GAP) lowY=Math.min(LAB_BOTTOM,upY+LAB_GAP);
+    if(lowY-upY<LAB_GAP) upY=Math.max(LAB_TOP,lowY-LAB_GAP);
+    lab+=labelText(x,upY,up.color,up.text)+labelText(x,lowY,low.color,low.text);
+  });
 
   // 兩種斷點都要保留，不能畫成 0：
   //  ① 那天根本沒資料（hasData=false，工具還沒開始投）→ 兩條線一起斷，起點才會一致
@@ -389,8 +407,6 @@ function drawCharts(){
   line('spend',C_SPEND,spendY);
   line('ctr',C_CTR,ctrY);
   // 標籤最後才疊上去，才不會被後畫的折線蓋掉
-  labelPoints('spend',C_SPEND,(v)=>nf(v,v<100?1:0),-10);
-  labelPoints('ctr',C_CTR,(v)=>(v*100).toFixed(2)+'%',16);
   g+=lab;
   if(!d.length||(spendMax<=0&&!ctrVals.length)) g+='<text x="'+(L+iw/2)+'" y="'+(T+ih/2)+'" text-anchor="middle" font-size="12.5" fill="var(--mut)">這段期間尚無花費與 CTR 數據</text>';
   g+='<line class="cross" x1="0" y1="'+T+'" x2="0" y2="'+(T+ih)+'" stroke="var(--ink)" stroke-width="1" opacity="0"/>';
