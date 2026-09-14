@@ -186,6 +186,7 @@ try {
     const page = await app.inject({ method: 'GET', url: '/tools/adstream' });
     assert.equal(page.statusCode, 200);
     assert.ok(page.body.includes('id="pAdvertiserIds"'));
+    assert.ok(page.body.includes('<span class="src src-p">P</span>'));
     assert.ok(page.body.includes('p_bulk_raw_data'));
     assert.ok(page.body.includes('/^\\d{3}-\\d{3}-\\d{4}$/'));
     const invalid = await app.inject({

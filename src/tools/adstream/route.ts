@@ -443,7 +443,7 @@ export async function registerAdstream(app: FastifyInstance) {
       </div>
 
       <div class="field">
-        <div class="flabel"><span class="src">P</span><span class="nm">Prism advertiser ID</span><span class="hint">可多組，逗號分隔；格式 000-000-0000</span></div>
+        <div class="flabel"><span class="src src-p">P</span><span class="nm">Prism advertiser ID</span><span class="hint">可多組，逗號分隔；格式 000-000-0000</span></div>
         <input type="text" id="pAdvertiserIds" placeholder="例如：233-688-3595, 292-462-3142" ${hasDb ? '' : 'disabled'}>
         <div class="note">P 使用後端全域唯讀 token；同步時只會查這裡明確填入的 advertiser ID。</div>
       </div>
