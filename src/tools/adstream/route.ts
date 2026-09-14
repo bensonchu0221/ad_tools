@@ -12,7 +12,7 @@ import {
 } from '../../core/store.js';
 import { parseSheetId, checkAccess, SA_EMAIL } from '../../core/gsheets.js';
 import { currentUser } from '../../core/auth.js';
-import { runConfig, rerunDay, syncedLabel, RAW_TAB, R_RAW_TAB, M_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RunResult, type RerunScope, type PlatformOutcome, type RerunSourceOutcome } from './run.js';
+import { runConfig, rerunDay, syncedLabel, RAW_TAB, R_RAW_TAB, M_RAW_TAB, P_RAW_TAB, D_EVENT_POOL, R_EVENT_POOL, M_EVENT_POOL, type RunResult, type RerunScope, type PlatformOutcome, type RerunSourceOutcome } from './run.js';
 
 export const BASE_PATH = '/tools/adstream';
 
@@ -190,7 +190,7 @@ async function executeAndRecord(
     const res = await runConfig(config, onPhase);
     const rTypeLabel: Record<string, string> = { agency: '台客', direct: '4A', super: 'Super' };
     const entries: { tag: string; o: PlatformOutcome }[] = [
-      { tag: 'D', o: res.d }, { tag: 'R', o: res.r }, { tag: 'MGID', o: res.m },
+      { tag: 'D', o: res.d }, { tag: 'R', o: res.r }, { tag: 'MGID', o: res.m }, { tag: 'P', o: res.p },
     ].filter((e) => e.o.configured);
 
     // 全部已設定平台視窗皆空＝整體已最新（區分「正常無新資料」與「已達終止日停止」）
@@ -199,6 +199,7 @@ async function executeAndRecord(
         config.accountIds.length ? config.lastSyncedD : undefined,
         config.rUserIds.length ? config.lastSyncedR : undefined,
         config.mgidClientIds.length ? config.lastSyncedM : undefined,
+        config.pAdvertiserIds.length ? config.lastSyncedP : undefined,
       ].filter((c) => c !== undefined);
       const reachedEnd = config.endDate && cursors.length && cursors.every((c) => c && c >= config.endDate!);
       const msg = reachedEnd
@@ -217,6 +218,7 @@ async function executeAndRecord(
       if (tag === 'D' && o.accountStats?.length) detail = `（${o.accountStats.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
       if (tag === 'R') detail = o.rUserType ? `（${rTypeLabel[o.rUserType] ?? o.rUserType}）` : '';
       if (tag === 'MGID' && o.mStat?.length) detail = `（${o.mStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
+      if (tag === 'P' && o.pStat?.length) detail = `（${o.pStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
       parts.push(`${tag} ${win}${o.rawRows} 列${detail}${o.warning ? `⚠ ${o.warning}` : ''}`);
     }
     // 整合表／裝置表列數也帶出來：操作者靠這個一眼看出兩張整合分頁有沒有真的寫入
@@ -229,7 +231,7 @@ async function executeAndRecord(
     const msg = `同步：${parts.join('；')}`;
     await markBulkRun(config.id, {
       status, message: msg,
-      syncedDates: { d: res.d.syncedDate, r: res.r.syncedDate, m: res.m.syncedDate },
+      syncedDates: { d: res.d.syncedDate, r: res.r.syncedDate, m: res.m.syncedDate, p: res.p.syncedDate },
     });
     recorded = true;
     if (status === 'error') throw new Error(msg); // 全失敗才讓 job 顯示錯誤；partial 回摘要
@@ -249,17 +251,18 @@ async function rerunAndRecord(
   let recorded = false;
   try {
     const res = await rerunDay(config, scope, onPhase);
-    const all: { tag: string; key: 'd' | 'r' | 'm'; o: RerunSourceOutcome; cur: string | null }[] = [
+    const all: { tag: string; key: 'd' | 'r' | 'm' | 'p'; o: RerunSourceOutcome; cur: string | null }[] = [
       { tag: 'D', key: 'd', o: res.d, cur: config.lastSyncedD },
       { tag: 'R', key: 'r', o: res.r, cur: config.lastSyncedR },
       { tag: 'MGID', key: 'm', o: res.m, cur: config.lastSyncedM },
+      { tag: 'P', key: 'p', o: res.p, cur: config.lastSyncedP },
     ];
     const entries = all.filter((e) => e.o.attempted);
     const parts = entries.map((e) =>
       e.o.error ? `${e.tag} 失敗：${e.o.error}` : `${e.tag} 刪 ${e.o.deleted}／寫 ${e.o.rows}`
     );
     const msg = `重抓 ${res.targetDate}：${parts.join('；') || '無資料'}`;
-    const syncedDates: { d?: string; r?: string; m?: string } = {};
+    const syncedDates: { d?: string; r?: string; m?: string; p?: string } = {};
     for (const e of entries) {
       if (e.o.error) continue;
       syncedDates[e.key] = !e.cur || res.targetDate > e.cur ? res.targetDate : e.cur;
@@ -318,14 +321,15 @@ export async function registerAdstream(app: FastifyInstance) {
       const mgidPairs = c.mgidClientIds.map((id) => ({ id: String(id), name: mgidLabel(id) }));
       const editAttrs =
         `data-id="${c.id}" data-name="${esc(c.name)}" data-sheet="${esc(c.sheetUrl)}" ` +
-        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-mgid="${esc(JSON.stringify(mgidPairs))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"` +
+        `data-accounts="${esc(JSON.stringify(accPairs))}" data-rusers="${esc(c.rUserIds.join(', '))}" data-mgid="${esc(JSON.stringify(mgidPairs))}" data-padvertisers="${esc(c.pAdvertiserIds.join(', '))}" data-backfill="${esc(c.backfillStartDate)}" data-enddate="${esc(c.endDate ?? '')}"` +
         ` data-cvbuckets="${esc(JSON.stringify(c.cvBuckets ?? { cv1: [], cv2: [], cv3: [], cv4: [] }))}"`;
       // 重抓控制項：多來源做下拉（全部＋各單一），單一來源做一鍵
-      const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0, hasM = c.mgidClientIds.length > 0;
+      const hasD = c.accountIds.length > 0, hasR = c.rUserIds.length > 0, hasM = c.mgidClientIds.length > 0, hasP = c.pAdvertiserIds.length > 0;
       const srcs = [
         ...(hasD ? [{ k: 'd', label: 'D' }] : []),
         ...(hasR ? [{ k: 'r', label: 'R' }] : []),
         ...(hasM ? [{ k: 'm', label: 'MGID' }] : []),
+        ...(hasP ? [{ k: 'p', label: 'P' }] : []),
       ];
       const rerunCtrl =
         srcs.length > 1
@@ -342,6 +346,7 @@ export async function registerAdstream(app: FastifyInstance) {
         <td class="muted">${c.accountIds.map((id) => esc(accLabel(id))).join('<br>') || '—'}</td>
         <td class="muted">${c.rUserIds.map((a) => esc(a)).join('<br>') || '—'}</td>
         <td class="muted">${c.mgidClientIds.map((id) => esc(mgidLabel(id))).join('<br>') || '—'}</td>
+        <td class="muted">${c.pAdvertiserIds.map((id) => esc(id)).join('<br>') || '—'}</td>
         <td class="muted"><a href="${esc(c.sheetUrl)}" target="_blank" style="color:var(--accent)">開啟 ↗</a></td>
         <td class="muted">${c.backfillStartDate}</td>
         <td class="muted">${c.endDate ?? '<span style="color:var(--mut)">不限</span>'}</td>
@@ -359,14 +364,14 @@ export async function registerAdstream(app: FastifyInstance) {
 
     const listSection = configs.length
       ? `<div class="card"><div class="tbl-wrap"><table class="qtable">
-          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>MGID 帳號</th><th>Sheet</th><th>回補起始</th><th>終止日</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
+          <thead><tr><th>名稱</th><th>D 帳號</th><th>R 帳號</th><th>MGID 帳號</th><th>P advertiser</th><th>Sheet</th><th>回補起始</th><th>終止日</th><th>已同步到</th><th>上次執行</th><th>訊息</th><th></th></tr></thead>
           <tbody>${rows}</tbody></table></div></div>`
       : '<div class="card"><div class="note" style="margin-top:0">尚無設定</div></div>';
 
     const body = `
     <div class="crumb"><a href="/">// tools</a> / adstream</div>
     <h1>Report Hub</h1>
-    <p class="sub">把多個 D 帳號 / R(Rixbee) / MGID 帳號的 bulk 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」、MGID 寫「${M_RAW_TAB}」（append），另有 integrated／device_summary 整合分頁。D、R、MGID 至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
+    <p class="sub">把 D / R(Rixbee) / MGID / P(Prism) 原始報表定期同步到指定 Google Sheet：D 寫「${RAW_TAB}」、R 寫「${R_RAW_TAB}」、MGID 寫「${M_RAW_TAB}」、P 寫「${P_RAW_TAB}」，另有 integrated／device_summary 整合分頁。四平台至少擇一。首次依「回補起始日」補到昨天，之後每天抓 T-1。</p>
 
     ${hasDb ? '' : '<div class="msg msg-warn" style="margin-top:18px">未設定資料庫，無法新增設定</div>'}
     ${dbError ? `<div class="msg msg-err" style="margin-top:18px">資料庫連線失敗：${esc(dbError)}</div>` : ''}
@@ -410,7 +415,7 @@ export async function registerAdstream(app: FastifyInstance) {
         <div id="testResult" style="margin-top:8px"></div>
       </div>
 
-      <div class="section-label" style="margin:18px 0 16px">帳戶來源 · D / R 至少擇一</div>
+      <div class="section-label" style="margin:18px 0 16px">帳戶來源 · D / R / M / P 至少擇一</div>
 
       <div class="field">
         <div class="flabel"><span class="src src-d">D</span><span class="nm">Discovery 帳號</span><span class="hint">可多選，搜尋後點選加入</span></div>
@@ -437,9 +442,15 @@ export async function registerAdstream(app: FastifyInstance) {
         <div class="note">找不到帳號？<a href="/tools/tokens#mgid" target="_blank">管理 MGID token →</a></div>
       </div>
 
+      <div class="field">
+        <div class="flabel"><span class="src">P</span><span class="nm">Prism advertiser ID</span><span class="hint">可多組，逗號分隔；格式 000-000-0000</span></div>
+        <input type="text" id="pAdvertiserIds" placeholder="例如：233-688-3595, 292-462-3142" ${hasDb ? '' : 'disabled'}>
+        <div class="note">P 使用後端全域唯讀 token；同步時只會查這裡明確填入的 advertiser ID。</div>
+      </div>
+
       <div class="section-label" style="margin:18px 0 16px">CV 整合桶 · integrated / device 共用</div>
       <div class="field">
-        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總）。整合表 D 列只算 D 事件、R 列只算 R 事件、M 列只算 MGID 事件；沒拖進桶的不計。MGID 是固定三階漏斗 Main goal／goal1／goal2。</p>
+        <p class="note" style="margin-top:0;margin-bottom:12px">把事件拖進 cv1~cv4（可混放 D/R/M；同桶事件加總）。整合表各列只算自己的平台事件；P 尚無轉換追蹤，四桶固定為 0。沒拖進桶的不計。MGID 是固定三階漏斗 Main goal／goal1／goal2。</p>
         <div class="cv-pool-label">事件池</div>
         <div id="cvPool" class="cv-zone pool" data-bucket="pool"></div>
         <div class="cv-buckets">
@@ -727,6 +738,7 @@ export async function registerAdstream(app: FastifyInstance) {
     document.getElementById('name').value = '';
     document.getElementById('sheetUrl').value = '';
     document.getElementById('rUserIds').value = '';
+    document.getElementById('pAdvertiserIds').value = '';
     document.getElementById('backfill').value = '';
     document.getElementById('endDate').value = '';
     selected = []; renderChips();
@@ -747,6 +759,7 @@ export async function registerAdstream(app: FastifyInstance) {
       originalSheetUrl = (b.getAttribute('data-sheet') || '').trim(); // 連結沒改就免重測
       testedUrl = ''; testResult.innerHTML = '';
       document.getElementById('rUserIds').value = b.getAttribute('data-rusers') || '';
+      document.getElementById('pAdvertiserIds').value = b.getAttribute('data-padvertisers') || '';
       document.getElementById('backfill').value = b.getAttribute('data-backfill');
       document.getElementById('endDate').value = b.getAttribute('data-enddate') || '';
       try { selected = JSON.parse(b.getAttribute('data-accounts')) || []; } catch (e) { selected = []; }
@@ -765,10 +778,17 @@ export async function registerAdstream(app: FastifyInstance) {
     var name = document.getElementById('name').value.trim();
     var sheetUrl = document.getElementById('sheetUrl').value.trim();
     var rUserIds = document.getElementById('rUserIds').value.trim();
+    var pAdvertiserIds = document.getElementById('pAdvertiserIds').value.trim();
     var backfill = document.getElementById('backfill').value;
     var endDate = document.getElementById('endDate').value;
-    if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds && !mgidSelected.length)) {
-      saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D／R／MGID 帳號至少擇一</span>';
+    if (!name || !sheetUrl || !backfill || (!selected.length && !rUserIds && !mgidSelected.length && !pAdvertiserIds)) {
+      saveResult.innerHTML = '<span style="color:var(--accent)">名稱、Sheet 連結、回補起始日必填；D／R／MGID／P 至少擇一</span>';
+      return;
+    }
+    var invalidP = pAdvertiserIds.split(/[,，\\s]+/).map(function (s) { return s.trim(); }).filter(Boolean)
+      .find(function (id) { return !/^\\d{3}-\\d{3}-\\d{4}$/.test(id); });
+    if (invalidP) {
+      saveResult.innerHTML = '<span style="color:var(--accent)">P advertiser ID 格式錯誤：' + esc(invalidP) + '（應為 000-000-0000）</span>';
       return;
     }
     // Sheet 連結若與載入時不同（新增＝原連結為空，故必測），必須先「測試連線」成功該連結才放行
@@ -786,6 +806,7 @@ export async function registerAdstream(app: FastifyInstance) {
         accountIdsJson: JSON.stringify(selected.map(function (s) { return s.id; })),
         rUserIds: rUserIds,
         mgidClientIdsJson: JSON.stringify(mgidSelected.map(function (s) { return s.id; })),
+        pAdvertiserIds: pAdvertiserIds,
         cvBucketsJson: JSON.stringify({ cv1: cvBucketValues('cv1'), cv2: cvBucketValues('cv2'), cv3: cvBucketValues('cv3'), cv4: cvBucketValues('cv4') }),
       }),
     }).then(function (r) { return r.json(); }).then(function (d) {
@@ -974,11 +995,21 @@ export async function registerAdstream(app: FastifyInstance) {
       .split(/[,，\s]+/)
       .map((s: string) => s.trim())
       .filter(Boolean);
+    const pAdvertiserIds = [...new Set(
+      (body?.pAdvertiserIds ?? '')
+        .split(/[,，\s]+/)
+        .map((s: string) => s.trim())
+        .filter(Boolean)
+    )] as string[];
+    // P 外部端點使用全域 token 且未做 advertiser 歸屬檢查；只允許嚴格格式的明確 ID。
+    const invalidPId = pAdvertiserIds.find((id) => !/^\d{3}-\d{3}-\d{4}$/.test(id));
+    if (invalidPId) return { error: `P advertiser ID 格式錯誤：${invalidPId}（應為 000-000-0000）` };
+    if (pAdvertiserIds.length && !process.env.PRISM_API_TOKEN) return { error: 'P 平台尚未設定 PRISM_API_TOKEN' };
 
     if (!name) return { error: '請填設定名稱' };
     const sheetId = parseSheetId(sheetUrl);
     if (!sheetId) return { error: '無法解析 Sheet 連結' };
-    if (!accountIds.length && !rUserIds.length && !mgidClientIds.length) return { error: '請至少選一個 D／MGID 帳號或填一個 R Account ID' };
+    if (!accountIds.length && !rUserIds.length && !mgidClientIds.length && !pAdvertiserIds.length) return { error: '請至少設定一個 D／R／MGID／P 平台來源' };
     if (!/^\d{4}-\d{2}-\d{2}$/.test(backfillStartDate)) return { error: '回補起始日格式錯誤' };
     if (endDate && !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return { error: '終止日格式錯誤' };
     if (endDate && endDate < backfillStartDate) return { error: '終止日不可早於回補起始日' };
@@ -997,7 +1028,7 @@ export async function registerAdstream(app: FastifyInstance) {
       cvBuckets = { cv1: pick(parsed.cv1), cv2: pick(parsed.cv2), cv3: pick(parsed.cv3), cv4: pick(parsed.cv4) };
     } catch { /* 空桶 */ }
 
-    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, mgidClientIds, backfillStartDate, endDate: endDate || null, cvBuckets } };
+    return { input: { name, sheetUrl, sheetId, accountIds, rUserIds, mgidClientIds, pAdvertiserIds, backfillStartDate, endDate: endDate || null, cvBuckets } };
   }
 
   // ---------- 新增 ----------
@@ -1087,7 +1118,7 @@ export async function registerAdstream(app: FastifyInstance) {
     if (!config) return reply.send({ ok: false, error: '找不到設定' });
     if (!canManage(currentUser(req), config)) return reply.send({ ok: false, error: '無權限操作此設定' });
     const raw = String((req.body as any)?.scope ?? 'both');
-    const scope: RerunScope = raw === 'd' || raw === 'r' || raw === 'm' ? raw : 'both';
+    const scope: RerunScope = raw === 'd' || raw === 'r' || raw === 'm' || raw === 'p' ? raw : 'both';
 
     const jobId = randomUUID();
     createJob(jobId);

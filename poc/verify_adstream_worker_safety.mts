@@ -14,9 +14,9 @@ const t1 = d.toISOString().slice(0, 10);
 
 const config: BulkConfigRow = {
   id: 1, name: '安全驗證', sheetUrl: '', sheetId: 'SHEET',
-  accountIds: ['d1'], rUserIds: [], mgidClientIds: [],
+  accountIds: ['d1'], rUserIds: [], mgidClientIds: [], pAdvertiserIds: [],
   backfillStartDate: t1, endDate: null,
-  lastSyncedD: null, lastSyncedR: null, lastSyncedM: null,
+  lastSyncedD: null, lastSyncedR: null, lastSyncedM: null, lastSyncedP: null,
   lastRunAt: null, lastRunStatus: null, lastRunMessage: null,
   createdBy: null, cvBuckets: { cv1: [], cv2: [], cv3: [], cv4: [] }, createdAt: '',
 };

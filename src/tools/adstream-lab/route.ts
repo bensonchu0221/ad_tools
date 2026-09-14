@@ -61,13 +61,14 @@ function daysBetween(a: string, b: string): number {
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
-// 平台級容錯後游標分三支（last_synced_d/r/m）：儀表用「最落後平台」當整體進度（保守顯示）；
+// 平台級容錯後游標分平台獨立：儀表用「最落後平台」當整體進度（保守顯示）；
 // 任一已設定平台尚未跑過 → null＝idle
 function labSynced(c: BulkConfigRow): string | null {
   const vals: (string | null)[] = [];
   if (c.accountIds.length) vals.push(c.lastSyncedD);
   if (c.rUserIds.length) vals.push(c.lastSyncedR);
   if (c.mgidClientIds.length) vals.push(c.lastSyncedM);
+  if (c.pAdvertiserIds.length) vals.push(c.lastSyncedP);
   if (!vals.length || vals.some((v) => !v)) return null;
   return vals.reduce((a, b) => (a! < b! ? a : b));
 }
@@ -339,7 +340,7 @@ async function executeAndRecord(
     const res = await runConfig(config, onPhase);
     const rTypeLabel: Record<string, string> = { agency: '台客', direct: '4A', super: 'Super' };
     const entries: { tag: string; o: PlatformOutcome }[] = [
-      { tag: 'D', o: res.d }, { tag: 'R', o: res.r }, { tag: 'MGID', o: res.m },
+      { tag: 'D', o: res.d }, { tag: 'R', o: res.r }, { tag: 'MGID', o: res.m }, { tag: 'P', o: res.p },
     ].filter((e) => e.o.configured);
 
     if (entries.every((e) => e.o.status === 'skipped')) {
@@ -347,6 +348,7 @@ async function executeAndRecord(
         config.accountIds.length ? config.lastSyncedD : undefined,
         config.rUserIds.length ? config.lastSyncedR : undefined,
         config.mgidClientIds.length ? config.lastSyncedM : undefined,
+        config.pAdvertiserIds.length ? config.lastSyncedP : undefined,
       ].filter((c) => c !== undefined);
       const reachedEnd = config.endDate && cursors.length && cursors.every((c) => c && c >= config.endDate!);
       const msg = reachedEnd
@@ -365,6 +367,7 @@ async function executeAndRecord(
       if (tag === 'D' && o.accountStats?.length) detail = `（${o.accountStats.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
       if (tag === 'R') detail = o.rUserType ? `（${rTypeLabel[o.rUserType] ?? o.rUserType}）` : '';
       if (tag === 'MGID' && o.mStat?.length) detail = `（${o.mStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
+      if (tag === 'P' && o.pStat?.length) detail = `（${o.pStat.map((s) => `${s.account}:${s.rows}`).join('、')}）`;
       parts.push(`${tag} ${win}${o.rawRows} 列${detail}${o.warning ? `⚠ ${o.warning}` : ''}`);
     }
     const okOnes = entries.filter((e) => e.o.status === 'ok');
@@ -376,7 +379,7 @@ async function executeAndRecord(
     const msg = `同步：${parts.join('；')}`;
     await markBulkRun(config.id, {
       status, message: msg,
-      syncedDates: { d: res.d.syncedDate, r: res.r.syncedDate, m: res.m.syncedDate },
+      syncedDates: { d: res.d.syncedDate, r: res.r.syncedDate, m: res.m.syncedDate, p: res.p.syncedDate },
     });
     recorded = true;
     if (status === 'error') throw new Error(msg);
@@ -395,17 +398,18 @@ async function rerunAndRecord(
   let recorded = false;
   try {
     const res = await rerunDay(config, scope, onPhase);
-    const all: { tag: string; key: 'd' | 'r' | 'm'; o: RerunSourceOutcome; cur: string | null }[] = [
+    const all: { tag: string; key: 'd' | 'r' | 'm' | 'p'; o: RerunSourceOutcome; cur: string | null }[] = [
       { tag: 'D', key: 'd', o: res.d, cur: config.lastSyncedD },
       { tag: 'R', key: 'r', o: res.r, cur: config.lastSyncedR },
       { tag: 'MGID', key: 'm', o: res.m, cur: config.lastSyncedM },
+      { tag: 'P', key: 'p', o: res.p, cur: config.lastSyncedP },
     ];
     const entries = all.filter((e) => e.o.attempted);
     const parts = entries.map((e) =>
       e.o.error ? `${e.tag} 失敗：${e.o.error}` : `${e.tag} 刪 ${e.o.deleted}／寫 ${e.o.rows}`
     );
     const msg = `重抓 ${res.targetDate}：${parts.join('；') || '無資料'}`;
-    const syncedDates: { d?: string; r?: string; m?: string } = {};
+    const syncedDates: { d?: string; r?: string; m?: string; p?: string } = {};
     for (const e of entries) {
       if (e.o.error) continue;
       syncedDates[e.key] = !e.cur || res.targetDate > e.cur ? res.targetDate : e.cur;

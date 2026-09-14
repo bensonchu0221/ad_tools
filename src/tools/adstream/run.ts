@@ -1,12 +1,13 @@
-// AdStream（tool#3）核心：把多個 D 帳號 + R(Rixbee) + MGID 帳號的 bulk 原始報表 append 到同一個
-// Google Sheet 的分頁（D→d_bulk_raw_data、R→r_bulk_raw_data、M→m_bulk_raw_data）。
+// AdStream（tool#3）核心：把多個 D 帳號 + R(Rixbee) + MGID + Prism 帳號的 bulk 原始報表 append 到同一個
+// Google Sheet 的分頁（D→d_bulk_raw_data、R→r_bulk_raw_data、M→m_bulk_raw_data、P→p_bulk_raw_data）。
 // 增量規則：每平台各自抓「該平台上次同步日隔天 → 昨天(T-1)」。沒有上次同步日就從設定的回補起始日開始，
 // 因此首次回補、每日 T-1、漏跑補抓都用同一條規則涵蓋。
-// 平台級容錯：D/R/M 三平台各自游標（last_synced_d/r/m）、各自執行單元——單平台失敗只影響自己
+// 平台級容錯：D/R/M/P 四平台各自游標、各自執行單元——單平台失敗只影響自己
 // （該平台這次不寫、游標不推），其餘平台照常；平台內維持原子性（任一帳號失敗＝整個平台失敗）。
 import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports, getCampaignDeviceReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
 import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidReportRow } from '../../core/mgid.js';
+import { fetchPrismReport, normalizePrismDate } from '../../core/prism.js';
 import { getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts, EMPTY_CV_BUCKETS, type BucketEvent, type CvBuckets } from '../../core/store.js';
 import { appendRows, deleteRowsByDate, deleteRowsByDateRange } from '../../core/gsheets.js';
 import type { BulkConfigRow } from '../../core/store.js';
@@ -14,6 +15,7 @@ import type { BulkConfigRow } from '../../core/store.js';
 export const RAW_TAB = 'd_bulk_raw_data';
 export const R_RAW_TAB = 'r_bulk_raw_data';
 export const M_RAW_TAB = 'm_bulk_raw_data';
+export const P_RAW_TAB = 'p_bulk_raw_data';
 
 // D bulk detail 的 13 個原生欄位（實測順序）；前面再補 account_name、synced_at
 const BULK_COLS = [
@@ -107,6 +109,23 @@ const M_ROW_KEY: Record<string, keyof MgidReportRow> = {
   conv_rate_interest: 'conv_rate_interest', conv_rate_decision: 'conv_rate_decision', conv_rate_buy: 'conv_rate_buy',
   conv_cost_interest: 'conv_cost_interest', conv_cost_decision: 'conv_cost_decision', conv_cost_buy: 'conv_cost_buy',
 };
+
+// Prism（P）raw 採素材粒度；domain／slot 會改變 grain，第一版刻意不混入此表。
+// 比率欄在分母為 0 時可能是 null，寫入 Sheet 時保留空白，不擅自改成 0。
+const P_DIMENSIONS = [
+  'date', 'campaign_id', 'adgroup_id', 'creative_id', 'advertiser',
+  'title', 'ad_description', 'cta_label',
+] as const;
+const P_METRICS = [
+  'impressions', 'clicks', 'ctr', 'spend', 'viewable_impressions', 'viewability',
+  'view_25', 'view_50', 'view_75', 'view_100', 'vtr',
+] as const;
+export const P_SHEET_HEADER = [
+  'advertiser_id', 'account_name', 'synced_at', 'date',
+  'campaign_id', 'campaign_name', 'adgroup_id', 'adgroup_name',
+  'creative_id', 'creative_name', 'title', 'ad_description', 'cta_label',
+  ...P_METRICS,
+];
 
 // R 友善名 → behaviorK 反查（R_HEADER_LABEL 的反向）。integrated / device 算 R 桶時用：
 // 桶裡的 R event 是友善名（cv_add_to_cart…），實際值在 fetchReport 回應的 behaviorK 欄。
@@ -314,18 +333,19 @@ export interface PlatformOutcome {
   accountStats?: { account: string; rows: number }[]; // D 各帳號
   rUserType?: UserType | null; // R（null＝零投放）
   mStat?: { account: string; rows: number }[]; // MGID 各帳號
+  pStat?: { account: string; rows: number }[]; // Prism 各 advertiser
 }
-export interface RunResult { d: PlatformOutcome; r: PlatformOutcome; m: PlatformOutcome; }
+export interface RunResult { d: PlatformOutcome; r: PlatformOutcome; m: PlatformOutcome; p: PlatformOutcome; }
 
 /** 昨天（Asia/Taipei T-1）YYYY-MM-DD */
 export function twYesterday(): string {
   return addDays(twToday(), -1);
 }
 
-// 'both'＝重抓所有已設定來源（D/R/M 皆抓，沿用舊字面值＝相容）；'d'/'r'/'m'＝只重抓單一來源
-export type RerunScope = 'both' | 'd' | 'r' | 'm';
+// 'both'＝重抓所有已設定來源（D/R/M/P 皆抓，沿用舊字面值＝相容）；其餘＝只重抓單一來源
+export type RerunScope = 'both' | 'd' | 'r' | 'm' | 'p';
 export interface RerunSourceOutcome { attempted: boolean; deleted: number; rows: number; error?: string }
-export interface RerunResult { targetDate: string; d: RerunSourceOutcome; r: RerunSourceOutcome; m: RerunSourceOutcome; }
+export interface RerunResult { targetDate: string; d: RerunSourceOutcome; r: RerunSourceOutcome; m: RerunSourceOutcome; p: RerunSourceOutcome; }
 
 /** 抓該設定所有 D 帳號在 [sd,ed] 的 bulk + adMeta(headline/url) + cv 細分，組成 sheet 列。供 runConfig/rerunDay 共用。 */
 async function fetchDRows(
@@ -442,11 +462,70 @@ async function fetchMgidRows(
 }
 
 /**
+ * 抓 Prism 素材粒度報表並組成 p_bulk_raw_data 與 integrated 來源。
+ * advertiser IDs 永遠由設定明確帶入；不得用空陣列呼叫全域 token。
+ */
+async function fetchPRows(
+  config: BulkConfigRow, startDate: string, endDate: string,
+  syncedAt: string, onPhase: (p: string) => void
+): Promise<{ pRows: (string | number)[][]; pSource: any[]; pStat: { account: string; rows: number }[] }> {
+  onPhase(`抓取 P advertiser（${config.pAdvertiserIds.join(',')}，${startDate}~${endDate}）…`);
+  const rows = await fetchPrismReport({
+    startDate,
+    endDate,
+    advertiserIds: config.pAdvertiserIds,
+    dimensions: [...P_DIMENSIONS],
+    metrics: [...P_METRICS],
+  });
+  const pRows: (string | number)[][] = [];
+  const pSource: any[] = [];
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const date = normalizePrismDate(r.date);
+    // 日期錯誤會讓清除視窗無法對準；寧可整個 P 單元失敗、下次重抓，也不可推進游標。
+    if (!date) throw new Error(`P API 回傳無法解析的日期：${String(r.date ?? '')}`);
+    const advertiserId = String(r.advertiser ?? '');
+    const accountName = String(r.advertiser_name ?? advertiserId);
+    const creativeName = String(r.creative_name ?? r.creative_id ?? '');
+    const dynamicTitle = String(r.title ?? '').trim();
+    const headline = dynamicTitle && dynamicTitle !== 'Unknown' ? dynamicTitle : creativeName;
+    pRows.push([
+      advertiserId, accountName, syncedAt, date,
+      r.campaign_id ?? '', r.campaign_name ?? '', r.adgroup_id ?? '', r.adgroup_name ?? '',
+      r.creative_id ?? '', creativeName, r.title ?? '', r.ad_description ?? '', r.cta_label ?? '',
+      ...P_METRICS.map((metric) => r[metric] ?? ''),
+    ]);
+    pSource.push({
+      date,
+      advertiser_id: advertiserId,
+      advertiser_name: accountName,
+      campaign_id: r.campaign_id ?? '',
+      campaign_name: r.campaign_name ?? '',
+      adgroup_id: r.adgroup_id ?? '',
+      adgroup_name: r.adgroup_name ?? '',
+      creative_id: r.creative_id ?? '',
+      creative_name: creativeName,
+      headline,
+      impressions: r.impressions ?? '',
+      clicks: r.clicks ?? '',
+      spend: r.spend ?? '',
+    });
+    counts.set(accountName, (counts.get(accountName) ?? 0) + 1);
+  }
+  return {
+    pRows,
+    pSource,
+    pStat: [...counts].map(([account, count]) => ({ account, rows: count })),
+  };
+}
+
+/**
  * 把 D source（ad 層）與 R source（cr 層）投影成 integrated 分頁列（共同欄對齊 + cv1~4）。
  * D 列 cvN=該桶 D 事件加總、R 列 cvN=該桶 R 事件加總；純函式（無 API），供 runConfig / rerunDay 共用。
  */
 export function buildIntegratedRows(
-  dSource: any[], rSource: any[], syncedAt: string, cvBuckets: CvBuckets, mSource: any[] = []
+  dSource: any[], rSource: any[], syncedAt: string, cvBuckets: CvBuckets,
+  mSource: any[] = [], pSource: any[] = []
 ): (string | number)[][] {
   const rows: (string | number)[][] = [];
   for (const s of dSource) {
@@ -477,6 +556,16 @@ export function buildIntegratedRows(
       ...CV_BUCKET_KEYS.map((k) => sumBucketM(m, cvBuckets[k])),
     ]);
   }
+  // P(Prism)：素材層可直接對映；平台尚無轉換追蹤，因此 cv1~cv4 明確填 0。
+  for (const p of pSource) {
+    rows.push([
+      'P', syncedAt, p.date ?? '', p.advertiser_name ?? '',
+      p.campaign_id ?? '', p.campaign_name ?? '', p.adgroup_id ?? '', p.adgroup_name ?? '',
+      p.creative_id ?? '', p.creative_name ?? '', p.headline ?? '', '',
+      p.impressions ?? '', p.clicks ?? '', p.spend ?? '',
+      0, 0, 0, 0,
+    ]);
+  }
   return rows;
 }
 
@@ -489,7 +578,7 @@ const emptyDevAgg = (): DevAgg => ({ imp: 0, click: 0, spend: 0, cv1: 0, cv2: 0,
  * rows 依 platform 各自的原始形狀：D=campaign 層 pc_/mobile_ 寬列、R=day×device_type、M=已正規化 device。
  */
 export function buildDeviceRows(
-  platform: 'D' | 'R' | 'M', rows: any[], syncedAt: string, cvBuckets: CvBuckets
+  platform: 'D' | 'R' | 'M' | 'P', rows: any[], syncedAt: string, cvBuckets: CvBuckets
 ): (string | number)[][] {
   const map = new Map<string, DevAgg>(); // key = date|device
   const get = (date: string, device: string): DevAgg => {
@@ -526,7 +615,7 @@ export function buildDeviceRows(
       a.cv3 += sumBucketR(r, cvBuckets.cv3);
       a.cv4 += sumBucketR(r, cvBuckets.cv4);
     }
-  } else {
+  } else if (platform === 'M') {
     // M(MGID)：MgidDeviceRow 已把 deviceType 正規化成 PC/Mobile/Tablet/Others；conv_* 走 M 桶
     for (const m of rows) {
       const date = toYmdDash(m.date);
@@ -538,6 +627,18 @@ export function buildDeviceRows(
       a.cv2 += sumBucketM(m, cvBuckets.cv2);
       a.cv3 += sumBucketM(m, cvBuckets.cv3);
       a.cv4 += sumBucketM(m, cvBuckets.cv4);
+    }
+  } else {
+    // P(Prism)：device 是 Desktop/Mobile/Tablet；沒有轉換，四桶維持 0。
+    for (const p of rows) {
+      const date = toYmdDash(p.date);
+      const device = p.device === 'Desktop' ? 'PC'
+        : p.device === 'Mobile' || p.device === 'Tablet' ? p.device
+        : 'Others';
+      const a = get(date, device);
+      a.imp += Number(p.impressions) || 0;
+      a.click += Number(p.clicks) || 0;
+      a.spend += Number(p.spend) || 0;
     }
   }
   // 輸出：日期升序、裝置固定序 PC/Mobile/Tablet/Others；空桶(全 0)仍輸出以維持每日 4 列一致
@@ -593,6 +694,25 @@ async function fetchMDeviceRows(
   return out;
 }
 
+/** Prism 裝置維度：日期×device；P 沒有轉換欄位。 */
+async function fetchPDeviceRows(
+  config: BulkConfigRow, startDate: string, endDate: string, onPhase: (p: string) => void
+): Promise<any[]> {
+  onPhase(`抓取 P advertiser 裝置維度（${startDate}~${endDate}）…`);
+  const rows = await fetchPrismReport({
+    startDate,
+    endDate,
+    advertiserIds: config.pAdvertiserIds,
+    dimensions: ['date', 'advertiser', 'device'],
+    metrics: ['impressions', 'clicks', 'spend'],
+  });
+  return rows.map((r) => {
+    const date = normalizePrismDate(r.date);
+    if (!date) throw new Error(`P API 裝置報表回傳無法解析的日期：${String(r.date ?? '')}`);
+    return { ...r, date };
+  });
+}
+
 /** 單一平台的增量視窗：[游標+1（無則回補起始日）, min(T-1, 終止日)]；起 > 迄＝已最新回 null。 */
 export function platformWindow(
   lastSynced: string | null, backfill: string, endCfg: string | null
@@ -608,16 +728,18 @@ export interface RunDeps {
   fetchDRows: typeof fetchDRows;
   fetchRRows: typeof fetchRRows;
   fetchMgidRows: typeof fetchMgidRows;
+  fetchPRows: typeof fetchPRows;
   fetchDDeviceRows: typeof fetchDDeviceRows;
   fetchRDeviceRows: typeof fetchRDeviceRows;
   fetchMDeviceRows: typeof fetchMDeviceRows;
+  fetchPDeviceRows: typeof fetchPDeviceRows;
   appendRows: typeof appendRows;
   deleteRowsByDate: typeof deleteRowsByDate;
   deleteRowsByDateRange: typeof deleteRowsByDateRange;
 }
 const REAL_DEPS: RunDeps = {
-  fetchDRows, fetchRRows, fetchMgidRows,
-  fetchDDeviceRows, fetchRDeviceRows, fetchMDeviceRows,
+  fetchDRows, fetchRRows, fetchMgidRows, fetchPRows,
+  fetchDDeviceRows, fetchRDeviceRows, fetchMDeviceRows, fetchPDeviceRows,
   appendRows, deleteRowsByDate, deleteRowsByDateRange,
 };
 
@@ -629,7 +751,7 @@ const REAL_DEPS: RunDeps = {
 async function clearPlatformWindow(
   deps: RunDeps,
   config: BulkConfigRow,
-  platform: 'D' | 'R' | 'M',
+  platform: 'D' | 'R' | 'M' | 'P',
   rawTab: string,
   rawDateColIndex: number,
   win: { startDate: string; endDate: string },
@@ -650,12 +772,13 @@ const notConfigured = (): PlatformOutcome =>
 const skippedOutcome = (): PlatformOutcome =>
   ({ configured: true, status: 'skipped', rawRows: 0, integratedRows: 0, deviceRows: 0 });
 
-/** 清單「已同步到」顯示：單平台＝單值；多平台＝「D x／R y／M z」（未跑過顯示 —）。 */
+/** 清單「已同步到」顯示：單平台＝單值；多平台分別列 D/R/M/P（未跑過顯示 —）。 */
 export function syncedLabel(config: BulkConfigRow): string {
   const parts: { tag: string; v: string | null }[] = [];
   if (config.accountIds.length) parts.push({ tag: 'D', v: config.lastSyncedD });
   if (config.rUserIds.length) parts.push({ tag: 'R', v: config.lastSyncedR });
   if (config.mgidClientIds.length) parts.push({ tag: 'M', v: config.lastSyncedM });
+  if (config.pAdvertiserIds.length) parts.push({ tag: 'P', v: config.lastSyncedP });
   if (!parts.length) return '—';
   if (parts.length === 1) return parts[0].v ?? '—';
   return parts.map((p) => `${p.tag} ${p.v ?? '—'}`).join('／');
@@ -663,7 +786,7 @@ export function syncedLabel(config: BulkConfigRow): string {
 
 /**
  * 執行一次同步（平台級容錯版）。onPhase 用來回報進度（手動執行頁輪詢用）。
- * D/R/M 三個平台單元各自「算視窗→抓→寫自己的分頁」，單一平台失敗只記在自己的 outcome
+ * D/R/M/P 四個平台單元各自「算視窗→抓→寫自己的分頁」，單一平台失敗只記在自己的 outcome
  * （呼叫端不推該平台游標、下次原樣重抓），其餘平台照常。
  * 平台內維持原子性：該平台任一帳號/任一段抓取失敗＝整個平台這次不寫。
  * 寫入順序 raw → integrated → device；寫到一半掛（Sheets API 故障）該平台游標不推，
@@ -737,8 +860,25 @@ export async function runConfig(
     } catch (e) { return fail(win, e); }
   };
 
-  // 序列執行（同現行；D 端 per-ad 限流最兇，避免與 R/M 併發互撞）
-  return { d: await runD(), r: await runR(), m: await runM() };
+  const runP = async (): Promise<PlatformOutcome> => {
+    if (!config.pAdvertiserIds.length) return notConfigured();
+    const win = platformWindow(config.lastSyncedP, config.backfillStartDate, config.endDate);
+    if (!win) return skippedOutcome();
+    try {
+      const { pRows, pSource, pStat } = await deps.fetchPRows(config, win.startDate, win.endDate, syncedAt, onPhase);
+      const devInput = await deps.fetchPDeviceRows(config, win.startDate, win.endDate, onPhase);
+      const integrated = buildIntegratedRows([], [], syncedAt, cvBuckets, [], pSource);
+      const device = buildDeviceRows('P', devInput, syncedAt, cvBuckets);
+      await clearPlatformWindow(deps, config, 'P', P_RAW_TAB, 3, win, onPhase);
+      if (pRows.length) { onPhase(`寫入 P 分頁 ${P_RAW_TAB}（${pRows.length} 列）…`); await deps.appendRows(config.sheetId, P_RAW_TAB, P_SHEET_HEADER, pRows); }
+      if (integrated.length) await deps.appendRows(config.sheetId, INTEGRATED_TAB, INTEGRATED_HEADER, integrated);
+      if (device.length) await deps.appendRows(config.sheetId, DEVICE_TAB, DEVICE_HEADER, device);
+      return { configured: true, status: 'ok', window: win, rawRows: pRows.length, integratedRows: integrated.length, deviceRows: device.length, syncedDate: win.endDate, pStat };
+    } catch (e) { return fail(win, e); }
+  };
+
+  // 序列執行（同現行；D 端 per-ad 限流最兇，避免與其他平台併發互撞）
+  return { d: await runD(), r: await runR(), m: await runM(), p: await runP() };
 }
 
 /**
@@ -755,10 +895,12 @@ export async function rerunDay(
   const hasD = config.accountIds.length > 0;
   const hasR = config.rUserIds.length > 0;
   const hasM = config.mgidClientIds.length > 0;
+  const hasP = config.pAdvertiserIds.length > 0;
   const doD = hasD && (scope === 'both' || scope === 'd');
   const doR = hasR && (scope === 'both' || scope === 'r');
   const doM = hasM && (scope === 'both' || scope === 'm');
-  if (!doD && !doR && !doM) throw new Error('此設定沒有可重抓的來源，或選擇的來源未設定');
+  const doP = hasP && (scope === 'both' || scope === 'p');
+  if (!doD && !doR && !doM && !doP) throw new Error('此設定沒有可重抓的來源，或選擇的來源未設定');
 
   const targetDate = twYesterday();
   const sd = compact(targetDate);
@@ -771,7 +913,7 @@ export async function rerunDay(
 
   // 單一來源：抓成功才動 sheet；刪 raw（date）→ 刪 integrated/device（date+platform）→ 寫回
   const runOne = async (
-    platform: 'D' | 'R' | 'M',
+    platform: 'D' | 'R' | 'M' | 'P',
     fetchAll: () => Promise<{ raw: (string | number)[][]; integrated: (string | number)[][]; device: (string | number)[][] }>,
     rawTab: string, rawHeader: string[], rawDateCol: number
   ): Promise<RerunSourceOutcome> => {
@@ -808,5 +950,11 @@ export async function rerunDay(
     return { raw: mRows, integrated: buildIntegratedRows([], [], syncedAt, cvBuckets, mSource), device: buildDeviceRows('M', devInput, syncedAt, cvBuckets) };
   }, M_RAW_TAB, M_SHEET_HEADER, 2);
 
-  return { targetDate, d: dOut, r: rOut, m: mOut };
+  const pOut = !doP ? none : await runOne('P', async () => {
+    const { pRows, pSource } = await deps.fetchPRows(config, targetDate, targetDate, syncedAt, onPhase);
+    const devInput = await deps.fetchPDeviceRows(config, targetDate, targetDate, onPhase);
+    return { raw: pRows, integrated: buildIntegratedRows([], [], syncedAt, cvBuckets, [], pSource), device: buildDeviceRows('P', devInput, syncedAt, cvBuckets) };
+  }, P_RAW_TAB, P_SHEET_HEADER, 3);
+
+  return { targetDate, d: dOut, r: rOut, m: mOut, p: pOut };
 }

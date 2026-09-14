@@ -335,11 +335,13 @@ export interface BulkConfigRow {
   accountIds: string[]; // 多個 D 帳號 account_id（穩定鍵，對應 d_tokens.account_id）；可空＝不抓 D
   rUserIds: string[]; // 多個 Rixbee Account ID；可空＝不抓 R
   mgidClientIds: string[]; // 多個 MGID api_client_id（對應 mgid_tokens.api_client_id）；可空＝不抓 M
+  pAdvertiserIds: string[]; // 多個 Prism advertiser ID（000-000-0000）；可空＝不抓 P
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；抓到此日（含）後停止同步。null=不限、持續每日 T-1
   lastSyncedD: string | null; // D 平台游標 YYYY-MM-DD；null=未跑過（平台級容錯：三平台各自推進；舊共用欄 last_synced_date 保留 DB 不讀寫）
   lastSyncedR: string | null;
   lastSyncedM: string | null;
+  lastSyncedP: string | null;
   lastRunAt: string | null;
   lastRunStatus: string | null; // success / error / running
   lastRunMessage: string | null;
@@ -355,6 +357,7 @@ export interface BulkConfigInput {
   accountIds: string[];
   rUserIds: string[];
   mgidClientIds?: string[]; // 可省（如 adstream-lab 未支援）＝不抓 M
+  pAdvertiserIds?: string[]; // 可省（如 adstream-lab 未支援）＝不抓 P
   backfillStartDate: string; // YYYY-MM-DD
   endDate: string | null; // YYYY-MM-DD；可空＝不限
   cvBuckets?: CvBuckets; // cv1~4 拖拉桶
@@ -372,6 +375,7 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
       sheet_id VARCHAR(128) NOT NULL,
       account_ids TEXT NULL,
       r_user_ids TEXT NULL,
+      p_advertiser_ids TEXT NULL,
       backfill_start_date DATE NOT NULL,
       end_date DATE NULL,
       last_synced_date DATE NULL,
@@ -398,6 +402,10 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
   // MGID api_client_id 清單（JSON 陣列）；舊資料 null＝不抓 M
   if (!(await hasCol('mgid_client_ids'))) {
     await p.query(`ALTER TABLE adstream_configs ADD COLUMN mgid_client_ids TEXT NULL`);
+  }
+  // Prism advertiser ID 清單（JSON 陣列）；舊資料 null＝不抓 P
+  if (!(await hasCol('p_advertiser_ids'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN p_advertiser_ids TEXT NULL`);
   }
   // account_names → account_ids 遷移（by-id 改造）：補欄位，舊欄位放寬可空（資料轉換由 poc 腳本做）
   if (!(await hasCol('account_ids'))) {
@@ -427,6 +435,10 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
        WHERE last_synced_date IS NOT NULL`
     );
   }
+  // P 是後加入的平台，游標必須獨立新增且保持 null，讓既有設定從回補起始日開始抓 P。
+  if (!(await hasCol('last_synced_p'))) {
+    await p.query(`ALTER TABLE adstream_configs ADD COLUMN last_synced_p DATE NULL`);
+  }
   // 舊 account_names 欄保留當 rollback，但放寬可空（不再寫入）；只在仍為 NOT NULL 時改一次
   const [legacyCol] = await p.query(
     `SELECT is_nullable FROM information_schema.columns
@@ -440,12 +452,13 @@ async function ensureBulkSchema(p: mysql.Pool): Promise<void> {
 }
 
 // 日期欄位用 DATE_FORMAT 取字串，避免 mysql2 回 Date 物件帶時區誤差
-const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids,
+const BULK_SELECT = `SELECT id, name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids, p_advertiser_ids,
   DATE_FORMAT(backfill_start_date, '%Y-%m-%d') AS backfill_start_date,
   DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
   DATE_FORMAT(last_synced_d, '%Y-%m-%d') AS last_synced_d,
   DATE_FORMAT(last_synced_r, '%Y-%m-%d') AS last_synced_r,
   DATE_FORMAT(last_synced_m, '%Y-%m-%d') AS last_synced_m,
+  DATE_FORMAT(last_synced_p, '%Y-%m-%d') AS last_synced_p,
   DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s') AS last_run_at,
   last_run_status, last_run_message, created_by, cv_buckets,
   DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
@@ -469,11 +482,13 @@ function mapBulkRow(r: any): BulkConfigRow {
     accountIds: parseJsonArray(r.account_ids),
     rUserIds: parseJsonArray(r.r_user_ids),
     mgidClientIds: parseJsonArray(r.mgid_client_ids),
+    pAdvertiserIds: parseJsonArray(r.p_advertiser_ids),
     backfillStartDate: r.backfill_start_date,
     endDate: r.end_date ?? null,
     lastSyncedD: r.last_synced_d,
     lastSyncedR: r.last_synced_r,
     lastSyncedM: r.last_synced_m,
+    lastSyncedP: r.last_synced_p,
     lastRunAt: r.last_run_at,
     lastRunStatus: r.last_run_status,
     lastRunMessage: r.last_run_message,
@@ -520,8 +535,8 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
   if (!p) throw new Error('DB 未設定');
   await ensureBulkSchema(p);
   const [res] = await p.query(
-    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids, backfill_start_date, end_date, cv_buckets, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO adstream_configs (name, sheet_url, sheet_id, account_ids, r_user_ids, mgid_client_ids, p_advertiser_ids, backfill_start_date, end_date, cv_buckets, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.name.trim(),
       input.sheetUrl.trim(),
@@ -529,6 +544,7 @@ export async function addBulkConfig(input: BulkConfigInput, createdBy?: string |
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       JSON.stringify(input.mgidClientIds ?? []),
+      JSON.stringify(input.pAdvertiserIds ?? []),
       input.backfillStartDate,
       input.endDate || null,
       JSON.stringify(input.cvBuckets ?? EMPTY_CV_BUCKETS),
@@ -544,7 +560,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
   await ensureBulkSchema(p);
   const [res] = await p.query(
     `UPDATE adstream_configs
-     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, mgid_client_ids = ?, backfill_start_date = ?, end_date = ?, cv_buckets = ?
+     SET name = ?, sheet_url = ?, sheet_id = ?, account_ids = ?, r_user_ids = ?, mgid_client_ids = ?, p_advertiser_ids = COALESCE(?, p_advertiser_ids), backfill_start_date = ?, end_date = ?, cv_buckets = ?
      WHERE id = ?`,
     [
       input.name.trim(),
@@ -553,6 +569,7 @@ export async function updateBulkConfig(id: number, input: BulkConfigInput): Prom
       JSON.stringify(input.accountIds),
       JSON.stringify(input.rUserIds),
       JSON.stringify(input.mgidClientIds ?? []),
+      input.pAdvertiserIds === undefined ? null : JSON.stringify(input.pAdvertiserIds),
       input.backfillStartDate,
       input.endDate || null,
       JSON.stringify(input.cvBuckets ?? EMPTY_CV_BUCKETS),
@@ -576,7 +593,7 @@ export async function markBulkRun(
   run: {
     status: 'success' | 'error' | 'partial' | 'running';
     message?: string;
-    syncedDates?: { d?: string; r?: string; m?: string };
+    syncedDates?: { d?: string; r?: string; m?: string; p?: string };
   }
 ): Promise<void> {
   const p = getPool();
@@ -584,8 +601,8 @@ export async function markBulkRun(
   await ensureBulkSchema(p);
   const sets = ['last_run_at = NOW()', 'last_run_status = ?', 'last_run_message = ?'];
   const params: any[] = [run.status, run.message ?? null];
-  const colByKey = { d: 'last_synced_d', r: 'last_synced_r', m: 'last_synced_m' } as const;
-  for (const k of ['d', 'r', 'm'] as const) {
+  const colByKey = { d: 'last_synced_d', r: 'last_synced_r', m: 'last_synced_m', p: 'last_synced_p' } as const;
+  for (const k of ['d', 'r', 'm', 'p'] as const) {
     const v = run.syncedDates?.[k];
     if (v) { sets.push(`${colByKey[k]} = ?`); params.push(v); }
   }

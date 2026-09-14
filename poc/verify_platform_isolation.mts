@@ -14,9 +14,9 @@ const T1 = (() => { // 昨天（台北）
 
 const baseCfg: BulkConfigRow = {
   id: 1, name: 't', sheetUrl: '', sheetId: 'SHEET',
-  accountIds: ['d1'], rUserIds: ['r1'], mgidClientIds: ['m1'],
+  accountIds: ['d1'], rUserIds: ['r1'], mgidClientIds: ['m1'], pAdvertiserIds: [],
   backfillStartDate: '2026-07-01', endDate: null,
-  lastSyncedD: null, lastSyncedR: null, lastSyncedM: null,
+  lastSyncedD: null, lastSyncedR: null, lastSyncedM: null, lastSyncedP: null,
   lastRunAt: null, lastRunStatus: null, lastRunMessage: null,
   createdBy: null, cvBuckets: { cv1: [], cv2: [], cv3: [], cv4: [] }, createdAt: '',
 };

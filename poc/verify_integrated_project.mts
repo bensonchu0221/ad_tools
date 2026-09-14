@@ -36,20 +36,27 @@ assert.equal(rows[1][15], 6); // cv1
 assert.equal(rows[1][16], 3); // cv2
 console.log('OK buildIntegratedRows');
 
-// 驗 device_summary 聚合：D pc_/mobile_ 前綴列 + R device_type 列，依 (date, device) 累加，
-// 每同步日固定輸出 4 列（PC/Mobile/Tablet/Others），無資料的裝置仍輸出 0
+// 驗 device_summary 聚合：平台級容錯後 D/R 各自輸出每日 4 列，BI 端再依需求加總。
 import { buildDeviceRows } from '../src/tools/adstream/run.js';
 // D 裝置列：pc_ base + pc_cv；R device_type=1(Mobile) 一列
-const devRows = buildDeviceRows({
-  dRows: [{ date: '20260701', pc_imp: 100, pc_click: 5, pc_charge: 3, pc_cv: 4, mobile_imp: 50, mobile_click: 2, mobile_charge: 1, mobile_cv: 1 }],
-  rRows: [{ day: '20260701', device_type: '1', impression: 20, click: 1, payment_revenue: 2, behavior4: 7 }],
-}, '2026-07-07 09:30:00', { cv1: [{ src: 'D', event: 'cv' }, { src: 'R', event: 'cv_add_to_cart' }], cv2: [], cv3: [], cv4: [] } as any);
-// 每同步日 4 列（PC/Mobile/Tablet/Others）
-assert.equal(devRows.length, 4);
-const byDev = Object.fromEntries(devRows.map((r) => [r[2], r]));
-assert.equal(byDev['PC'][3], 100); // pc imp
-assert.equal(byDev['PC'][6], 4);   // pc cv1 = pc_cv
-assert.equal(byDev['Mobile'][3], 50 + 20); // D mobile imp + R Mobile impression
-assert.equal(byDev['Mobile'][6], 1 + 7);   // D mobile_cv + R behavior4(cv_add_to_cart)
-assert.equal(byDev['Tablet'][3], 0); // 無資料仍輸出 0 列
+const deviceBuckets = {
+  cv1: [{ src: 'D', event: 'cv' }, { src: 'R', event: 'cv_add_to_cart' }],
+  cv2: [], cv3: [], cv4: [],
+} as any;
+const dDevRows = buildDeviceRows('D', [
+  { date: '20260701', pc_imp: 100, pc_click: 5, pc_charge: 3, pc_cv: 4, mobile_imp: 50, mobile_click: 2, mobile_charge: 1, mobile_cv: 1 },
+], '2026-07-07 09:30:00', deviceBuckets);
+const rDevRows = buildDeviceRows('R', [
+  { day: '20260701', device_type: '1', impression: 20, click: 1, payment_revenue: 2, behavior4: 7 },
+], '2026-07-07 09:30:00', deviceBuckets);
+assert.equal(dDevRows.length, 4);
+assert.equal(rDevRows.length, 4);
+const byKey = Object.fromEntries([...dDevRows, ...rDevRows].map((r) => [String(r[0]) + '|' + String(r[3]), r]));
+assert.equal(byKey['D|PC'][4], 100);
+assert.equal(byKey['D|PC'][7], 4);
+assert.equal(byKey['D|Mobile'][4], 50);
+assert.equal(byKey['D|Mobile'][7], 1);
+assert.equal(byKey['R|Mobile'][4], 20);
+assert.equal(byKey['R|Mobile'][7], 7);
+assert.equal(byKey['D|Tablet'][4], 0);
 console.log('OK buildDeviceRows');
