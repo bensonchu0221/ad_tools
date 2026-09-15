@@ -57,6 +57,512 @@ const FRAME_HTML = `<div class="fxframe" aria-hidden="true">
   <i class="fx-hz b l"></i><i class="fx-hz b r"></i>
 </div>`;
 
+// ── 標題列右側環形讀數（純裝飾、合成數值，2026-09-15）───────────────────────────
+// 自 poc/hudgauge_preview.html 的「環形讀數」原樣移植：canvas 繪圖、數值循環腳本、P.MAX／h.MIN 標註
+// 動畫逐字照抄，只改會撞名的 id 與 SVG class（加 hg- 前綴）。畫面以 640×620 繪製、CSS scale 縮小
+// （使用者選縮小版，--hgs）。數字是假的、不接任何資料（使用者指定，不加警語）。
+const GAUGE_JS = `(function(){
+  var TAU = Math.PI * 2;
+  var paused = false, reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var introT0 = 0, t0 = 0, elapsed = 0;
+
+  var P320 = {
+    prev: true,
+    FR: 0.348, FO: 0.276, FI: 0.348 * 0.55,
+    CYX: 0.50, CYY: 0.50,
+    A_FIX: Math.PI / 3 + 0.08,
+    aA: -Math.PI * 0.68, aB: 0.34, boxBY: -11,
+    labT: 1.14, labTop: 1.12, labBot: 1.16,
+    glowMul: 2.6, glowA: 0.22,
+    orange: 'rgb(232,120,80)', orangeW: 0.105
+  };
+
+  function clamp(v,a,b){ return v<a?a:v>b?b:v; }
+  // 50→60(停0.2)→55→73(停0.2)→87→50
+  var VAL_SEGS = [
+    {from:0.50, to:0.60, move:0.75, hold:0.20},
+    {from:0.60, to:0.55, move:0.45, hold:0},
+    {from:0.55, to:0.73, move:0.90, hold:0.20},
+    {from:0.73, to:0.87, move:0.70, hold:0},
+    {from:0.87, to:0.50, move:1.20, hold:0}
+  ];
+  var VAL_TOTAL = VAL_SEGS.reduce(function(s, seg){ return s + seg.move + seg.hold; }, 0);
+  function valueAt(t){
+    var x = ((t % VAL_TOTAL) + VAL_TOTAL) % VAL_TOTAL;
+    for (var i=0;i<VAL_SEGS.length;i++){
+      var s = VAL_SEGS[i];
+      if (x < s.move){
+        return s.from + (s.to - s.from) * (x / s.move);
+      }
+      x -= s.move;
+      if (x < s.hold) return s.to;
+      x -= s.hold;
+    }
+    return VAL_SEGS[0].from;
+  }
+
+  function createGauge(ids, P){
+  var stage = document.getElementById(ids.stage);
+  var canvas = document.getElementById(ids.canvas);
+  var ctx = canvas.getContext('2d');
+  var numEl = document.getElementById(ids.num);
+  var pctEl = document.getElementById(ids.pct);
+  var svg = document.getElementById(ids.svg);
+  var lastInt = -1;
+  var FR = P.FR, FO = P.FO, FI = P.FI, CYX = P.CYX, CYY = P.CYY;
+  var labT1 = document.getElementById(ids.t1);
+  var labT2 = document.getElementById(ids.t2);
+  var labTop = document.getElementById(ids.top);
+  var labBot = document.getElementById(ids.bot);
+
+  function geom(){
+    var W = stage.clientWidth, H = stage.clientHeight;
+    var cx = W * CYX, cy = H * CYY;
+    var R = W * FR;
+    var rO = W * FO;
+    var rI = W * FI;
+    return {W:W, H:H, cx:cx, cy:cy, R:R, rO:rO, rI:rI};
+  }
+
+  function fit(){
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    var W = stage.clientWidth, H = stage.clientHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    layoutCallouts();
+    placeChrome(geom());
+  }
+
+  function glowArc(r, a0, a1, color, lw, ccw, cap){
+    ctx.save();
+    ctx.lineCap = cap || 'butt';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw * P.glowMul;
+    ctx.globalAlpha = P.glowA;
+    ctx.beginPath(); ctx.arc(0,0,r,a0,a1,!!ccw); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.arc(0,0,r,a0,a1,!!ccw); ctx.stroke();
+    ctx.restore();
+  }
+
+  function hair(r, a, alpha){
+    ctx.save();
+    ctx.strokeStyle = 'rgba(62,196,222,'+alpha+')';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(0,0,r,0,TAU); ctx.stroke();
+    ctx.restore();
+  }
+
+  var A_FIX = P.A_FIX;
+
+  function draw(g, t, val){
+    var cx=g.cx, cy=g.cy, R=g.R, rO=g.rO, rI=g.rI;
+    ctx.clearRect(0,0,g.W,g.H);
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    if (P.prev){
+      hair(rI*0.62, t, 0.10); hair(rI, t, 0.20); hair(rO, t, 0.08);
+      hair(R, t, 0.10); hair(R*1.12, t, 0.08); hair(R*1.22, t, 0.05);
+    } else {
+      hair(rI*0.62, t, 0.08); hair(rI, t, 0.16); hair(R, t, 0.08); hair(R*1.18, t, 0.05);
+    }
+
+    var nTick = P.prev ? 180 : 72;
+    for (var i=0;i<nTick;i++){
+      var a = -Math.PI/2 + i/nTick*TAU;
+      var major = P.prev ? (i % 15 === 0) : (i % 6 === 0);
+      var mid = P.prev && (i % 5 === 0);
+      var r0 = P.prev ? R*1.155 : R*1.10;
+      var r1 = r0 + (major ? (P.prev?R*0.078:R*0.055) : mid ? R*0.045 : (P.prev?R*0.022:R*0.022));
+      ctx.strokeStyle = major ? (P.prev?'rgba(142,228,242,.8)':'rgba(142,228,242,.55)') : mid ? 'rgba(62,196,222,.42)' : 'rgba(62,196,222,.18)';
+      ctx.lineWidth = major ? 1.4 : 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*r0, Math.sin(a)*r0);
+      ctx.lineTo(Math.cos(a)*r1, Math.sin(a)*r1);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = P.prev ? 'rgba(62,196,222,.22)' : 'rgba(62,196,222,.12)';
+    ctx.lineWidth = 1;
+    var nHash = P.prev ? 72 : 36;
+    for (var k=0;k<nHash;k++){
+      var a = k/nHash*TAU;
+      var r0 = rI*(P.prev?1.08:1.06), r1 = rI*(P.prev ? (k%6===0?1.22:1.14) : (k%3===0?1.16:1.10));
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*r0, Math.sin(a)*r0);
+      ctx.lineTo(Math.cos(a)*r1, Math.sin(a)*r1);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = P.prev ? 'rgba(62,196,222,.16)' : 'rgba(62,196,222,.14)';
+    ctx.lineWidth = R*0.068;
+    ctx.beginPath(); ctx.arc(0,0,R,0,TAU); ctx.stroke();
+    var cyA0 = P.prev ? (-Math.PI/2 + Math.PI/3) : Math.PI/2;
+    var cyA1 = P.prev ? (-Math.PI/2 + Math.PI/6) : Math.PI/4;
+    glowArc(R, cyA0, cyA1, 'rgb(62,196,222)', R*0.068, false, 'butt');
+
+    var hiA0 = P.prev ? (-Math.PI/2 - 0.15) : (-Math.PI/2 - 0.26);
+    var hiA1 = P.prev ? (hiA0 + 1.35) : (-Math.PI/2 + 1.22);
+    glowArc(R*(P.prev?1.105:1.14), hiA0, hiA1, 'rgb(90,214,232)', R*(P.prev?0.032:0.038), false, 'round');
+    function cdot(a, r, s){
+      ctx.fillStyle = 'rgba(142,228,242,.92)';
+      ctx.beginPath(); ctx.arc(Math.cos(a)*r, Math.sin(a)*r, s, 0, TAU); ctx.fill();
+    }
+    cdot(cyA0, R, 2.2);
+    cdot(cyA1, R, 2.2);
+    cdot(hiA0, R*1.09, 1.8);
+    cdot(hiA1, R*1.09, 1.8);
+
+    if (P.prev){
+      ctx.strokeStyle = 'rgba(62,196,222,.28)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(0,0,rI,0,TAU); ctx.stroke();
+      glowArc(rI, t*0.35, t*0.35 + 1.15, 'rgb(143,228,242)', 1.6, false, 'round');
+    } else {
+      ctx.strokeStyle = 'rgba(62,196,222,.22)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(0,0,rI, Math.PI/2, -0.96, false); ctx.stroke();
+      glowArc(rI, Math.PI/2, -0.96, 'rgb(110,200,220)', 1.5, false, 'butt');
+    }
+
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = P.prev ? 'rgba(62,196,222,.28)' : 'rgba(62,196,222,.16)';
+    ctx.setLineDash(P.prev ? [3, 5] : [2, 6]);
+    ctx.lineDashOffset = -t*18;
+    ctx.beginPath(); ctx.arc(0,0,rI*(P.prev?0.78:0.72),0,TAU); ctx.stroke();
+    ctx.restore();
+
+    var sweep = TAU * val;
+    var a1 = A_FIX + sweep;
+    if (P.prev){
+      ctx.strokeStyle = 'rgba(224,112,72,.12)';
+      ctx.lineWidth = R*0.118;
+      ctx.beginPath(); ctx.arc(0,0,rO,0,TAU); ctx.stroke();
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,176,138,.22)';
+      ctx.lineWidth = 1;
+      for (var ot=0; ot<60; ot++){
+        var oa = ot/60*TAU, long = ot%5===0;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(oa)*(rO-(long?9:5)), Math.sin(oa)*(rO-(long?9:5)));
+        ctx.lineTo(Math.cos(oa)*(rO+(long?9:5)), Math.sin(oa)*(rO+(long?9:5)));
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    glowArc(rO, A_FIX, a1, P.orange, R*P.orangeW, false, 'butt');
+
+    // 弧兩端小帽
+    function cap(a, color){
+      var x = Math.cos(a)*rO, y = Math.sin(a)*rO;
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(x,y, 2.4, 0, TAU); ctx.fill();
+    }
+    cap(A_FIX, 'rgba(232,240,244,.9)');
+    cap(a1, 'rgba(255,176,138,.95)');
+
+    // 橘環上的白段：五分之一環、平切、比橘環粗 4px（內側齊橘、外側超出）
+    var slide = (Math.sin(t*1.15)*0.5+0.5);
+    var wLen = TAU / 5;
+    var w0 = A_FIX + sweep * slide * 0.92;
+    var w1 = w0 + wLen;
+    if (w1 > a1) { w1 = a1; w0 = Math.max(A_FIX, a1 - wLen); }
+    var orangeW = R * P.orangeW;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,.58)';
+    ctx.lineWidth = orangeW + 8;
+    ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.arc(0,0, rO + 4, w0, w1, false); ctx.stroke();
+    ctx.restore();
+
+    // 頂倒 U／底正 U（CONNECTED / UPDATE 那對，坐在青環上）
+    function bracket(at, inward){
+      var rb = R * 1.005;
+      var span = 0.18;
+      var a0 = at - span, a1b = at + span;
+      var rArm = rb + (inward ? -10 : 10);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(142,228,242,.9)';
+      ctx.lineWidth = 1.7;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a0)*rArm, Math.sin(a0)*rArm);
+      ctx.lineTo(Math.cos(a0)*rb, Math.sin(a0)*rb);
+      ctx.arc(0,0,rb,a0,a1b,false);
+      ctx.lineTo(Math.cos(a1b)*rArm, Math.sin(a1b)*rArm);
+      ctx.stroke();
+      ctx.restore();
+    }
+    bracket(-Math.PI/2, true);
+    bracket(Math.PI/2, false);
+
+    // T1／T2 小括號（朝環內）
+    function sideBracket(at){
+      var r0 = R * (P.prev?1.20:1.16), r1 = R * (P.prev?1.28:1.22), span = P.prev?0.07:0.045;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(62,196,222,.8)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      var a0 = at - span, a1b = at + span;
+      ctx.moveTo(Math.cos(a0)*r0, Math.sin(a0)*r0);
+      ctx.lineTo(Math.cos(a0)*r1, Math.sin(a0)*r1);
+      ctx.lineTo(Math.cos(a1b)*r1, Math.sin(a1b)*r1);
+      ctx.lineTo(Math.cos(a1b)*r0, Math.sin(a1b)*r0);
+      ctx.stroke();
+      ctx.restore();
+    }
+    sideBracket(Math.PI);
+    sideBracket(0);
+
+    // 右下白刻度簇＋小指標（約 4–5 點，靠近固定端外側）
+    var cluster = A_FIX - (P.prev ? 0.08 : 0.35);
+    for (var j=-5;j<=6;j++){
+      var a = cluster + j*0.046;
+      var r0 = R*1.00, r1 = R*(j%3===0 ? 1.09 : 1.05);
+      ctx.strokeStyle = 'rgba(232,240,244,'+(j===0?0.9:0.45)+')';
+      ctx.lineWidth = j%3===0 ? 1.6 : 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*r0, Math.sin(a)*r0);
+      ctx.lineTo(Math.cos(a)*r1, Math.sin(a)*r1);
+      ctx.stroke();
+    }
+    var ptr = cluster + 0.18*Math.sin(t*1.65);
+    ctx.save();
+    ctx.fillStyle = 'rgba(232,240,244,.95)';
+    ctx.translate(Math.cos(ptr)*R*1.12, Math.sin(ptr)*R*1.12);
+    ctx.rotate(ptr + Math.PI/2);
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(3.2, 4); ctx.lineTo(-3.2, 4); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // ── 兩個標註：左上 P.MAX／右下 h.MIN，差 0.5s，無起點圓點 ──
+  var co = { A:null, B:null };
+  var DIAG = 30, HLEN = 28, PERIOD = 3.6, STAGGER = 0.5, FADE = 0.20;
+  var CYCLE = PERIOD + STAGGER;
+  var INV = DIAG / Math.SQRT2;
+  var PAD_X = 2, PAD_Y = 1, lastCycle = -1;
+
+  function polar(g, r, a){
+    return { x: g.cx + Math.cos(a)*r, y: g.cy + Math.sin(a)*r };
+  }
+  function placeEl(el, x, y, ax, ay){
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.style.transform = 'translate('+(-ax*100)+'%,'+(-ay*100)+'%)';
+  }
+  function placeChrome(g){
+    var R = g.R;
+    var t1 = polar(g, R*P.labT, Math.PI);
+    var t2 = polar(g, R*P.labT, 0);
+    var top = polar(g, R*P.labTop, -Math.PI/2);
+    var bot = polar(g, R*P.labBot, Math.PI/2);
+    placeEl(labT1, t1.x - 8, t1.y, 1, 0.5);
+    placeEl(labT2, t2.x + 8, t2.y, 0, 0.5);
+    placeEl(labTop, top.x, top.y - 2, 0.5, 1);
+    placeEl(labBot, bot.x, bot.y + 2, 0.5, 0);
+  }
+  function NS(tag, attrs){
+    var n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function sizeTag(node){
+    node.text.textContent = node.label;
+    node.text.setAttribute('opacity', '0');
+    var w = node.label.length * 24, h = 40;
+    try {
+      var bb = node.text.getBBox();
+      if (bb.width > 1){ w = bb.width; h = bb.height; }
+    } catch (e) {}
+    node.bw = Math.ceil(w) + PAD_X * 2;
+    node.bh = Math.ceil(h) + PAD_Y * 2;
+    node.rect.setAttribute('width', String(node.bw));
+    node.rect.setAttribute('height', String(node.bh));
+    node.text.setAttribute('x', String(PAD_X));
+    node.text.setAttribute('y', String(node.bh / 2));
+    node.text.textContent = '';
+  }
+  function makeCallout(id, label){
+    var g = NS('g', {id:id});
+    var lead = NS('path', {class:'hg-lead'});
+    var tag = NS('g', {class:'hg-tag'});
+    var rect = NS('rect', {x:'0', y:'0', width:'1', height:'1'});
+    var text = NS('text', {x:'0', y:'0', 'text-anchor':'start'});
+    text.textContent = '';
+    tag.appendChild(rect); tag.appendChild(text);
+    g.appendChild(lead); g.appendChild(tag);
+    svg.appendChild(g);
+    var node = {
+      g:g, lead:lead, tag:tag, rect:rect, text:text,
+      label:label, period:PERIOD,
+      a:null, left:true, sy:-1, n:0, len:1, bw:64, bh:22
+    };
+    sizeTag(node);
+    return node;
+  }
+
+  function layoutMarker(node, g){
+    if (node.a == null) return;
+    var bw = node.bw, bh = node.bh;
+    var p0 = polar(g, g.rO, node.a);
+    var sx = node.left ? -1 : 1;
+    var sy = node.sy;
+    function elbow(s){ return { x: p0.x + sx * INV, y: p0.y + s * INV }; }
+    var e = elbow(sy);
+    if (e.y - bh < 2){ sy = 1; e = elbow(sy); }
+    else if (e.y > g.H - 4){ sy = -1; e = elbow(sy); }
+    node.sy = sy;
+    var ly = e.y;
+    var box, d;
+    if (node.left){
+      box = { x: e.x - HLEN - bw, y: ly - bh };
+      box.x = clamp(box.x, 2, g.W - bw - 2);
+      d = 'M'+p0.x.toFixed(1)+','+p0.y.toFixed(1)
+        + ' L'+e.x.toFixed(1)+','+e.y.toFixed(1)
+        + ' L'+(box.x+bw).toFixed(1)+','+ly.toFixed(1);
+    } else {
+      box = { x: e.x + HLEN, y: ly - bh };
+      box.x = clamp(box.x, 2, g.W - bw - 2);
+      d = 'M'+p0.x.toFixed(1)+','+p0.y.toFixed(1)
+        + ' L'+e.x.toFixed(1)+','+e.y.toFixed(1)
+        + ' L'+box.x.toFixed(1)+','+ly.toFixed(1);
+    }
+    node.lead.setAttribute('d', d);
+    node.tag.setAttribute('transform', 'translate('+box.x.toFixed(1)+','+box.y.toFixed(1)+')');
+    node.len = node.lead.getTotalLength() || 1;
+    node.lead.style.strokeDasharray = String(node.len);
+  }
+
+  function pickMarker(node){
+    var g = geom();
+    var n = node.n;
+    if (node === co.A){
+      node.a = -Math.PI * 0.72 + 0.16 * Math.sin(n * 1.7 + 0.4);
+      node.left = true;
+      node.sy = -1;
+    } else {
+      node.a = Math.PI * 0.28 + 0.16 * Math.sin(n * 1.3 + 1.1);
+      node.left = false;
+      node.sy = 1;
+    }
+    node.n += 1;
+    layoutMarker(node, g);
+  }
+
+  function layoutCallouts(){
+    var g = geom();
+    svg.setAttribute('viewBox', '0 0 '+g.W+' '+g.H);
+    svg.setAttribute('width', String(g.W));
+    svg.setAttribute('height', String(g.H));
+    if (!co.A){
+      co.A = makeCallout(ids.svg+'_A', 'P.MAX');
+      co.B = makeCallout(ids.svg+'_B', 'h.MIN');
+    }
+    sizeTag(co.A); sizeTag(co.B);
+    layoutMarker(co.A, g);
+    layoutMarker(co.B, g);
+  }
+
+  function applyCallout(node, u){
+    if (u < 0 || node.a == null){
+      node.lead.setAttribute('opacity', '0');
+      node.tag.style.opacity = '0';
+      node.text.textContent = '';
+      return;
+    }
+    var lineU = clamp((u - 0.10)/0.38, 0, 1);
+    var boxU = clamp((u - 0.40)/0.26, 0, 1);
+    var typeU = u - 0.68;
+    if (u > node.period - FADE){
+      var k = 1 - clamp((u - (node.period - FADE))/FADE, 0, 1);
+      lineU = Math.min(lineU, k);
+      boxU = Math.min(boxU, k);
+      if (k < 0.35) typeU = -1;
+    }
+    node.lead.style.strokeDashoffset = String(node.len * (1 - lineU));
+    node.lead.setAttribute('opacity', String(lineU>0?1:0));
+
+    var grow = boxU*boxU*(3-2*boxU);
+    var ox = node.left ? node.bw : 0, oy = node.bh;
+    node.rect.setAttribute('transform',
+      'translate('+ox+','+oy+') scale('+grow+',1) translate('+(-ox)+','+(-oy)+')');
+    node.tag.style.opacity = String(grow>0?1:0);
+
+    var typed = typeU < 0 ? 0 : Math.min(node.label.length, Math.floor(typeU / 0.09) + 1);
+    node.text.textContent = node.label.slice(0, typed);
+    node.text.setAttribute('opacity', typed>0 ? '1' : '0');
+  }
+
+  function tickCallouts(t){
+    if (!co.A) layoutCallouts();
+    if (reduced){
+      if (co.A.a == null){ pickMarker(co.A); pickMarker(co.B); }
+      applyCallout(co.A, 8); applyCallout(co.B, 8); return;
+    }
+    var tau = t - introT0;
+    if (tau < 0){ applyCallout(co.A, -1); applyCallout(co.B, -1); return; }
+    var cycle = Math.floor(tau / CYCLE);
+    var u = tau - cycle * CYCLE;
+    if (cycle !== lastCycle){
+      pickMarker(co.A);
+      pickMarker(co.B);
+      lastCycle = cycle;
+    }
+    applyCallout(co.A, u);
+    applyCallout(co.B, u - STAGGER);
+  }
+
+  function resetCallouts(){
+    lastCycle = -1;
+    if (!co.A) return;
+    co.A.a = null; co.A.n = 0;
+    co.B.a = null; co.B.n = 0;
+  }
+
+  function step(t, val){
+    draw(geom(), t, val);
+    var n = Math.round(val*100);
+    if (n !== lastInt){
+      numEl.textContent = String(n);
+      numEl.classList.remove('tick');
+      void numEl.offsetWidth;
+      numEl.classList.add('tick');
+      lastInt = n;
+    }
+    pctEl.textContent = (val*100).toFixed(1)+'%';
+    tickCallouts(t);
+  }
+  return { fit: fit, step: step, resetCallouts: resetCallouts };
+  }
+
+  var gauge = createGauge({
+    stage:'hgstage', canvas:'hgcanvas', num:'hgnum', pct:'hgpct', svg:'hgco',
+    t1:'hgT1', t2:'hgT2', top:'hgTop', bot:'hgBot'
+  }, P320);
+  // 以下是移植時補的迴圈：原檔另有 PAUSE／REPLAY 按鈕與其他 widget，這裡只驅動環形讀數。
+  // 被 media query 隱藏（寬度 0）時不畫；視窗尺寸變化（含隱藏→顯示）時重新 fit。
+  var hgStage=document.getElementById('hgstage');
+  if(!hgStage) return;
+  function frame(now){
+    if(!t0) t0 = now;
+    if(!paused && !reduced) elapsed = (now - t0)/1000;
+    var t = reduced ? 8 : elapsed;
+    var val = reduced ? 0.49 : valueAt(t);
+    if(hgStage.offsetWidth) gauge.step(t, val);
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', gauge.fit);
+  gauge.fit();
+  requestAnimationFrame(frame);
+})();`;
+
 // 狀態色：暗底專用（原亮底的 #15803D/#CA8A04/#B91C1C 在 #080B10 上對比不足）。
 // 對比與色盲分離已用 poc/verify_gcpwatch_palette.mts 實測；沿用既有原則
 // ——顏色永遠搭配文字標籤（正常／偏高／危險），不用顏色單獨表意。
@@ -157,6 +663,52 @@ const STYLE = `
   .tag{font-family:var(--mono);font-size:10.5px;font-weight:500;letter-spacing:.16em;color:var(--accent);
     border:1px solid rgba(122,165,240,.34);border-radius:3px;padding:4px 9px;white-space:nowrap}
   .sub{max-width:600px}
+  /* 標題列：左＝麵包屑下的標題與說明，右＝環形讀數（純裝飾）。畫面太小（≤900px）直接隱藏。 */
+  .hd-row{display:flex;align-items:center;justify-content:space-between;gap:24px}
+  .hd-main{min-width:0}
+  /* 環形讀數：CSS 數值照抄 poc/hudgauge_preview.html，選擇器加 .hg 範圍與 hg- 前綴；
+     顏色變數收在 .hg 內（本頁 :root 的 --mut／--disp／--mono 與原檔不同）。--hgs＝整體縮放 */
+  .hg{--bg:#05090c;--cy:#3ec4de;--cy2:#8fe4f2;--am:#f08050;--am2:#ff9d6b;--ink:#d7e6ec;--mut:#6a8490;
+    --disp:'Chakra Petch','Noto Sans TC',sans-serif;--mono:'Share Tech Mono','IBM Plex Mono',monospace;
+    --hgs:.355;position:relative;flex:none;width:calc(640px*var(--hgs));height:calc(620px*var(--hgs));
+    overflow:hidden;background:transparent;box-shadow:none}
+  .hg .hg-scan{position:absolute;inset:0;pointer-events:none;z-index:4;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(0,0,0,.28) 0 1px, transparent 1px 3px),
+      repeating-linear-gradient(90deg, rgba(0,0,0,.28) 0 1px, transparent 1px 3px);
+    mix-blend-mode:multiply;opacity:.7;animation:hgScanDrift 9s linear infinite}
+  @keyframes hgScanDrift{to{background-position:0 12px, 12px 0}}
+  .hg .hg-stage{position:relative;width:640px;height:620px;background:var(--bg);
+    box-shadow:inset 0 0 0 1px rgba(62,196,222,.14);overflow:hidden;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(210,235,240,.045) 0 1px, transparent 1px 3px),
+      radial-gradient(70% 60% at 50% 48%, rgba(62,196,222,.05), transparent 70%);
+    transform:scale(var(--hgs));transform-origin:0 0}
+  .hg .hg-stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hg .hg-readout{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    z-index:3;text-align:center;pointer-events:none}
+  .hg .hg-num{font-family:var(--disp);font-weight:700;font-size:68px;line-height:1;
+    color:#e8f4f8;letter-spacing:.02em;
+    text-shadow:0 0 18px rgba(62,196,222,.45), 0 0 2px rgba(255,255,255,.8);
+    font-variant-numeric:tabular-nums}
+  .hg .hg-num.tick{color:#fff;text-shadow:0 0 22px rgba(224,112,72,.7), 0 0 8px #fff}
+  .hg .hg-lab{position:absolute;z-index:3;pointer-events:none;color:var(--cy2);
+    font-family:var(--mono);letter-spacing:.16em;line-height:1.15;white-space:nowrap}
+  .hg .hg-lab i{display:block;font-style:normal;font-size:15px;letter-spacing:.22em;color:var(--mut)}
+  .hg .hg-lab b{font-weight:400;font-size:20px;color:var(--cy2)}
+  .hg .hg-lab.hg-t1,.hg .hg-lab.hg-t2{font-size:26px;letter-spacing:.22em;color:var(--cy2)}
+  .hg .hg-lab.hg-t1{text-align:right}
+  .hg .hg-lab.hg-top{text-align:center}
+  .hg .hg-lab.hg-bot{text-align:center}
+  .hg .hg-lab.hg-bot b{font-size:18px;color:var(--mut)}
+  .hg .hg-co{position:absolute;left:0;top:0;width:640px;height:620px;z-index:5;overflow:visible;
+    pointer-events:none;transform:scale(var(--hgs));transform-origin:0 0}
+  .hg .hg-co .hg-lead{fill:none;stroke:#e8f0f4;stroke-width:1.2;stroke-linecap:butt;stroke-linejoin:miter}
+  .hg .hg-co .hg-tag rect{fill:#e8f0f4;stroke:none}
+  .hg .hg-co .hg-tag text{
+    font-family:var(--mono);font-size:40px;letter-spacing:.04em;
+    fill:#0a1216;text-anchor:start;dominant-baseline:central}
+  @media(max-width:900px){.hg{display:none}}
 
   /* HUD 切角：所有面板共用，取代圓角矩形。--cut 是切掉的直角邊長。 */
   .hud{--cut:10px;position:relative;border-radius:0;
@@ -368,6 +920,7 @@ const STYLE = `
     .led.lv-warn,.led.lv-crit{animation:none}
     .plot .scan{animation:none;opacity:0}
     .hud-runway path{animation:none;fill:transparent}
+    .hg .hg-scan{animation:none}
   }
   @media(max-width:600px){
     .console .sys{border-right:0;padding-right:0;width:100%}
@@ -910,12 +1463,28 @@ export function renderGcpWatch(vm: DashboardVM): string {
   const body = `
     ${FRAME_HTML}
     <div class="crumb"><a href="/">首頁</a> / 營運監控</div>
-    <div class="hd">
-      <h1>營運監控</h1>
-      <span class="tag">${vm.project.toUpperCase()} · ASIA-EAST1</span>
+    <div class="hd-row">
+      <div class="hd-main">
+        <div class="hd">
+          <h1>營運監控</h1>
+          <span class="tag">${vm.project.toUpperCase()} · ASIA-EAST1</span>
+        </div>
+        <p class="sub">Memorystore Redis 與 Cloud SQL 的即時用量。記憶體 80% 起偏高、90% 起危險；
+          Redis 另外判讀「用滿的時候會不會寫不進去」。</p>
+      </div>
+      <div class="hg" aria-hidden="true">
+        <div class="hg-scan"></div>
+        <div class="hg-stage" id="hgstage">
+          <canvas id="hgcanvas"></canvas>
+          <div class="hg-readout"><div class="hg-num" id="hgnum">49</div></div>
+          <div class="hg-lab hg-t1" id="hgT1">T1</div>
+          <div class="hg-lab hg-t2" id="hgT2">T2</div>
+          <div class="hg-lab hg-top" id="hgTop"><i>CONNECTED</i><b id="hgpct">49.0%</b></div>
+          <div class="hg-lab hg-bot" id="hgBot"><i>UPDATE</i><b>ZERO BANK</b></div>
+        </div>
+        <svg class="hg-co" id="hgco" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
     </div>
-    <p class="sub">Memorystore Redis 與 Cloud SQL 的即時用量。記憶體 80% 起偏高、90% 起危險；
-      Redis 另外判讀「用滿的時候會不會寫不進去」。</p>
     <div class="console hud">
       <i class="hk tl"></i><i class="hk tr"></i><i class="hk bl"></i><i class="hk br"></i>
       <div class="sys"><i class="led lv-none" id="sysled"></i>
@@ -964,7 +1533,7 @@ export function renderGcpWatch(vm: DashboardVM): string {
     active: 'gcpwatch',
     body,
     style: STYLE,
-    script: `window.__VM__=${bootstrap};\n${RENDER_JS}`,
+    script: `window.__VM__=${bootstrap};\n${RENDER_JS}\n${GAUGE_JS}`,
     width: '1480px', // 2026-09-02 由 1080 加寬；扣掉外框讓出的左右各 76px ⇒ 內容實際 1328px
   });
 }
