@@ -78,7 +78,7 @@ export interface CampaignSpec {
 
 /** 兩支 campaign。順序有意義：`CAMPAIGNS[0]` 是既有那支，新增的一律往後接。 */
 export const CAMPAIGNS: CampaignSpec[] = [
-  { no: 1, name: '[Coupang] reco 自動投放', groupPrefix: '[Coupang]', dayBudget: 2500 },
+  { no: 1, name: '[Coupang] reco 自動投放', groupPrefix: '[Coupang]', dayBudget: 4170 },
 ];
 
 /**
@@ -105,7 +105,9 @@ export function isRetiredCampaign(no: number): boolean {
  * 全域日預算（台幣）＝**在跑的 campaign 日預算加總**（退役的不算），也就是整體花費的硬上限。
  * 沿革：2026-08-28 由 3000 調降為 2500；2026-09-03 拆兩支先平分 1250、同日改成 1000／1500；
  * 2026-09-07 改回一支 ⇒ 又是 2500（拆兩支那幾天總額也一直是 2500）、同日調高為 3000；
- * **2026-09-10 再調回 2500**（使用者指定）⇒ 20 檔時每檔 250。
+ * 2026-09-10 再調回 2500（20 檔時每檔 250）；
+ * **2026-09-15 調高為 4170**（使用者指定）⇒ 20 檔時每檔 417。使用者每天 14:00 手動關掉最差的 10 檔，
+ *   剩 10 檔 × 417 ＝ 4170 剛好等於日預算 ⇒ group 預算不會讓 campaign 花不完（前提：關掉的不超過在跑數的一半）。
  * ⚠️ 這個值是**推導出來的**，要調預算請改 `CAMPAIGNS[*].dayBudget`，不要在這裡寫死。
  */
 export const DAILY_BUDGET = CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0);
