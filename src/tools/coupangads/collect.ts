@@ -1,4 +1,5 @@
 // 每小時 :30 的成效收集：R 報表（日 × group × 裝置的曝光/點擊/花費）→ coupang_daily_stats。
+// 2026-09-15 起順便把 P 平台花費從 BQ 表鏡像進 coupang_p_daily_stats（pstats.ts，不計費、失敗不影響 R）。
 // ⚠️ 排程對齊 R：**R 報表是全平台每小時批次更新（實測約每小時 :20）**，抓再密也只會拿到同一批數字，
 //    所以 2026-08-27 由每 10 分鐘改成每小時 :30（留 ~10 分鐘餘裕）。
 // 看板改讀這張表＝秒開，也不受 API 保留期與延遲影響。
@@ -33,6 +34,7 @@ import { enumDays } from './stats.js';
 import { getAdvertiserBalance } from '../../core/rixbee_console.js';
 import { reviewConfigured } from './review.js';
 import { saveBalance } from './settings.js';
+import { syncPStats } from './pstats.js';
 
 /** R 帳號型別：10222 實測是 direct（4A）。env 可覆蓋，避免每次跑都花 3 支 probe。 */
 const R_USER_TYPE = (process.env.COUPANG_R_USER_TYPE ?? 'direct') as 'agency' | 'direct' | 'super';
@@ -157,16 +159,30 @@ export async function refreshBalance(): Promise<string> {
   }
 }
 
-export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number; balance: string }> {
+/**
+ * P 平台花費鏡像（讀 BQ 表，不計費）。跟餘額一樣**失敗不影響 R 的收集**，只回字串進結果／log；
+ * 看板繼續用 DB 裡上一次成功的 P 數字。每小時跑一次沒成本，他台北 03:00 重算完、下一個 :30 就會帶進來。
+ */
+export async function refreshPStats(): Promise<string> {
+  try {
+    const r = await syncPStats();
+    return `${r.rows} 列（${r.sd}~${r.ed}，NT$${r.spend}）`;
+  } catch (e: any) {
+    return `失敗：${e?.message ?? e}`;
+  }
+}
+
+export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number; balance: string; p: string }> {
   const now = new Date();
   const ed = twYmd(now);
   const sd = twYmd(new Date(now.getTime() - (BACKFILL_DAYS - 1) * 86400000));
 
   // slot 對映（group → 當下掛的商品）＋順便把 R 的開關/審核狀態同步回 DB
-  const [slots, status, balance] = await Promise.all([
+  const [slots, status, balance, p] = await Promise.all([
     listCoupangSlots(),
     refreshSlotStatus().catch(() => ({ updated: 0, pendingReview: 0 })),
     refreshBalance(),
+    refreshPStats(),
   ]);
 
   // 只打這一支：day × group_id × device_type。實測裝置分項加總與不帶 device 的總數守恆
@@ -187,5 +203,5 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
   await upsertCoupangDailyStats(rows);
   // 先寫再掃：中途掛掉頂多多留一次髒列，下次跑就會清掉（反過來先清後寫會留下空窗）
   const cleared = await clearForeignStatMetrics(planStatOwnership(enumDays(sd, ed), slots));
-  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview, balance };
+  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview, balance, p };
 }

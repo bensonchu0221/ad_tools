@@ -72,3 +72,28 @@ export async function bqQuery(sql: string, opts: { timeoutMs?: number } = {}): P
 export function sqlString(v: string): string {
   return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
+
+/**
+ * 整張表逐頁讀出（tabledata.list）。**這支不計費**——不是 query job，沒有掃描量；
+ * 只適合小表（coupang_report 這種幾百列的報表表），大表請用 bqQuery 帶條件。
+ * `table` 格式 `project.dataset.table`；schema 另打 tables.get（同樣免費）取欄名。
+ */
+export async function bqListTableRows(table: string, opts: { pageSize?: number; maxRows?: number } = {}): Promise<Record<string, string | null>[]> {
+  const [projectId, datasetId, tableId] = table.split('.');
+  if (!projectId || !datasetId || !tableId) throw new Error(`bqListTableRows: 表名格式要是 project.dataset.table：${table}`);
+  const bq = getBq();
+  const meta: any = await bq.tables.get({ projectId, datasetId, tableId });
+  const fields = meta.data.schema?.fields;
+  const maxRows = opts.maxRows ?? 100_000;
+  const out: Record<string, string | null>[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res: any = await bq.tabledata.list({
+      projectId, datasetId, tableId, maxResults: opts.pageSize ?? 5000, pageToken,
+    });
+    out.push(...toObjects(fields, res.data.rows));
+    pageToken = res.data.pageToken ?? undefined;
+    if (out.length > maxRows) throw new Error(`bqListTableRows: ${table} 超過 ${maxRows} 列，這支只給小表用`);
+  } while (pageToken);
+  return out;
+}

@@ -7,7 +7,8 @@ import {
   campaignBudget, campaignNoOf, groupNameOf, type GroupView,
 } from '../src/tools/coupangads/plan.js';
 import { aggregateForBq } from '../src/tools/coupangads/bq.js';
-import { ctrOf, compareByCtr, normDate, enumDays } from '../src/tools/coupangads/stats.js';
+import { ctrOf, compareByCtr, normDate, enumDays, buildDaily } from '../src/tools/coupangads/stats.js';
+import { aggregatePRows, P_SOURCE_TABLE } from '../src/tools/coupangads/pstats.js';
 import {
   rDeviceBucket, twDateFromUtc, attributesToCurrentProduct, attributeRRows, planStatOwnership,
   type SlotMapping,
@@ -490,9 +491,56 @@ console.log('\n[帳戶餘額：取代「兩支 campaign 日預算合計」（202
 
   const html = coupangAdsPage();
   check('畫面不再有「兩支 campaign 日預算合計」', !html.includes('日預算合計'));
-  check('廣告花費那格改顯示帳戶餘額', html.includes("['廣告花費','',money(t.spend),balanceText(data.balance)]"));
-  check('沒查過顯示 — 不顯示 NT$0', html.includes("if(!b) return '帳戶餘額 —'"));
+  check('廣告花費那格仍顯示帳戶餘額', html.includes("balanceText(data.balance)]"));
+  check('沒查過顯示 — 不顯示 NT$0', html.includes("if(!b) return 'R 帳戶餘額 —'"));
   check('附上查到的台北時間', html.includes("timeZone:'Asia/Taipei'") && html.includes("' 更新'"));
+}
+
+console.log('\n[P 平台花費：鏡像 BQ coupang_report，花費 R+P、CTR 只算 R（2026-09-15）]');
+{
+  check('來源是正式表（主管排程真的寫在那），不是 _2', P_SOURCE_TABLE === 'popinpoc1.reporting.coupang_report', P_SOURCE_TABLE);
+  // tabledata.list 回來的值一律是字串（2026-09-14 真實列節錄）
+  const raw = [
+    { date: '2026-09-14', advertiser: '292-462-3142', campaign_id: '1979731969', adgroup_id: '1666036817', device: 'Mobile', domain: 'tsna.com', impressions: '500000', clicks: '60', ctr: '0.00012', spend: '60.0' },
+    { date: '2026-09-14', advertiser: '292-462-3142', campaign_id: '1979731969', adgroup_id: '999', device: 'Mobile', domain: 'tsna.com', impressions: '1000', clicks: '5', ctr: null, spend: '5.5' },
+    { date: '2026-09-14', advertiser: '292-462-3142', campaign_id: '1979731969', adgroup_id: '1666036817', device: 'Desktop', domain: 'pixnet.net', impressions: '300', clicks: '1', ctr: null, spend: '1' },
+    { date: '2026-09-14', advertiser: '292-462-3142', campaign_id: '1979731969', adgroup_id: '1666036817', device: 'Mobile', domain: 'popIn_network', impressions: '475031', clicks: '2566', ctr: null, spend: '2564' },
+    { date: '2026-09-13', advertiser: 'other-adv', campaign_id: '1', adgroup_id: '1', device: 'Mobile', domain: 'tsna.com', impressions: '9', clicks: '9', ctr: null, spend: '999' },
+    { date: null, advertiser: '292-462-3142', campaign_id: '1', adgroup_id: '1', device: 'Mobile', domain: 'tsna.com', impressions: '9', clicks: '9', ctr: null, spend: '999' },
+  ];
+  const agg = aggregatePRows(raw as any);
+  check('popIn_network（我們寫的 R）不算進 P', !agg.some((r) => r.domain === 'popIn_network'));
+  check('別的 advertiser 不算', !agg.some((r) => r.spend === 999));
+  check('日期壞掉的列丟掉', agg.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.dt)));
+  const tsna = agg.find((r) => r.domain === 'tsna.com' && r.device === 'Mobile');
+  check('同 日×domain×裝置 不同 adgroup 要加總、不能覆蓋', tsna?.spend === 65.5 && tsna?.imp === 501000 && tsna?.click === 65, tsna);
+  check('字串值正確轉數字', agg.find((r) => r.domain === 'pixnet.net')?.spend === 1);
+  check('一共 2 列', agg.length === 2, agg);
+  check('空表 → 空陣列（syncPStats 會據此拒絕清空 DB）', aggregatePRows([]).length === 0);
+
+  const R = (dt: string, imp: number, click: number, spend: number, device = 'Mobile') =>
+    ({ dt, productId: '1', groupId: 1, device, imp, click, spend });
+  const Pr = (dt: string, spend: number, domain = 'tsna.com', imp = 1_500_000, click = 150) =>
+    ({ dt, domain, device: 'Mobile', imp, click, spend });
+  const daily = buildDaily('2026-09-12', '2026-09-15',
+    [R('2026-09-13', 400000, 2000, 2000), R('2026-09-13', 100000, 600, 606, 'PC'), R('2026-09-15', 1000, 5, 5), R('2026-09-20', 9, 9, 9)],
+    [Pr('2026-09-12', 100), Pr('2026-09-13', 200), Pr('2026-09-13', 27, 'pixnet.net'), Pr('2026-09-14', 0), Pr('2026-09-30', 9)]);
+  const day = (dt: string) => daily.find((x) => x.date === dt)!;
+  check('每天一列、區間外不進來', daily.length === 4 && daily.map((x) => x.date).join() === '2026-09-12,2026-09-13,2026-09-14,2026-09-15', daily.map((x) => x.date));
+  check('花費合計＝R＋P（跨裝置、跨 domain 都加總）', day('2026-09-13').spend === 2833 && day('2026-09-13').rSpend === 2606 && day('2026-09-13').pSpend === 227, day('2026-09-13'));
+  check('CTR 只算 R（P 的 150 萬曝光不能混進來）', day('2026-09-13').ctr === 2600 / 500000 && day('2026-09-13').imp === 500000, day('2026-09-13').ctr);
+  check('只有 P 的日子：有資料、合計＝P、CTR 是 null', day('2026-09-12').hasData && !day('2026-09-12').hasR && day('2026-09-12').spend === 100 && day('2026-09-12').ctr === null, day('2026-09-12'));
+  check('今天 P 還沒進來 → pSpend 是 null 不是 0', day('2026-09-15').pSpend === null && day('2026-09-15').spend === 5, day('2026-09-15'));
+  check('P 真的是 0 元 → 0 不是 null', day('2026-09-14').pSpend === 0 && day('2026-09-14').hasData, day('2026-09-14'));
+  check('兩邊都沒有的日子 → hasData=false', !buildDaily('2026-09-01', '2026-09-01', [], [])[0].hasData);
+
+  const html = coupangAdsPage();
+  check('KPI 花費標明 R+P、下面拆 R 與 P', html.includes("['廣告花費 · R+P'") && html.includes("'R '+money(t.rSpend)+' ＋ P '+money(t.pSpend)"));
+  check('KPI CTR 標明只算 R', html.includes("['CTR · R'"));
+  check('圖例：R、P 兩段柱＋合計線＋R CTR', ['R 花費', 'P 花費', '花費合計 R+P', 'R CTR（右軸）'].every((t) => html.includes(t)));
+  check('柱子兩段各自配色', html.includes('#2a78d6') && html.includes('#4a3aa7'));
+  check('tooltip 分得出 P 還沒進來', html.includes("row.pSpend==null?'尚無資料'"));
+  check('商品表不動（仍是 R 的曝光／點擊／CTR／花費）', html.includes('data-sort="spend"') && html.includes("p.spend"));
 }
 
 console.log('\n' + (fail === 0 ? '✅ 全部通過' : '❌ 有失敗') + '：' + pass + ' 過 / ' + fail + ' 失敗\n');

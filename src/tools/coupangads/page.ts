@@ -4,9 +4,11 @@
 //    我們的 subId 一筆都收不到，DB 裡從頭到尾都是 0 ⇒ 版面上只是三欄永遠的 0。
 import { sbPage } from '../../core/sbui.js';
 
-// 配色經 dataviz validator 驗過（light/#FFFFFF：CVD ΔE 29.1、normal 40.8、對比 ≥3:1 全 PASS）。
-const C_SPEND = '#FF5436';  // 花費＝Slot Board accent
-const C_CTR = '#0E9F6E';    // CTR＝右側百分比軸
+// 配色經 dataviz validator 驗過（light/#FFFFFF、--pairs all 四色：CVD 最差 ΔE 9.6、normal 最差 16.3、對比 ≥3:1 全 PASS）。
+const C_SPEND = '#FF5436';  // 花費合計線（R+P）＝Slot Board accent
+const C_CTR = '#0E9F6E';    // R CTR＝右側百分比軸
+const C_R = '#2a78d6';      // 堆疊柱：R 花費
+const C_P = '#4a3aa7';      // 堆疊柱：P 花費（Prism，鏡像自 BQ reporting.coupang_report）
 
 const STYLE = `
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:18px 0}
@@ -49,7 +51,7 @@ const STYLE = `
   .btn[disabled]{opacity:.5;cursor:default}
   .btn[aria-disabled="true"]{opacity:.5;pointer-events:none}
   .panel{background:var(--slot);border:1px solid var(--line);border-radius:6px;padding:18px}
-  .lg{display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:8px}
+  .lg{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--mut);margin-bottom:8px}
   .lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
   .plot{position:relative}
   .plot svg{display:block;width:100%}
@@ -133,8 +135,10 @@ const BODY = `
 
     <div class="panel">
       <div class="lg">
-        <span><i style="background:${C_SPEND}"></i>廣告花費（左軸）</span>
-        <span><i style="background:${C_CTR}"></i>CTR（右軸）</span>
+        <span><i style="background:${C_R}"></i>R 花費</span>
+        <span><i style="background:${C_P}"></i>P 花費</span>
+        <span><i style="background:${C_SPEND};height:3px;vertical-align:3px"></i>花費合計 R+P（左軸）</span>
+        <span><i style="background:${C_CTR};height:3px;vertical-align:3px"></i>R CTR（右軸）</span>
         <span class="spacer"></span>
         <span id="chart-note"></span>
       </div>
@@ -176,12 +180,12 @@ const BODY = `
   </div>
 
   <div class="foot" style="margin-top:30px">
-    R 帳戶 10222 ｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新，實測約每小時 :20，所以當天數字會落後一個批次）｜ 下載 CSV 可再切 PC／Mobile／Tablet／Others
+    R 帳戶 10222 ｜ P 花費讀自 BigQuery reporting.coupang_report（主管排程台北 03:00 重算，只到前一天）｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新，實測約每小時 :20，所以當天數字會落後一個批次）｜ 下載 CSV 可再切 PC／Mobile／Tablet／Others
   </div>
 `;
 
 const SCRIPT = `
-const C_SPEND=${JSON.stringify(C_SPEND)}, C_CTR=${JSON.stringify(C_CTR)};
+const C_SPEND=${JSON.stringify(C_SPEND)}, C_CTR=${JSON.stringify(C_CTR)}, C_R=${JSON.stringify(C_R)}, C_P=${JSON.stringify(C_P)};
 let data=null, pfilter='on';
 // 清單排序：預設與後端一致（CTR 由高到低），點表頭可改
 let sortKey='ctr', sortDir='desc';
@@ -193,9 +197,9 @@ const money=(n)=>'NT$'+nf(n,0);
 // R 帳戶餘額（每小時 :30 由 collect 查一次存 DB）；附上查到的台北時間，數字舊不舊一眼看得出來。
 // 從沒查到過顯示「—」，不能顯示 NT$0（會被讀成餘額用完）。
 function balanceText(b){
-  if(!b) return '帳戶餘額 —';
+  if(!b) return 'R 帳戶餘額 —';
   const at=new Date(b.at).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
-  return '帳戶餘額 '+(b.warning?'<b style="color:#c62828">'+money(b.balance)+'（餘額偏低）</b>':money(b.balance))+' · '+esc(at)+' 更新';
+  return 'R 帳戶餘額 '+(b.warning?'<b style="color:#c62828">'+money(b.balance)+'（餘額偏低）</b>':money(b.balance))+' · '+esc(at)+' 更新';
 }
 const pct=(v)=>v==null?'—':(v*100).toFixed(2)+'%';
 
@@ -239,8 +243,9 @@ function render(){
   const t=data.totals;
   $('#kpis').innerHTML=[
     ['投放中商品','hero',data.running+' 檔',(data.pendingReview?('待審 '+data.pendingReview+' · '):'')+'暫停 '+data.paused],
-    ['CTR','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
-    ['廣告花費','',money(t.spend),balanceText(data.balance)],
+    // CTR 只算 R；花費＝R＋P（2026-09-15 使用者指定）
+    ['CTR · R','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
+    ['廣告花費 · R+P','',money(t.spend),'R '+money(t.rSpend)+' ＋ P '+money(t.pSpend)+'<br>'+balanceText(data.balance)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
   setSelectedRange(data.range.sd,data.range.ed);
@@ -249,7 +254,7 @@ function render(){
   fb[0].textContent='投放中 '+data.products.filter(p=>p.active).length;
   fb[1].textContent='已暫停 '+data.products.filter(p=>!p.active).length;
   fb[2].textContent='全部 '+data.products.length;
-  $('#chart-note').textContent=data.range.sd+' ~ '+data.range.ed+' · 整體 CTR '+pct(t.ctr);
+  $('#chart-note').textContent=data.range.sd+' ~ '+data.range.ed+' · R CTR '+pct(t.ctr);
 
   $('#review').innerHTML = data.pendingReview
     ? '<div class="rv">今天換了 <b>'+data.pendingReview+'</b> 檔素材，要到 R 後台審核過才會開始曝光。<a href="https://broadciel.console.rixbeedesk.com/manage-review/creative" target="_blank" rel="noopener">前往審核 ↗</a></div>'
@@ -309,23 +314,30 @@ function statusPill(p){
 
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
 
-// ── 雙軸折線圖：左軸為廣告花費，右軸為 CTR。
+// ── 堆疊柱狀＋雙軸折線（2026-09-15 加 P 平台）：
+//   左軸＝花費。柱子＝R（下）＋P（上）堆疊；橘線＝花費合計 R+P，剛好連著每根柱頂。
+//   右軸＝CTR，**只算 R**（P 曝光大、CTR 約 0.01%，混進去會把整條拉到貼底）。
+//   柱子用 band 座標（每天一格、點在格子中間），折線點也對齊柱子中心。
 function drawCharts(){
   const svg=$('#svg'), host=$('#plot'), tip=$('#tip');
   const d=data.daily;
-  const W=host.clientWidth||720, H=260, L=86, R=58, T=20, B=28;
+  const W=host.clientWidth||720, H=280, L=86, R=58, T=20, B=28;
   svg.setAttribute('viewBox','0 0 '+W+' '+H);
   svg.style.height=H+'px';
   const iw=W-L-R, ih=H-T-B;
+  const n=Math.max(1,d.length);
   const spendMax=d.length?Math.max(...d.map(row=>row.spend||0)):0;
   const ctrVals=d.map(row=>row.ctr).filter(v=>v!=null);
   const ctrMax=ctrVals.length?Math.max(...ctrVals):0;
-  const spendNice=spendMax>0?niceMax(spendMax):4;
+  // 上方留 ~12% 空間給柱頂的合計標籤，否則最高那根的標籤會被切到或壓在折線上
+  const spendNice=spendMax>0?niceMax(spendMax*1.12):4;
   const ctrNice=ctrMax>0?niceMax(ctrMax):0.02;
   const spendStep=spendNice/4, ctrStep=ctrNice/4;
-  const X=i=>L+(d.length<=1?iw/2:iw*i/(d.length-1));
-  const spendY=v=>T+ih-(v/spendNice)*ih;
-  const ctrY=v=>T+ih-(v/ctrNice)*ih;
+  const per=iw/n;
+  const X=i=>L+per*(i+0.5);
+  const base=T+ih;
+  const spendY=v=>base-(v/spendNice)*ih;
+  const ctrY=v=>base-(v/ctrNice)*ih;
   let g='';
   for(let i=0;i<=4;i++){
     const spendValue=spendNice*i/4, ctrValue=ctrNice*i/4, y=T+ih-ih*i/4;
@@ -333,60 +345,87 @@ function drawCharts(){
        '<text x="'+(L-8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="end" font-size="10.5" fill="'+C_SPEND+'">TWD $'+moneyAxis(spendValue,spendStep)+'</text>'+
        '<text x="'+(W-R+8)+'" y="'+(y+4).toFixed(1)+'" text-anchor="start" font-size="10.5" fill="'+C_CTR+'">'+(ctrValue*100).toFixed(ctrStep*100<1?2:1)+'%</text>';
   }
-  // X 軸：每天都畫刻度；文字擠不下就退成「只有日」，再擠不下才隔天標（不硬塞成一團黑）
-  const per=d.length>1?iw/(d.length-1):iw;
+  // X 軸：文字擠不下就退成「只有日」，再擠不下才隔天標（不硬塞成一團黑）
   const mode=per>=38?'md':(per>=18?'d':'thin');
   const step=mode==='thin'?Math.ceil(38/Math.max(1,per)):1;
+  // 只標日的時候，每月一號與第一格補上月份，才知道跨到哪個月；
+  // 「MM-DD」比「DD」寬一倍，在 'd' 模式下會跟左右兩格的日撞在一起 → 讓開左右鄰居
+  const wide=d.map((row,i)=>mode!=='md'&&(row.date.slice(8)==='01'||i===0));
   d.forEach((row,i)=>{
     const x=X(i);
-    g+='<line x1="'+x.toFixed(1)+'" y1="'+(T+ih)+'" x2="'+x.toFixed(1)+'" y2="'+(T+ih+4)+'" stroke="var(--line)" stroke-width="1"/>';
     const isEdge=i===0||i===d.length-1;
     if(!isEdge&&mode==='thin'&&i%step!==0) return;
-    // 只標日的時候，每月一號與第一格補上月份，才知道跨到哪個月
+    if(mode==='d'&&!wide[i]&&(wide[i-1]||wide[i+1])) return;
     const dd=row.date.slice(8), mm=row.date.slice(5,7);
-    const label=(mode==='md'||dd==='01'||i===0)?(mm+'-'+dd):dd;
+    const label=(mode==='md'||wide[i])?(mm+'-'+dd):dd;
     g+='<text x="'+x.toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10.5" fill="var(--mut)">'+label+'</text>';
   });
 
-  // 每個點都標上數值：同一天兩個點「上面那個的標籤放上方、下面那個放下方」，
-  // 兩個標籤中間永遠隔著兩個點。不能寫死花費在上／CTR 在下——兩條線交叉後
-  // CTR 跑到花費上面，CTR 往下標、花費往上標就會撞在兩點之間（09-13 那種情況）。
-  // 天數多的時候字級自動縮小，並用底色描邊（paint-order）當外框，密集時仍讀得出來。
-  let lab='';
-  const labFont=per>=34?10:(per>=22?9:8);
-  const LAB_TOP=T+9, LAB_BOTTOM=T+ih+11, LAB_GAP=labFont+3;
+  const labFont=per>=40?10:(per>=26?9:8);
+  const LAB_TOP=T+9, LAB_BOTTOM=T+ih+11;
   const clampLab=(y)=>Math.max(LAB_TOP,Math.min(LAB_BOTTOM,y));
-  const labelText=(x,y,color,text)=>'<text x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="middle" font-size="'+labFont+'"'+
+  // 底色描邊（paint-order）當外框：標籤壓在柱子、折線上仍讀得出來
+  const haloText=(x,y,color,text)=>'<text x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="middle" font-size="'+labFont+'"'+
     ' fill="'+color+'" stroke="var(--slot)" stroke-width="2.6" paint-order="stroke" stroke-linejoin="round">'+text+'</text>';
+  const inText=(x,y,text)=>'<text x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" text-anchor="middle" font-size="'+labFont+'" fill="#fff">'+text+'</text>';
   const fmtSpend=(v)=>nf(v,v<100?1:0), fmtCtr=(v)=>(v*100).toFixed(2)+'%';
+
+  // ① 柱子：R 在下、P 在上。兩段之間留 2px 底色縫；只有最上面那段圓頂。
+  const barW=Math.max(3,Math.min(44,per*0.62));
+  const topRound=(x,y,w,h,r)=>{
+    r=Math.max(0,Math.min(r,w/2,h));
+    return 'M'+x.toFixed(1)+' '+(y+h).toFixed(1)+' V'+(y+r).toFixed(1)+' Q'+x.toFixed(1)+' '+y.toFixed(1)+' '+(x+r).toFixed(1)+' '+y.toFixed(1)+
+      ' H'+(x+w-r).toFixed(1)+' Q'+(x+w).toFixed(1)+' '+y.toFixed(1)+' '+(x+w).toFixed(1)+' '+(y+r).toFixed(1)+' V'+(y+h).toFixed(1)+' Z';
+  };
+  let lab='';
   d.forEach((row,i)=>{
-    const x=X(i);
-    const sv=row.hasData?row.spend:null, cv=row.hasData?row.ctr:null;
-    const items=[];
-    if(sv!=null) items.push({y:spendY(sv),color:C_SPEND,text:fmtSpend(sv)});
-    if(cv!=null) items.push({y:ctrY(cv),color:C_CTR,text:fmtCtr(cv)});
-    if(!items.length) return;
-    if(items.length===1){
-      // 只有一條線有值：沿用原本慣例（花費上方、CTR 下方）
-      const it=items[0], above=it.color===C_SPEND;
-      lab+=labelText(x,clampLab(it.y+(above?-10:16)),it.color,it.text);
-      return;
+    if(!row.hasData) return;
+    const x=X(i), x0=x-barW/2;
+    const rv=row.rSpend||0, pv=row.pSpend||0;
+    const yR=spendY(rv), yTop=spendY(rv+pv);
+    const hasRBar=rv>0, hasPBar=pv>0;
+    const gap=(hasRBar&&hasPBar)?1:0;
+    if(hasRBar){
+      const y=yR+gap, h=Math.max(1,base-y);
+      g+='<path d="'+topRound(x0,y,barW,h,hasPBar?0:3)+'" fill="'+C_R+'"/>';
     }
-    // y 越小越上面；等高時花費算上面
-    const [up,low]=items[1].y<items[0].y?[items[1],items[0]]:items;
-    let upY=clampLab(up.y-10), lowY=clampLab(low.y+16);
-    // 兩點都貼近上緣／下緣被夾住時，標籤仍可能疊在一起 → 先把下面的往下推，推不動再把上面的往上推
-    if(lowY-upY<LAB_GAP) lowY=Math.min(LAB_BOTTOM,upY+LAB_GAP);
-    if(lowY-upY<LAB_GAP) upY=Math.max(LAB_TOP,lowY-LAB_GAP);
-    lab+=labelText(x,upY,up.color,up.text)+labelText(x,lowY,low.color,low.text);
+    if(hasPBar){
+      // P 常常只有總高的 5%：保底 1.5px 看得到，不誇大
+      const h=Math.max(1.5,yR-yTop-gap);
+      g+='<path d="'+topRound(x0,yR-gap-h,barW,h,3)+'" fill="'+C_P+'"/>';
+    }
+
+    // ② 標籤：各段數字放在該段正中間（P 再薄也放它自己的中間，使用者指定），
+    //    橘線合計標在柱頂上方；只有一段時合計＝那段的數字，不重複標。
+    const boxes=[];   // 這一欄已佔用的標籤 y 範圍，給 CTR 標籤避讓
+    const put=(y)=>{ boxes.push([y-labFont+1,y+2]); return y; };
+    if(hasRBar){
+      const cy=(yR+base)/2+labFont*0.35, text=fmtSpend(rv);
+      // 柱內白字只在「字塞得進柱子」時用；天數多柱子變窄，白字超出柱外會在白底上消失 → 改描邊深色字
+      const fits=base-yR>=labFont+4 && text.length*labFont*0.55<=barW-4;
+      lab+=fits?inText(x,put(cy),text):haloText(x,put(clampLab(cy)),'var(--ink)',text);
+    }
+    if(hasPBar){
+      const cy=(yR+yTop)/2+labFont*0.35;
+      lab+=haloText(x,put(clampLab(cy)),C_P,fmtSpend(pv));
+    }
+    if(hasRBar&&hasPBar){
+      lab+=haloText(x,put(clampLab(yTop-12)),C_SPEND,fmtSpend(row.spend));
+    }
+    if(row.ctr!=null){
+      const cyPt=ctrY(row.ctr);
+      const hit=(y)=>boxes.some(([a,b])=>y-labFont+1<b&&y+2>a);
+      const cands=[cyPt-8,cyPt+labFont+6,cyPt-8-labFont-2,cyPt+2*labFont+8].map(clampLab);
+      const y=cands.find(c=>!hit(c))??cands[0];
+      lab+=haloText(x,y,C_CTR,fmtCtr(row.ctr));
+    }
   });
 
-  // 兩種斷點都要保留，不能畫成 0：
-  //  ① 那天根本沒資料（hasData=false，工具還沒開始投）→ 兩條線一起斷，起點才會一致
-  //  ② 有資料但無曝光 → CTR 是 null（算不出來），花費照畫
+  // ③ 折線。兩種斷點都要保留，不能畫成 0：
+  //  ① 那天兩平台都沒資料（hasData=false）→ 花費線斷
+  //  ② R 沒資料或無曝光 → CTR 是 null（算不出來），CTR 線斷
   const line=(key,color,yOf)=>{
-    // 先切成一段一段連續的點，再各自畫：**只有單一點的段要畫成圓點**，
-    // 不然 path 只有一個 M 指令、SVG 什麼都不會畫 → 那天的數字在圖上直接消失。
+    // 只有單一點的段要畫成圓點，不然 path 只有一個 M 指令、SVG 什麼都不會畫
     const segs=[]; let cur=[];
     d.forEach((row,i)=>{
       const v=row.hasData?row[key]:null;
@@ -406,21 +445,23 @@ function drawCharts(){
   };
   line('spend',C_SPEND,spendY);
   line('ctr',C_CTR,ctrY);
-  // 標籤最後才疊上去，才不會被後畫的折線蓋掉
+  // 標籤最後才疊上去，才不會被後畫的柱子／折線蓋掉
   g+=lab;
   if(!d.length||(spendMax<=0&&!ctrVals.length)) g+='<text x="'+(L+iw/2)+'" y="'+(T+ih/2)+'" text-anchor="middle" font-size="12.5" fill="var(--mut)">這段期間尚無花費與 CTR 數據</text>';
-  g+='<line class="cross" x1="0" y1="'+T+'" x2="0" y2="'+(T+ih)+'" stroke="var(--ink)" stroke-width="1" opacity="0"/>';
+  g+='<rect class="cross" x="0" y="'+T+'" width="'+per.toFixed(1)+'" height="'+ih+'" fill="var(--ink)" opacity="0"/>';
   svg.innerHTML=g;
 
   const cross=svg.querySelector('.cross');
   svg.onmousemove=(e)=>{
     const rect=svg.getBoundingClientRect();
-    let i=Math.round((e.clientX-rect.left-L)/(iw/Math.max(1,d.length-1)));
+    const sx=(e.clientX-rect.left)*(W/Math.max(1,rect.width));
+    let i=Math.floor((sx-L)/per);
     i=Math.max(0,Math.min(d.length-1,i));
     const row=d[i]; if(!row) return;
-    cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity','.25');
+    cross.setAttribute('x',(L+per*i).toFixed(1)); cross.setAttribute('opacity','.06');
     const rows=row.hasData
-      ?[['廣告花費',money(row.spend)],['CTR',pct(row.ctr)],['點擊',nf(row.click)],['曝光',nf(row.imp)]]
+      ?[['花費合計',money(row.spend)],['　R 花費',row.hasR?money(row.rSpend):'—'],['　P 花費',row.pSpend==null?'尚無資料':money(row.pSpend)],
+        ['R CTR',pct(row.ctr)],['R 點擊',nf(row.click)],['R 曝光',nf(row.imp)]]
       :[['—','這天尚未投放']];
     tip.innerHTML='<b>'+row.date+'</b>'+rows.map(([k,v])=>'<div class="r"><span>'+k+'</span><span>'+v+'</span></div>').join('');
     tip.style.opacity='1';

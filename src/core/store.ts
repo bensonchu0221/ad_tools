@@ -1731,6 +1731,21 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
       updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) DEFAULT CHARSET=utf8mb4
   `);
+  // 2026-09-15：P 平台（Prism）花費，鏡像自主管排程 query 寫進 BQ `reporting.coupang_report` 的列
+  // （domain ≠ popIn_network 那些）。看板把它跟 R 疊成堆疊柱狀圖、KPI 花費加總。
+  // 只存到 日×domain×裝置；來源每天整表重算，這裡每次也按日期區間整段取代（見 replaceCoupangPDailyStats）。
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_p_daily_stats (
+      dt        DATE          NOT NULL,
+      domain    VARCHAR(128)  NOT NULL,
+      device    VARCHAR(16)   NOT NULL COMMENT 'Desktop/Mobile/Tablet（來源 query 的 user_agent 分類）',
+      imp       BIGINT        NOT NULL DEFAULT 0,
+      click     BIGINT        NOT NULL DEFAULT 0,
+      spend     DECIMAL(16,4) NOT NULL DEFAULT 0,
+      synced_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (dt, domain, device)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
   if (!(await hasColumn('coupang_sync_runs', 'reactivated'))) {
     await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reactivated INT NOT NULL DEFAULT 0
                    COMMENT '重啟舊 group 的檔數（舊制的 replaced 欄留著給歷史紀錄）'`);
@@ -1928,6 +1943,53 @@ export async function listCoupangDailyStats(sd: string, ed: string): Promise<Cou
     dt: String(r.dt),
     productId: String(r.product_id), device: String(r.device),
     groupId: num(r.group_id), cpgId: num(r.cpg_id),
+    imp: Number(r.imp), click: Number(r.click), spend: Number(r.spend),
+  }));
+}
+
+/** P 平台每日成效一列＝日期 × domain × 裝置（來源：BQ reporting.coupang_report）。 */
+export interface CoupangPDailyStatRow {
+  dt: string; domain: string; device: string;
+  imp: number; click: number; spend: number;
+}
+
+/**
+ * 把 [sd, ed] 這段的 P 列整段取代（同一個 transaction 先刪後寫）。
+ * 來源是每天整表重算的 WRITE_TRUNCATE 表：某天某個 domain／裝置消失時，upsert 會留下舊列，
+ * 所以要按區間整段換掉。呼叫端保證 rows 非空才會進來（空的就是來源讀失敗，不能把我們的也清掉）。
+ */
+export async function replaceCoupangPDailyStats(rows: CoupangPDailyStatRow[], sd: string, ed: string): Promise<void> {
+  if (!rows.length) throw new Error('replaceCoupangPDailyStats: 沒有資料列，拒絕清空');
+  const p = await coupangPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(`DELETE FROM coupang_p_daily_stats WHERE dt BETWEEN ? AND ?`, [sd, ed]);
+    for (let i = 0; i < rows.length; i += 500) {
+      const chunk = rows.slice(i, i + 500);
+      await conn.query(
+        `INSERT INTO coupang_p_daily_stats (dt, domain, device, imp, click, spend) VALUES ?`,
+        [chunk.map((r) => [r.dt, r.domain, r.device, r.imp, r.click, r.spend])]
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function listCoupangPDailyStats(sd: string, ed: string): Promise<CoupangPDailyStatRow[]> {
+  const p = await coupangPool();
+  // dt 讓 MySQL 直接格式化（同 listCoupangDailyStats 的時區坑）
+  const [rows] = await p.query(
+    `SELECT DATE_FORMAT(dt, '%Y-%m-%d') AS dt, domain, device, imp, click, spend
+       FROM coupang_p_daily_stats WHERE dt BETWEEN ? AND ? ORDER BY dt, domain, device`, [sd, ed]
+  );
+  return (rows as any[]).map((r) => ({
+    dt: String(r.dt), domain: String(r.domain), device: String(r.device),
     imp: Number(r.imp), click: Number(r.click), spend: Number(r.spend),
   }));
 }

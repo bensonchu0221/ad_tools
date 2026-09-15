@@ -5,17 +5,27 @@
 // 好處是秒開、不受 Coupang 報表 T+1 延遲與 API 保留期影響；代價是資料延遲——但主要延遲來自 R
 // 自己（全平台每小時批次更新，實測約 :20），抓再密也拿不到更新的數字。
 import {
-  listCoupangDailyStats, listCoupangSlots, listCoupangProducts,
+  listCoupangDailyStats, listCoupangPDailyStats, listCoupangSlots, listCoupangProducts,
+  type CoupangDailyStatRow, type CoupangPDailyStatRow,
 } from '../../core/store.js';
 import { PENDING_REVIEW } from './sync.js';
 import { readBalance, type StoredBalance } from './settings.js';
 
+// ⚠️ 2026-09-15 加 P 平台（Prism）花費：**只有花費是 R+P，曝光／點擊／CTR 一律只算 R**（使用者指定）。
+//    P 一天 150 萬曝光、CTR 約 0.01%，混進去整體 CTR 會從 0.5% 掉到 0.13%，看起來像 R 變差。
 export interface DailyRow {
   date: string;
-  /** 這天在 coupang_daily_stats 有沒有列。沒有＝那天根本還沒開始投，
+  /** 這天 R 或 P 任一邊有列。兩邊都沒有＝那天根本還沒開始投，
    *  跟「有投但花 0 元」是兩回事——圖表要斷線，不能畫成一條貼底的 0 元線。 */
   hasData: boolean;
+  /** 這天 coupang_daily_stats（R）有沒有列。 */
+  hasR: boolean;
+  /** 花費合計＝R＋P（折線圖那條線、KPI 花費都用這個）。 */
   spend: number;
+  rSpend: number;
+  /** P 花費；這天 P 沒有列（尚未更新或還沒開始）＝null，不是 0。 */
+  pSpend: number | null;
+  /** 以下只算 R。 */
   imp: number;
   click: number;
   ctr: number | null;
@@ -43,7 +53,8 @@ export interface StatsResult {
   running: number;
   pendingReview: number;
   paused: number;
-  totals: { spend: number; imp: number; click: number; ctr: number | null };
+  /** spend＝R＋P；rSpend／pSpend 是拆分；imp／click／ctr 只算 R。 */
+  totals: { spend: number; rSpend: number; pSpend: number; imp: number; click: number; ctr: number | null };
   /** R 帳戶餘額（每小時 :30 collect 查一次）；從沒查到過＝null */
   balance: StoredBalance | null;
   daily: DailyRow[];
@@ -85,12 +96,42 @@ export function compareByCtr(a: { ctr: number | null; spend: number; imp: number
   return (b.ctr ?? -1) - (a.ctr ?? -1) || b.spend - a.spend || b.imp - a.imp;
 }
 
+/**
+ * 每日列：R（日×商品×裝置×group）與 P（日×domain×裝置）都加總到「日」。純函式。
+ * 花費＝R＋P；曝光／點擊／CTR 只算 R。區間外的列忽略。
+ */
+export function buildDaily(sd: string, ed: string, rStats: CoupangDailyStatRow[], pStats: CoupangPDailyStatRow[]): DailyRow[] {
+  const dayMap = new Map<string, DailyRow>();
+  for (const d of enumDays(sd, ed)) {
+    dayMap.set(d, { date: d, hasData: false, hasR: false, spend: 0, rSpend: 0, pSpend: null, imp: 0, click: 0, ctr: null });
+  }
+  // 一列＝日 × 商品 × 裝置；看板不分裝置，直接加總掉
+  for (const r of rStats) {
+    const d = dayMap.get(r.dt);
+    if (!d) continue;
+    d.hasR = true;
+    d.imp += r.imp; d.click += r.click; d.rSpend += r.spend;
+  }
+  for (const r of pStats) {
+    const d = dayMap.get(r.dt);
+    if (!d) continue;
+    d.pSpend = (d.pSpend ?? 0) + r.spend;
+  }
+  const daily = [...dayMap.values()].sort((a, b) => a.date.localeCompare(b.date));
+  for (const d of daily) {
+    d.hasData = d.hasR || d.pSpend != null;
+    d.spend = d.rSpend + (d.pSpend ?? 0);
+    d.ctr = ctrOf(d.imp, d.click);
+  }
+  return daily;
+}
+
 export async function buildStats(days = 7, range?: { sd: string; ed: string }): Promise<StatsResult> {
   const { sd, ed } = range ?? rangeOf(days);
   const warnings: string[] = [];
 
-  const [stats, slots, balance] = await Promise.all([
-    listCoupangDailyStats(sd, ed), listCoupangSlots(), readBalance(),
+  const [stats, pStats, slots, balance] = await Promise.all([
+    listCoupangDailyStats(sd, ed), listCoupangPDailyStats(sd, ed), listCoupangSlots(), readBalance(),
   ]);
 
   // 商品資料：先用 slot 上的（就是廣告上真正在跑的文案），沒有的再查商品表（已下架但期間有數據者）
@@ -107,10 +148,6 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const allIds = [...new Set([...stats.map((r) => r.productId), ...slots.map((s) => s.productId).filter(Boolean) as string[]])];
   const meta = allIds.length ? await listCoupangProducts(allIds) : new Map();
 
-  const dayMap = new Map<string, DailyRow>();
-  for (const d of enumDays(sd, ed)) {
-    dayMap.set(d, { date: d, hasData: false, spend: 0, imp: 0, click: 0, ctr: null });
-  }
   const prodMap = new Map<string, ProductRow>();
   const prod = (pid: string): ProductRow => {
     if (!prodMap.has(pid)) {
@@ -143,19 +180,13 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     if (s.productId) prod(s.productId);
   }
 
-  // 一列＝日 × 商品 × 裝置；看板兩個維度都不分裝置，所以這裡直接把裝置加總掉
+  // 商品表只有 R（P 沒有商品維度）；看板不分裝置，直接加總掉
   for (const r of stats) {
-    const d = dayMap.get(r.dt);
-    if (d) {
-      d.hasData = true;
-      d.imp += r.imp; d.click += r.click; d.spend += r.spend;
-    }
     const p = prod(r.productId);
     p.imp += r.imp; p.click += r.click; p.spend += r.spend;
   }
 
-  const daily = [...dayMap.values()].sort((a, b) => a.date.localeCompare(b.date));
-  for (const d of daily) d.ctr = ctrOf(d.imp, d.click);
+  const daily = buildDaily(sd, ed, stats, pStats);
 
   const products = [...prodMap.values()];
   for (const p of products) p.ctr = ctrOf(p.imp, p.click);
@@ -167,7 +198,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const running = products.filter((p) => p.active).length;
   const pendingReview = products.filter((p) => p.pendingReview).length;
 
-  if (!stats.length) warnings.push('這段期間還沒有收集到成效資料（收集器每小時 :30 跑一次）');
+  if (!stats.length && !pStats.length) warnings.push('這段期間還沒有收集到成效資料（收集器每小時 :30 跑一次）');
 
   return {
     range: { sd, ed },
@@ -175,7 +206,8 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     pendingReview,
     paused: products.filter((p) => !p.active).length,
     totals: {
-      spend, imp: sum((d) => d.imp), click: sum((d) => d.click),
+      spend, rSpend: sum((d) => d.rSpend), pSpend: sum((d) => d.pSpend ?? 0),
+      imp: sum((d) => d.imp), click: sum((d) => d.click),
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
     },
     // 2026-09-14 取代原本「兩支 campaign 日預算合計」（2026-09-07 起只剩一支 campaign，那句已失真）
