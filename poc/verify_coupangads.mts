@@ -540,6 +540,9 @@ console.log('\n[P 平台花費：鏡像 BQ coupang_report，花費 R+P、CTR 只
   check('圖例：R、P 兩段柱＋合計線＋R CTR', ['R 花費', 'P 花費', '花費合計 R+P', 'R CTR（右軸）'].every((t) => html.includes(t)));
   check('柱子兩段各自配色', html.includes('#2a78d6') && html.includes('#4a3aa7'));
   check('tooltip 分得出 P 還沒進來', html.includes("row.pSpend==null?'尚無資料'"));
+  // 2026-09-15：只有一段（今天 P 還沒進來）時原本省略合計，橘色數字整個不見 → 一律標
+  check('橘色合計不管幾段都標（不能包在 hasRBar&&hasPBar 裡）', html.includes("    }\n    lab+=haloText(x,put(clampLab(yTop-12)),C_SPEND,fmtSpend(row.spend));") && !html.includes('if(hasRBar&&hasPBar){'));
+  check('CTR 標籤全部撞到時有退路（放到這一欄最上面）', html.includes('Math.min(...boxes.map(([a])=>a))'));
   check('商品表不動（仍是 R 的曝光／點擊／CTR／花費）', html.includes('data-sort="spend"') && html.includes("p.spend"));
 }
 

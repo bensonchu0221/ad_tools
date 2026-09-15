@@ -395,10 +395,14 @@ function drawCharts(){
       g+='<path d="'+topRound(x0,yR-gap-h,barW,h,3)+'" fill="'+C_P+'"/>';
     }
 
-    // ② 標籤：各段數字放在該段正中間（P 再薄也放它自己的中間，使用者指定），
-    //    橘線合計標在柱頂上方；只有一段時合計＝那段的數字，不重複標。
-    const boxes=[];   // 這一欄已佔用的標籤 y 範圍，給 CTR 標籤避讓
-    const put=(y)=>{ boxes.push([y-labFont+1,y+2]); return y; };
+    // ② 標籤規則（同一欄內）：
+    //    固定位置：R、P 數字放各自那段正中間（P 再薄也放，使用者指定）；
+    //              橘色合計**只要有資料就標**、固定在柱頂上方（2026-09-15 前只有一段時省略，
+    //              今天 P 還沒進來那根就看不到合計，使用者要求一律顯示）。
+    //    唯一會動的是綠色 CTR：依序試「點上方 → 點下方 → 再往上 → 再往下」，
+    //    全部撞到就放到這一欄所有標籤的最上面。
+    const boxes=[];   // 這一欄已佔用的標籤 y 範圍（含 2px 間距），給 CTR 標籤避讓
+    const put=(y)=>{ boxes.push([y-labFont-1,y+4]); return y; };
     if(hasRBar){
       const cy=(yR+base)/2+labFont*0.35, text=fmtSpend(rv);
       // 柱內白字只在「字塞得進柱子」時用；天數多柱子變窄，白字超出柱外會在白底上消失 → 改描邊深色字
@@ -409,14 +413,18 @@ function drawCharts(){
       const cy=(yR+yTop)/2+labFont*0.35;
       lab+=haloText(x,put(clampLab(cy)),C_P,fmtSpend(pv));
     }
-    if(hasRBar&&hasPBar){
-      lab+=haloText(x,put(clampLab(yTop-12)),C_SPEND,fmtSpend(row.spend));
-    }
+    lab+=haloText(x,put(clampLab(yTop-12)),C_SPEND,fmtSpend(row.spend));
     if(row.ctr!=null){
       const cyPt=ctrY(row.ctr);
       const hit=(y)=>boxes.some(([a,b])=>y-labFont+1<b&&y+2>a);
       const cands=[cyPt-8,cyPt+labFont+6,cyPt-8-labFont-2,cyPt+2*labFont+8].map(clampLab);
-      const y=cands.find(c=>!hit(c))??cands[0];
+      let y=cands.find(c=>!hit(c));
+      if(y==null){
+        const top=Math.min(...boxes.map(([a])=>a));
+        y=top-3;
+        // 頂到圖表上緣放不下 → 改放這一欄所有標籤的最下面
+        if(y<LAB_TOP||hit(y)) y=clampLab(Math.max(...boxes.map(([,b])=>b))+labFont);
+      }
       lab+=haloText(x,y,C_CTR,fmtCtr(row.ctr));
     }
   });
