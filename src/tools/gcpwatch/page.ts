@@ -543,7 +543,9 @@ const RENDER_JS = `
 
   // sparkline：0~100% 固定刻度（斜率誠實）＋ 掃描光帶 ＋ 游標十字與提示
   function spark(card){
-    var box=el('div','spark hud');
+    // 切角（.hud 的 clip-path）只套在繪圖區：套在整個 .spark 的話，貼齊左右邊的標頭與刻度文字
+    // 四個角會各被切掉 10px（「MEMORY」「+42.8pt」「-24H」「NOW 16:47」的頭尾字缺角）。
+    var box=el('div','spark');
     var head=el('div','spark-head');
     head.appendChild(el('span',null,'MEMORY · 24H'));
     head.appendChild(el('span',null,card.trend||'24h —'));
@@ -578,7 +580,7 @@ const RENDER_JS = `
       'vector-effect':'non-scaling-stroke',opacity:0});
     svg.appendChild(cross);
 
-    var plot=el('div','plot '+lvClass(card.level));
+    var plot=el('div','plot hud '+lvClass(card.level));
     plot.appendChild(svg);
     plot.appendChild(el('div','scan'));
     var pts=card.points||[];
