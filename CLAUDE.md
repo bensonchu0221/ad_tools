@@ -100,6 +100,13 @@ popin 內部工具集（取代舊 dctool）。
   - **參考圖有的斜紋帶（y 61..67）刻意不用**——不承載資訊只增雜訊；**斜紋帶（y 61..67、高 7、左自 x=98 起、中央留空 220、-45° pitch 10 線寬 4）**：純裝飾不承載資料。**⚠️ 必須放在 `.fxframe` 之外的 `.fxhatch` 容器**——`.fxframe` 那層 11px 的輝光 drop-shadow 會讓每一條斜紋各自暈開、糊成一片色帶；斜紋自己只給 3px 淡輝光。顏色用 `color-mix(in srgb,var(--fx) 52%,transparent)` 綁在 `--fx` 上，不另外寫死色碼。（2026-09-02 曾一度依使用者「關斜紋帶」的指示不做，同日改回要做。）
   - **顏色與輝光＝Memorystore Redis 資源卡的 HUD 同一組**（`--fx:#01D7EB`＋`drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))`，與 `.rcard{--hud}`／`.hud-svg{filter}` 逐字相同）——2026-09-02 先做過鋼藍 `#7AA5F0` 版，使用者要求改成跟資源卡一致，避免同一頁出現兩套 HUD 語言。poc 有斷言把兩者綁在一起（色碼、以及那串 filter 在頁面出現剛好 2 次），改一邊沒改另一邊會被抓到。獨立試作稿留在 `poc/hudframe_preview.html`（含青/鋼藍、斜紋開關、縮放三組切換，可直接 open 調參）。
   - **內容寬 1080→1480**（`sbPage` 的 `width`）；`.wrap` 左右各讓 `--fxk`×76px 給外框。`.crumb` 上留 100px、`footer` 下留 105px（要讓開橫帶 43 **與斜紋帶 61..68 兩層**）。**實際數字隨 `--fxk` 縮放**：.75 時左右各 57px ⇒ 內容 1366px。`.note-cost` 加 `max-width:1040px`，否則加寬後那段說明會拉成超長行。
+- **資源卡外框（2026-09-15，`page.ts` 的 `mountHud`／`drawHud`＋`.rcard .hud-*` CSS）**：取代原本手刻 Demo 2 SVG（viewBox 480×287＋`preserveAspectRatio="none"` 拉滿卡片，卡片比例一變斜角就歪）。Redis 3 張＋Cloud SQL 2 張共用 `cardNode()`，**五張一起換**（使用者指定，避免同頁兩套 HUD 語言）。幾何取自另一張 sci-fi 參考圖（原圖 1200×642，逐像素量測），前端數字單位＝原圖 px、乘 `HUD_K=0.45` 換成實際 px（粗邊約 6.75px；demo 用 0.6 放到資料密集的卡片上太重）。本機試作稿與逐步修正紀錄在 popIn_Audience_Center repo `scratch/fui_hud_panel_20260915/index.html`（Web Component 版）。
+  - **只有直線段伸縮**：輪廓 10 點都以最近的邊為錨點（左上/右上/左下單段 45° 斜角、右下「斜→平台→斜」雙段斜角），ResizeObserver 依卡片實際寬高重算路徑。卡片每 60 秒整批重建，`fill()` 清空前先 `unobserve` 舊卡片（否則被移除的節點會一直留在觀察清單）。
+  - **⚠️ 粗邊＝輪廓整段上下平移，不是沿法線外推**：參考圖斜角段的垂直厚度（~18）與直線段相同、斷點是**垂直切口**。沿法線推的話斜角段會變粗、兩端切口跟斜邊垂直＝畫面上看起來是 45° 斜切（使用者 2026-09-15 抓到）。
+  - **⚠️ 上緣凸片必須併在上粗邊底緣裡（同一個多邊形）**：分開疊一個梯形的話，兩塊繪製方向相反，重疊帶會被 SVG `nonzero` 規則挖空＝交界一條暗縫，看起來像壓在外框上的另一塊。
+  - **兩層 SVG**：`.hud-bg`（深青漸層＋很淡的網格，`color-mix` 綁 `--hud`）不發光；`.hud-svg`（輪廓細線、括號線、粗邊、刻痕、跑道燈）才掛那串 3px/11px drop-shadow。底色若放進發光層，整塊面板剪影都會暈光。filter 字串在頁面仍剛好 2 次（`.fxframe`＋`.rcard .hud-svg`）。
+  - **跑道燈＝外框右側 6 格斜紋**（原 8 格跑道燈的位置與動畫 `runwayLight` 沿用），置中在右邊直線段、段太短就隱藏。外框固定青色，warn/crit 不變色（狀態交給燈號＋文字）。padding 讓開外框：桌機 `30px 44px 40px 32px`、≤600px `28px 30px 38px 28px`（下方要讓開右下平台）。
+  - 示波器標頭「MEMORY」「+42.8pt」左右邊緣被 `.spark.hud` 的 clip-path 切角吃掉一點——**改外框之前就存在**（2026-09-15 用舊版截圖比對確認），不是這次造成的。
 - 驗證 `poc/verify_gcpwatch.mts`：148 項純函式（門檻邊界／格式化／sparkline 幾何／無 TTL 佔比／風險判讀／VM／KPI／空快照／頁面字串契約含 GCP 資源改名、fresh=1、資源卡不鎖 HUD 比例與字級下限）＋ `REAL=1` 真 API 27 項（三台 Redis／兩台 SQL 欄位齊全、144 點趨勢）。已做 17 個變異測試（crit 門檻、sparkline 夾制、無 TTL 門檻、trendPt 方向；外框：直線段改等分 flex、斜角零件加 preserveAspectRatio=none、拿掉側軌粗段夾制、內容寬改回 1080、拿掉 --tbh 實測、轉角頂點差 1px、外框色差一階、輝光只留一層；斜紋帶：方向反了、塞回 .fxframe 內、寫死色碼、縮放改回 100%、起點位置差 10px）確認斷言有鑑別力
 
 ## 酷澎聯盟投放核心（tool#6，`/tools/coupangads`，`src/tools/coupangads/`）

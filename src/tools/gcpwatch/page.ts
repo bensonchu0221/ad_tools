@@ -13,46 +13,12 @@ export const BASE_PATH = '/tools/gcpwatch';
 /** 前端自動刷新週期（毫秒）；倒數顯示與 setInterval 共用同一個常數 */
 const REFRESH_MS = 60_000;
 
-// 正式資源卡共用同一份手刻 SVG；卡片高度可隨資料撐開，外框由 viewBox 隨尺寸延展。
-const CARD_HUD_SVG = `<svg class="hud-svg" viewBox="0 0 480 287" preserveAspectRatio="none" fill="none" aria-hidden="true">
-  <g class="hud-solid">
-    <path d="M222.5 10.4697H139L141 12.5H199L200.5 14H219L222.5 10.4697Z"/>
-    <path d="M80.887 7.5L86 10.4697H139H222.5H239.5L236.5 7.5H210.5L206.5 3.5H158.5L154.5 7.5H80.887Z"/>
-    <path d="M447 3.5H452L465.5 17V22L447 3.5Z"/>
-    <path d="M24.134 273H48.5L61 280.217H58L48 274.5H26L24.134 273Z" stroke="currentColor"/>
-    <path d="M457.5 273H411L401 283H403.5L412 274.5H435L436.5 276H452.5L454 274.5H456L457.5 273Z" stroke="currentColor"/>
-    <path d="M479 236L476.5 233.5V255.5L469.5 262.5V266.5L479 257V236Z"/>
-    <path d="M397 284L408.5 272.5H405.5L397 281V284Z"/>
-    <path d="M53.1173 272.5L72.4414 283.657L70 279.428L58 272.5H53.1173Z"/>
-    <path d="M0.5 252L9 261.25L9 257.5L3 251.5V231.557L0.5 234.057V252Z"/>
-    <path d="M8.5 6.5H5.5L1 11L3 12L8.5 6.5Z"/>
-    <path d="M1 11V67L3 69V12L1 11Z"/>
-    <path d="M13 236V79L10.5 76.5V150.5L13 153.5V236Z"/>
-  </g>
-  <g class="hud-lines">
-    <path d="M447 0.500001L389.419 0.5L382 6.5H336"/>
-    <path d="M139 10.4697H86L74 3.5H10M86 10.4697H366M86 10.4697L80.887 7.5H154.5L158.5 3.5H206.5L210.5 7.5H236.5L239.5 10.4697H222.5M222.5 10.4697L219 14H200.5L199 12.5H141L139 10.4697M222.5 10.4697H139"/>
-    <path d="M429 3.5H452M465.5 17V22L447 3.5H452L465.5 17V234"/>
-    <path d="M72.4414 283.657L76.5 286H395L410 271H465L479 257V236L469.5 226.5M479 236L476.5 233.5V255.5L469.5 262.5V266.5L479 257M0.5 252L17.5 270.5H49.6532L53.1173 272.5M3 231.557V251.5L9 257.5L9 261.25L0.5 252V234.057L3 231.557ZM7.5 227.057L3 231.557M3 231.5V231.557M53 272.5H53.1173M72.5 283.758L72.4414 283.657M53.1173 272.5L72.4414 283.657M53.1173 272.5H58L70 279.428L72.4414 283.657M397 284V281L405.5 272.5H408.5L397 284Z"/>
-    <path d="M3 69L1 67V11L5.5 6.5H18.5M5.5 6.5H8.5L3 12M1 11L3 12M3 12V69M3 69L10.5 76.5M10.5 76.5L13 79V236V153.5L10.5 150.5V76.5Z"/>
-    <path d="M7.5 78.5L1.5 72.5V77.5L7.5 83.5V78.5Z"/>
-    <path d="M7.5 86.5L1.5 80.5V85.5L7.5 91.5V86.5Z"/>
-    <path d="M7.5 94.5L1.5 88.5V93.5L7.5 99.5V94.5Z"/>
-    <path d="M7.5 102.5L1.5 96.5V101.5L7.5 107.5V102.5Z"/>
-    <path d="M7.5 110.5L1.5 104.5V109.5L7.5 115.5V110.5Z"/>
-    <path d="M7.5 118.5L1.5 112.5V117.5L7.5 123.5V118.5Z"/>
-  </g>
-  <g class="hud-runway">
-    <path style="--i:0" d="M479.5 166L469.5 156V149.5L479.5 159.5V166Z"/>
-    <path style="--i:1" d="M479.5 175.5L469.5 165.5V159L479.5 169V175.5Z"/>
-    <path style="--i:2" d="M479.5 185L469.5 175V168.5L479.5 178.5V185Z"/>
-    <path style="--i:3" d="M479.5 194.5L469.5 184.5V178L479.5 188V194.5Z"/>
-    <path style="--i:4" d="M479.5 204L469.5 194V187.5L479.5 197.5V204Z"/>
-    <path style="--i:5" d="M479.5 213.5L469.5 203.5V197L479.5 207V213.5Z"/>
-    <path style="--i:6" d="M479.5 223L469.5 213V206.5L479.5 216.5V223Z"/>
-    <path style="--i:7" d="M479.5 231.5L469.5 221.5V215L479.5 225V231.5Z"/>
-  </g>
-</svg>`;
+// ── 資源卡 HUD 外框（Redis／Cloud SQL 五張共用，2026-09-15 取代手刻 Demo 2 SVG）────────
+// 幾何取自 sci-fi 參考圖逐像素量測（原圖 1200×642）；前端 drawHud() 裡的數字單位＝原圖 px，
+// 乘上 HUD_K 換成實際 px。斜角、粗邊斷點、上緣凸片、刻痕都固定尺寸，只有直線段隨卡片寬高伸縮
+// ⇒ 卡片比例怎麼變 45° 都不會被壓扁（舊版 preserveAspectRatio=none 會把斜角拉歪）。
+// 顏色／輝光沿用 .rcard 的 --hud 與 .hud-svg 那串 drop-shadow，與螢幕外框同一組。
+const HUD_K = 0.45;
 
 // ── 螢幕外框（HUD frame）──────────────────────────────────────────────
 // 幾何取自使用者給的參考圖，逐像素量測（原圖 1300×900，上下對稱軸 y=449.5、左右 x=649.5）：
@@ -302,19 +268,28 @@ const STYLE = `
 
   .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
   @media(max-width:880px){.cards{grid-template-columns:1fr}}
-  /* 正式資源卡採用手刻 Demo 2。min-height 守住 HUD 原型高度；不鎖 aspect-ratio，
-     否則九格統計只能塞 6.5px 字。內容變高時 SVG（preserveAspectRatio=none）跟著延展。 */
+  /* 資源卡 HUD 外框：前端 drawHud() 依卡片實際尺寸重畫（只有直線段伸縮）。不鎖 aspect-ratio，
+     否則九格統計只能塞 6.5px 字。padding 讓開外框：上＝粗邊＋凸片、左上斜角、下＝右下雙段斜角的平台。
+     兩層 SVG：.hud-bg 是底色＋網格（不發光）；.hud-svg 是線條與粗邊（發光）——
+     底色若也放進發光層，整塊面板的剪影都會暈出青光。 */
   .rcard{--hud:#01D7EB;position:relative;display:grid;
     grid-template-columns:minmax(0,.84fr) minmax(0,1.16fr);column-gap:18px;align-content:start;
     min-height:287px;background:transparent;border:none;
-    padding:24px 44px 26px 28px;overflow:visible}
-  .rcard .hud-svg{position:absolute;inset:0;width:100%;height:100%;color:var(--hud);
-    pointer-events:none;z-index:0;overflow:visible;
-    filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
+    padding:30px 44px 40px 32px;overflow:visible}
+  .rcard .hud-bg,.rcard .hud-svg{position:absolute;inset:0;width:100%;height:100%;color:var(--hud);
+    pointer-events:none;z-index:0;overflow:visible}
+  .rcard .hud-svg{filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
+  .rcard .hud-bg stop{stop-color:var(--hud)}
+  /* 網格調很淡：卡片裡有示波器曲線，網格太搶會干擾讀數 */
+  .rcard .hud-gl{fill:none;stroke:color-mix(in srgb,var(--hud) 5%,transparent)}
+  .rcard .hud-gd{fill:color-mix(in srgb,var(--hud) 14%,transparent)}
   .rcard .hud-solid{fill:currentColor}
-  .rcard .hud-lines{fill:none;stroke:currentColor;stroke-linecap:square;stroke-linejoin:miter}
-  .rcard .hud-lines path{vector-effect:non-scaling-stroke}
-  .rcard > *:not(.hud-svg){position:relative;z-index:1}
+  .rcard .hud-lines{fill:none;stroke:currentColor;stroke-linecap:butt;stroke-linejoin:miter}
+  .rcard .hud-edge{opacity:.65}
+  .rcard .hud-bracket{opacity:.45}
+  .rcard .hud-stripe2{opacity:.5}
+  .rcard .hud-dot{fill:currentColor;opacity:.5}
+  .rcard > *:not(.hud-svg):not(.hud-bg){position:relative;z-index:1}
   .r-top{grid-column:1/-1;grid-row:1;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
   .r-name{font-family:var(--disp);font-weight:700;font-size:17px;line-height:1.15;letter-spacing:.01em}
   .r-meta{font-family:var(--mono);font-size:11px;color:var(--mut);margin-top:4px;letter-spacing:.06em;
@@ -378,7 +353,7 @@ const STYLE = `
     max-width:1040px;border-top:1px solid var(--rail);padding-top:16px}
   .note-cost b{color:var(--ink)}
 
-  /* 跑道燈：原貌是空心線框，依序填滿發光後復原。5 秒週期＝約 3 秒追光＋約 2 秒靜止。 */
+  /* 跑道燈＝外框右側那 6 格斜紋：原貌是空心線框，依序填滿發光後復原。5 秒週期＝約 2 秒追光＋約 3 秒靜止。 */
   .hud-runway path{fill:transparent;stroke:currentColor;vector-effect:non-scaling-stroke;
     animation:runwayLight 5s ease-in-out infinite;animation-delay:calc(var(--i) * .3s)}
   @keyframes runwayLight{
@@ -396,7 +371,7 @@ const STYLE = `
   }
   @media(max-width:600px){
     .console .sys{border-right:0;padding-right:0;width:100%}
-    .rcard{padding:22px 28px 22px 20px}
+    .rcard{padding:28px 30px 38px 28px}
     .r-top{flex-wrap:wrap;align-items:flex-start}
     .r-val b{font-size:30px}
     .r-val .cap,.st-i .s-v,.r-meta{white-space:normal}
@@ -442,10 +417,128 @@ const RENDER_JS = `
     ['tl','tr','bl','br'].forEach(function(p){ node.appendChild(el('i','hk '+p)); });
     return node;
   }
-  // 五張正式資源卡共用手刻 Demo 2，不在 DOM 或程式中複製五份 SVG。
+  // ── 資源卡 HUD 外框（五張共用）──────────────────────────────────────
+  // 數字單位＝參考圖 px，u() 乘上 HUD_K 換成實際 px。輪廓點 V 以最近的邊為錨點，
+  // 所以寬高變化時只有直線段伸縮。卡片每 60 秒整批重建，fill() 會先 unobserve 舊卡片。
+  var HUD_K=${HUD_K}, hudUid=0;
+  var hudRO=window.ResizeObserver?new ResizeObserver(function(es){
+    es.forEach(function(e){ drawHud(e.target); });
+  }):null;
+  function hudR2(n){ return Math.round(n*100)/100; }
+  function hudPath(pts,close){
+    return pts.map(function(p,i){ return (i?'L':'M')+hudR2(p[0])+' '+hudR2(p[1]); }).join('')+(close?'Z':'');
+  }
+  function hudLerp(a,b,f){ return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f]; }
+  // 順時針（y 朝下）時 (dy,-dx) 指向外側
+  function hudNormal(a,b){
+    var dx=b[0]-a[0], dy=b[1]-a[1], l=Math.hypot(dx,dy)||1;
+    return [dy/l,-dx/l];
+  }
+  // 開放折線往外平移 d，轉角斜接 ⇒ 括號線與輪廓保持平行
+  function hudOffset(pts,d){
+    return pts.map(function(p,i){
+      var n1=i>0?hudNormal(pts[i-1],p):null, n2=i<pts.length-1?hudNormal(p,pts[i+1]):null;
+      if(!n1) return [p[0]+n2[0]*d,p[1]+n2[1]*d];
+      if(!n2) return [p[0]+n1[0]*d,p[1]+n1[1]*d];
+      var f=d/(1+n1[0]*n2[0]+n1[1]*n2[1]);
+      return [p[0]+(n1[0]+n2[0])*f,p[1]+(n1[1]+n2[1])*f];
+    });
+  }
+  // 粗邊＝輪廓整段上下平移（不是沿法線外推）：參考圖斜角段的垂直厚度與直線段相同，
+  // 斷點因此是垂直切口。dy<0 往上長、dy>0 往下長；inner 可另外指定（上粗邊底緣要含凸片的下凹）。
+  function hudBand(pts,dy,inset,inner){
+    var s=dy<0?-1:1;
+    inner=inner||pts.map(function(p){ return [p[0],p[1]-s*inset]; });
+    var outer=pts.map(function(p){ return [p[0],p[1]+dy]; }).reverse();
+    return hudPath(inner.concat(outer),true);
+  }
   function mountHud(host){
-    host.insertAdjacentHTML('afterbegin',${JSON.stringify(CARD_HUD_SVG)});
+    var id='hud'+(++hudUid), cells='';
+    for(var i=0;i<6;i++) cells+='<path style="--i:'+i+'"/>';
+    host.insertAdjacentHTML('afterbegin',
+      '<svg class="hud-svg" aria-hidden="true">'+
+        '<path class="hud-lines hud-edge"/><path class="hud-lines hud-bracket"/>'+
+        '<g class="hud-runway">'+cells+'</g><circle class="hud-dot"/>'+
+        '<path class="hud-solid hud-band"/><path class="hud-solid hud-stripe"/>'+
+        '<path class="hud-solid hud-stripe2"/></svg>');
+    host.insertAdjacentHTML('afterbegin',
+      '<svg class="hud-bg" aria-hidden="true"><defs>'+
+        '<linearGradient id="'+id+'g" x1="0" y1="1" x2="1" y2="0">'+
+          '<stop offset="0" stop-opacity=".02"/><stop offset=".55" stop-opacity=".05"/>'+
+          '<stop offset="1" stop-opacity=".11"/></linearGradient>'+
+        '<pattern id="'+id+'p" patternUnits="userSpaceOnUse"><path class="hud-gl"/><circle class="hud-gd"/></pattern>'+
+      '</defs><path class="hud-fill" fill="url(#'+id+'g)"/><path class="hud-grid" fill="url(#'+id+'p)"/></svg>');
+    if(hudRO) hudRO.observe(host);
     return host;
+  }
+  function drawHud(host){
+    var w=host.offsetWidth, h=host.offsetHeight;
+    var q=function(s){ return host.querySelector(s); };
+    if(!w||!h||!q('.hud-svg')) return;
+    var u=function(v){ return v*HUD_K; };
+    q('.hud-bg').setAttribute('viewBox','0 0 '+w+' '+h);
+    q('.hud-svg').setAttribute('viewBox','0 0 '+w+' '+h);
+
+    var t=u(15), L=u(10), R=w-u(10), T=t, B=h-t;
+    var V=[
+      [L,T+u(84)],[L+u(84),T],                // 左上斜角
+      [R-u(50),T],[R,T+u(50)],                // 右上斜角
+      [R,B-u(142)],[R-u(80),B-u(62)],         // 右下雙段斜角：斜 → 平台 → 斜
+      [R-u(172),B-u(62)],[R-u(234),B],
+      [L+u(55),B],[L,B-u(55)]                 // 左下斜角
+    ];
+    var outline=hudPath(V,true);
+    q('.hud-fill').setAttribute('d',outline);
+    q('.hud-grid').setAttribute('d',outline);
+    q('.hud-edge').setAttribute('d',outline);
+    q('.hud-edge').setAttribute('stroke-width',Math.max(1,u(2.5)));
+
+    // 上／下粗邊，各蓋住斜角的一部分；斷點位置取自參考圖
+    var inset=u(1.5);
+    var top=[hudLerp(V[0],V[1],0.33),V[1],V[2],hudLerp(V[2],V[3],0.39)];
+    var bottom=[hudLerp(V[4],V[5],0.37),V[5],V[6],V[7],V[8],hudLerp(V[8],V[9],0.5)];
+    // 上緣凸片＝上粗邊底緣的一段下凹（同一個多邊形）。分開疊的話重疊帶繪製方向相反，
+    // 會被 nonzero 規則挖空出一條暗縫。卡片太窄時省略，避免撞到左上斜角。
+    var topInner=top.map(function(p){ return [p[0],p[1]+inset]; });
+    var tabL=R-u(322), tabR=R-u(119), tabH=u(13);
+    if(tabL>V[1][0]+u(30)){
+      var drop=tabH-inset;
+      topInner.splice(2,0,[tabL,T+inset],[tabL+drop,T+tabH],[tabR-drop,T+tabH],[tabR,T+inset]);
+    }
+    q('.hud-band').setAttribute('d',hudBand(top,-t,inset,topInner)+hudBand(bottom,t,inset));
+
+    // 右下平台外側兩條刻痕，與斜角平行
+    var sy=V[6][1]+t, sh=u(17), sw=u(12), gap=u(7), sx=V[6][0]+gap;
+    var stripe=function(x){
+      return hudPath([[x,sy-0.5],[x+sw,sy-0.5],[x+sw-sh,sy+sh],[x-sh,sy+sh]],true);
+    };
+    q('.hud-stripe').setAttribute('d',stripe(sx));
+    q('.hud-stripe2').setAttribute('d',stripe(sx+sw+gap));
+
+    // 左右括號線：沿輪廓往外平移，接在粗邊斷點之後
+    var g=u(9);
+    q('.hud-bracket').setAttribute('d',
+      hudPath(hudOffset([hudLerp(V[8],V[9],0.7),V[9],V[0],hudLerp(V[0],V[1],0.22)],g))+
+      hudPath(hudOffset([hudLerp(V[2],V[3],0.7),V[3],V[4],hudLerp(V[4],V[5],0.2)],g)));
+    q('.hud-bracket').setAttribute('stroke-width',Math.max(1,u(2.2)));
+
+    // 跑道燈（右側 6 格斜紋）：置中在右邊直線段，直線段太短就隱藏
+    var span=V[4][1]-V[3][1], pitch=u(22), cellH=u(17), skew=u(13), total=pitch*5+cellH+skew;
+    var paths=host.querySelectorAll('.hud-runway path'), dot=q('.hud-dot');
+    var show=span>total+u(30), x0=R-u(30), x1=R-u(12), y=V[3][1]+(span-total)/2+skew;
+    for(var i=0;i<paths.length;i++,y+=pitch){
+      paths[i].setAttribute('d',show?hudPath([[x0,y],[x1,y-skew],[x1,y-skew+cellH],[x0,y+cellH]],true):'');
+    }
+    dot.setAttribute('cx',x1); dot.setAttribute('cy',y-pitch+cellH+u(18)); dot.setAttribute('r',show?u(2):0);
+
+    // 面板內網格：固定間距，不跟著卡片拉伸
+    var cell=u(155), pat=host.querySelector('.hud-bg pattern');
+    pat.setAttribute('width',cell); pat.setAttribute('height',cell);
+    pat.setAttribute('patternTransform','translate('+hudR2(u(115))+' '+hudR2(u(102))+')');
+    q('.hud-gl').setAttribute('d','M0 0H'+cell+'M0 0V'+cell);
+    q('.hud-gl').setAttribute('stroke-width',1);
+    var gd=q('.hud-gd');
+    gd.setAttribute('cx',cell/2); gd.setAttribute('cy',cell/2); gd.setAttribute('r',Math.max(1,u(2.5)));
   }
 
   // sparkline：0~100% 固定刻度（斜率誠實）＋ 掃描光帶 ＋ 游標十字與提示
@@ -569,7 +662,10 @@ const RENDER_JS = `
   }
 
   function fill(id,cards){
-    var host=document.getElementById(id); host.innerHTML='';
+    var host=document.getElementById(id);
+    // 60 秒整批重建：先放掉舊卡片的 ResizeObserver，否則被移除的節點會一直留在觀察清單裡
+    if(hudRO) Array.prototype.forEach.call(host.querySelectorAll('.rcard'),function(n){ hudRO.unobserve(n); });
+    host.innerHTML='';
     if(!cards.length){ host.appendChild(el('div','r-meta','（沒有資源）')); return; }
     cards.forEach(function(c){ host.appendChild(cardNode(c)); });
   }
