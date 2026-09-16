@@ -14,6 +14,7 @@ import {
   type SlotMapping,
 } from '../src/tools/coupangads/collect.js';
 import { summarize, rawStatsCsv } from '../src/tools/coupangads/route.js';
+import { planSlotStatusUpdates } from '../src/tools/coupangads/sync.js';
 import { isInvalidToken } from '../src/core/rixbee_admin.js';
 import { pickAdvBalance } from '../src/core/rixbee_console.js';
 import { encodeBalance, decodeBalance } from '../src/tools/coupangads/settings.js';
@@ -544,6 +545,50 @@ console.log('\n[P 平台花費：鏡像 BQ coupang_report，花費 R+P、CTR 只
   check('橘色合計不管幾段都標（不能包在 hasRBar&&hasPBar 裡）', html.includes("    }\n    lab+=haloText(x,put(clampLab(yTop-12)),C_SPEND,fmtSpend(row.spend));") && !html.includes('if(hasRBar&&hasPBar){'));
   check('CTR 標籤全部撞到時有退路（放到這一欄最上面）', html.includes('Math.min(...boxes.map(([a])=>a))'));
   check('商品表不動（仍是 R 的曝光／點擊／CTR／花費）', html.includes('data-sort="spend"') && html.includes("p.spend"));
+}
+
+console.log('\n[即時更新審核狀態：看板原本只讀 DB，要等每小時 :30 的收集器才會變（2026-09-16）]');
+{
+  // R 回來的兩張清單：group（開關／預算）與 creative（審核狀態），靠 group_id join。
+  const groups = [
+    { group_id: 1, group_status: 1, budget: { day_budget: 417 } },   // 待審、DB 也知道 → 不必再寫
+    { group_id: 2, group_status: 1, budget: { day_budget: 417 } },   // 已審過，DB 還停在待審 → 要更新
+    { group_id: 3, group_status: 2, budget: { day_budget: 417 } },   // 暫停的，不算待審
+    { group_id: 4, group_status: 1, budget: { day_budget: 417 } },   // R 上有、DB 沒有 → 要寫
+  ] as any[];
+  const creatives = [
+    { group_id: 1, summary_status: 3 }, { group_id: 2, summary_status: 4 },
+    { group_id: 3, summary_status: 3 }, { group_id: 4, summary_status: 1 },
+  ] as any[];
+  const db = [
+    { groupId: 1, active: true, summaryStatus: 3, dayBudget: 417 },
+    { groupId: 2, active: true, summaryStatus: 3, dayBudget: 417 },
+    { groupId: 3, active: false, summaryStatus: 3, dayBudget: 417 },
+  ] as any[];
+  const p = planSlotStatusUpdates(groups, creatives, db);
+
+  // group 只增不減（實測 525 個、在跑只有 20），每次都無條件 UPDATE 等於白寫幾百列
+  check('只寫真的變了的列', p.updates.map((u) => u.groupId).join() === '2,4', p.updates);
+  check('DB 一致的不寫', !p.updates.some((u) => u.groupId === 1));
+  check('R 有、DB 沒有的要寫進去', p.updates.some((u) => u.groupId === 4 && u.active && u.summary === 1));
+  check('沒有 creative 的 group → summary 是 null 不是 0', planSlotStatusUpdates(
+    [{ group_id: 9, group_status: 1, budget: { day_budget: 1 } }] as any[], [], [],
+  ).updates[0].summary === null);
+
+  // 這是「審核待審」按鈕的來源：refreshSlotStatus 本來就抓了這兩張清單，順手就知道誰待審
+  check('待審 groupId＝在跑且 summary=3', p.pendingGroupIds.join() === '1');
+  check('暫停的不進待審（關著的不必審）', !p.pendingGroupIds.includes(3));
+  check('待審數與清單一致', p.pendingReview === p.pendingGroupIds.length);
+
+  const html = coupangAdsPage();
+  check('「重新整理」會先打 /refresh 再讀 DB', html.includes("fetch('/tools/coupangads/refresh'"));
+  check('多一顆「審核待審」按鈕', html.includes('id="btn-review"') && html.includes('審核待審'));
+  check('審核按鈕帶 approve=1', html.includes("/refresh?approve=1"));
+  // 送審＝真的去平台改別人看得到的狀態，且會把正在後台的人踢掉，不能按了就跑
+  // （斷言要綁那句話本身：頁面上別處也有 confirm，只查 'confirm(' 抓不到「審核按鈕不確認」）
+  check('送審前要確認，且講明會把人踢出後台',
+    html.includes("$('#btn-review').onclick") && /confirm\('會把目前「在跑且待審」的素材全部送審。[^']*踢掉/.test(html));
+  check('沒設帳密時要講清楚是功能沒開，不是失敗', html.includes('configured'));
 }
 
 console.log('\n' + (fail === 0 ? '✅ 全部通過' : '❌ 有失敗') + '：' + pass + ' 過 / ' + fail + ' 失敗\n');

@@ -126,6 +126,7 @@ const BODY = `
       <span class="loading-state" id="loading-state"><span class="spin"></span>載入資料中…</span>
       <a class="btn ghost" id="btn-download" aria-disabled="true" download>下載 raw data (CSV)</a>
       <button type="button" class="btn ghost" id="btn-reload">重新整理</button>
+      <button type="button" class="btn ghost" id="btn-review">審核待審</button>
       <button type="button" class="btn" id="btn-sync">立即同步</button>
     </div>
   </form>
@@ -593,7 +594,37 @@ $('#cal-prev').onclick=()=>{ calendarBase=addMonths(calendarBase,-1); renderCale
 $('#cal-next').onclick=()=>{ calendarBase=addMonths(calendarBase,1); renderCalendar(); };
 document.addEventListener('click',(e)=>{ if(!$('#date-range').contains(e.target)) closeCalendar(); });
 document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') closeCalendar(); });
-$('#btn-reload').onclick=()=>{ load(selectedDateParams()); loadLogs(); };
+// 審核狀態存在 DB（coupang_slots.summary_status），平常只有每小時 :30 的收集器會去 R 抓。
+// 「重新整理」先打 /refresh 把 R 的開關與審核狀態同步回 DB，再讀 DB ⇒ 人工審完按一下就看得到。
+// 同步失敗不擋畫面：照樣讀 DB（拿到的是上一次的值），只把原因寫在圖表說明列。
+$('#btn-reload').onclick=async()=>{
+  const b=$('#btn-reload'); b.disabled=true; b.textContent='更新中…';
+  let note='';
+  try{
+    const r=await fetch('/tools/coupangads/refresh',{method:'POST'});
+    const j=await r.json();
+    if(!j.ok) note='狀態未更新（'+j.error+'），以下為上次收集的結果';
+  }catch(e){ note='狀態未更新（'+e.message+'），以下為上次收集的結果'; }
+  b.disabled=false; b.textContent='重新整理';
+  await load(selectedDateParams()); loadLogs();
+  if(note) $('#chart-note').textContent=note;
+};
+// 只送「在跑且待審」的那幾檔，cr_id 由 coupang_slots 查（審核帳號看得到別的廣告主的待審素材）
+$('#btn-review').onclick=async()=>{
+  if(!confirm('會把目前「在跑且待審」的素材全部送審。\\n⚠️ 這個帳號同時只能有一個登入，送審會把你在 R 後台的登入踢掉。確定執行？')) return;
+  const b=$('#btn-review'); b.disabled=true; b.textContent='審核中…';
+  try{
+    const r=await fetch('/tools/coupangads/refresh?approve=1',{method:'POST'});
+    const j=await r.json();
+    if(!j.ok) alert('審核失敗：'+j.error);
+    else if(!j.review.configured) alert('自動審核沒開（線上未設定 console 帳密），請到 R 後台手動審核。');
+    else if(j.review.errors.length) alert('審核 '+j.review.approved+' 檔，但有失敗：'+j.review.errors.join('；'));
+    else if(!j.review.approved) alert('目前沒有待審的檔。');
+    else alert('已送審 '+j.review.approved+' 檔，剩餘待審 '+j.pendingReview+' 檔。');
+  }catch(e){ alert('審核失敗：'+e.message); }
+  b.disabled=false; b.textContent='審核待審';
+  load(selectedDateParams());
+};
 $('#btn-sync').onclick=async()=>{
   if(!confirm('立即同步會依 reco 最新清單輪替：換掉已下架商品的素材、暫停不在清單的廣告。換過素材的要重新審核才會曝光。確定執行？')) return;
   const b=$('#btn-sync'); b.disabled=true; b.textContent='同步中…';

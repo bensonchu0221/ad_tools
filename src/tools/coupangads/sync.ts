@@ -27,7 +27,7 @@ import { fetchReco, createDeeplink, type CoupangProduct } from '../../core/coupa
 import {
   listCampaigns, createCampaign, listGroupsAll, createGroup, listCreatives,
   ensureMaterial, createCreative, updateCreative, updateGroup,
-  setGroupStatus, updateCampaign,
+  setGroupStatus, updateCampaign, type RGroup,
 } from '../../core/rixbee_admin.js';
 import {
   listCoupangSlots, upsertCoupangSlot, upsertCoupangProducts, nextCoupangSlotNo,
@@ -388,29 +388,52 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
  * ⚠️ **只寫真的變了的列**：group ↔ 商品改永久對映後 group 只增不減（兩支 campaign 一天約 +40），
  * 原本無條件每個 group 一條 UPDATE，穩定狀態下等於每次白寫幾百上千列。
  */
-export async function refreshSlotStatus(): Promise<{ updated: number; pendingReview: number }> {
+export interface SlotStatusUpdate { groupId: number; active: boolean; summary: number | null; dayBudget: number }
+export interface SlotStatusPlan {
+  updates: SlotStatusUpdate[];
+  /** 在跑且待審的 group——「審核待審」按鈕就是餵這批給 `approveOwnCreatives`（零額外 API）。 */
+  pendingGroupIds: number[];
+  pendingReview: number;
+}
+
+/**
+ * 純函式：R 的兩張清單（group 開關／預算、creative 審核狀態）對上 DB 現況 → 要寫哪幾列、誰待審。
+ * 審核狀態掛在 creative 上、開關掛在 group 上，靠 group_id join。
+ */
+export function planSlotStatusUpdates(
+  groups: RGroup[],
+  creatives: any[],
+  known: Pick<CoupangSlotRow, 'groupId' | 'active' | 'summaryStatus' | 'dayBudget'>[],
+): SlotStatusPlan {
+  const crByGroup = new Map<number, any>();
+  for (const c of creatives) crByGroup.set(Number(c.group_id), c);
+  const dbByGroup = new Map(known.map((s) => [Number(s.groupId), s]));
+
+  const plan: SlotStatusPlan = { updates: [], pendingGroupIds: [], pendingReview: 0 };
+  for (const g of groups) {
+    const cr = crByGroup.get(Number(g.group_id));
+    const summary = cr ? Number(cr.summary_status) : null;
+    const active = Number(g.group_status ?? 0) === 1;
+    const dayBudget = Number((g as any).budget?.day_budget ?? 0);
+    // 暫停的不算待審：關著的本來就不會曝光，審了也沒意義
+    if (active && summary === PENDING_REVIEW) plan.pendingGroupIds.push(Number(g.group_id));
+    const cur = dbByGroup.get(Number(g.group_id));
+    if (cur && cur.active === active && cur.summaryStatus === summary && Number(cur.dayBudget ?? 0) === dayBudget) continue;
+    plan.updates.push({ groupId: Number(g.group_id), active, summary, dayBudget });
+  }
+  plan.pendingReview = plan.pendingGroupIds.length;
+  return plan;
+}
+
+export async function refreshSlotStatus(): Promise<{ updated: number; pendingReview: number; pendingGroupIds: number[] }> {
   const { updateCoupangSlotStatus } = await import('../../core/store.js');
   const email = ACCOUNT_EMAIL;
   const [groups, creatives, known] = await Promise.all([
     listGroupsAll(email), listCreatives(email), listCoupangSlots(),
   ]);
-  const crByGroup = new Map<number, any>();
-  for (const c of creatives) crByGroup.set(Number(c.group_id), c);
-  const dbByGroup = new Map(known.map((s) => [s.groupId, s]));
-
-  let updated = 0, pendingReview = 0;
-  for (const g of groups) {
-    const cr = crByGroup.get(g.group_id);
-    const summary = cr ? Number(cr.summary_status) : null;
-    const active = Number(g.group_status ?? 0) === 1;
-    const dayBudget = Number((g as any).budget?.day_budget ?? 0);
-    if (active && summary === PENDING_REVIEW) pendingReview++;
-    const cur = dbByGroup.get(g.group_id);
-    if (cur && cur.active === active && cur.summaryStatus === summary && Number(cur.dayBudget ?? 0) === dayBudget) continue;
-    await updateCoupangSlotStatus(g.group_id, active, summary, dayBudget);
-    updated++;
-  }
-  return { updated, pendingReview };
+  const plan = planSlotStatusUpdates(groups, creatives, known);
+  for (const u of plan.updates) await updateCoupangSlotStatus(u.groupId, u.active, u.summary, u.dayBudget);
+  return { updated: plan.updates.length, pendingReview: plan.pendingReview, pendingGroupIds: plan.pendingGroupIds };
 }
 
 /** creative 被改動後 summary_status 會變 3（2026-08-26 實測：改文案或換素材當下 4→3）。 */

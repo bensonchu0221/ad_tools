@@ -4,7 +4,8 @@
 import type { FastifyInstance } from 'fastify';
 import { coupangAdsPage } from './page.js';
 import { buildStats, rangeOf } from './stats.js';
-import { syncCoupangAds, type SyncResult } from './sync.js';
+import { syncCoupangAds, refreshSlotStatus, type SyncResult } from './sync.js';
+import { approveOwnCreatives } from './review.js';
 import { collectStats } from './collect.js';
 import { exportToBigQuery } from './bq.js';
 import {
@@ -132,6 +133,39 @@ export function registerCoupangAds(app: FastifyInstance): void {
       });
     } catch (e: any) {
       reply.send({ entries: [], note: String(e?.message ?? e) });
+    }
+  });
+
+  /**
+   * 即時把 R 上的開關／審核狀態同步回 DB（看板讀的是 DB，否則要等每小時 :30 的收集器）。
+   * 帶 `approve=1` 再順手把「在跑且待審」的送審——`refreshSlotStatus` 本來就抓了 group 與
+   * creative 兩張清單，誰待審是零額外 API 就知道的；cr_id 仍由 `coupang_slots` 查（範圍鎖死）。
+   * 審完**再讀一次**而不是假設變成 4：審核狀態以 R 回的為準。
+   */
+  app.post(BASE_PATH + '/refresh', async (req, reply) => {
+    const approve = String((req.query as any).approve ?? '') === '1';
+    try {
+      const first = await refreshSlotStatus();
+      if (!approve) {
+        return reply.send({ ok: true, updated: first.updated, pendingReview: first.pendingReview });
+      }
+      const review = await approveOwnCreatives(first.pendingGroupIds);
+      // 有送審才值得再打一次那幾支清單
+      const after = review.approved ? await refreshSlotStatus() : first;
+      app.log.info({ marker: 'coupangads_review', approved: review.approved, errors: review.errors }, 'coupangads manual review');
+      return reply.send({
+        ok: true,
+        updated: first.updated + (review.approved ? after.updated : 0),
+        pendingReview: after.pendingReview,
+        review: {
+          approved: review.approved, skipped: review.skipped,
+          configured: review.configured, errors: review.errors,
+        },
+      });
+    } catch (e: any) {
+      const error = String(e?.message ?? e);
+      app.log.error({ marker: 'coupangads_refresh', error, approve }, 'coupangads refresh failed');
+      return reply.send({ ok: false, error });
     }
   });
 

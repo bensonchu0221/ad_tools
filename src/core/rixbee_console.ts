@@ -175,11 +175,21 @@ async function ensureSession(): Promise<ConsoleSession> {
   return consoleLogin();
 }
 
-/** 沒登入／session 過期的回應長相（console 用 code 表達，不一定是 HTTP 401）。 */
+/**
+ * 沒登入／session 過期的回應長相（console 用 code 表達，不一定是 HTTP 401）。
+ *
+ * ⚠️ **1106「您的帳戶已在其它地方登錄」也算**（2026-09-16 線上踩到）：這個帳號同時只能有一個
+ * session，人在後台登入就會把我們快取的 cookie 踢掉，之後每支請求都回 1106。原本的字串比對
+ * 只涵蓋「登入／登录／未登錄」，這句用的是「已在其它地方登錄」剛好落在網外 → 整批審核直接放棄
+ * （09-16 兩次同步的 message 都是「審核 N 筆失敗：code=1106」，使用者只好自己手動審）。
+ * 認得它就會重登一次再送——**代價是反過來把當下在 console 操作的人踢掉**，這是刻意的取捨：
+ * 審核只花幾秒，而放棄整批的代價是那些素材整天不曝光。
+ */
 export function isNotLoggedIn(status: number, code?: unknown, message?: string): boolean {
   if (status === 401 || status === 403) return true;
   const m = String(message ?? '');
-  return /not\s*log|unauthor|登入|登录|未登錄|未登录|session/i.test(m) || Number(code) === 1001;
+  const n = Number(code);
+  return /not\s*log|unauthor|登入|登录|未登錄|未登录|地方登錄|session/i.test(m) || n === 1001 || n === 1106;
 }
 
 /**
