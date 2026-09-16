@@ -57,6 +57,14 @@ const FRAME_HTML = `<div class="fxframe" aria-hidden="true">
   <i class="fx-hz b l"></i><i class="fx-hz b r"></i>
 </div>`;
 
+// 環形讀數的迷你機殼（2026-09-16）：沿用頁面外框的**上下橫帶**（FX_BAR，同一份 markup），
+// 不要側軌、不要斜紋帶（斜紋 pitch 10×--fxk≈3px 在這個尺寸會糊成一條色帶）。
+// 縮放靠 .hg 局部覆寫 --fxk（頁面 .75、這裡 .3）⇒ 所有尺寸都是 calc(var(--fxk)*Npx) 等比縮小，45° 不會歪。
+const HG_FRAME_HTML = `<div class="hgfx" aria-hidden="true">
+  <div class="fx-bar t">${FX_BAR}</div>
+  <div class="fx-bar b">${FX_BAR}</div>
+</div>`;
+
 // ── 標題列右側環形讀數（純裝飾、合成數值，2026-09-15）───────────────────────────
 // 自 poc/hudgauge_preview.html 的「環形讀數」原樣移植：canvas 繪圖、數值循環腳本、P.MAX／h.MIN 標註
 // 動畫逐字照抄，只改會撞名的 id 與 SVG class（加 hg- 前綴）。畫面以 640×620 繪製、CSS scale 縮小
@@ -583,8 +591,8 @@ const STYLE = `
   :root{--fxk:.75; --fx:#01D7EB; --tbh:50px}
   .fxframe{position:fixed;left:0;right:0;top:var(--tbh);bottom:0;z-index:20;pointer-events:none;
     filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
-  .fxframe i,.fxframe svg{display:block}
-  .fxframe polygon{fill:var(--fx)}
+  .fxframe i,.fxframe svg,.hgfx i,.hgfx svg{display:block}
+  .fxframe polygon,.hgfx polygon{fill:var(--fx)}
   .fx-jog path{stroke:var(--fx);stroke-width:2.2;fill:none}
   .fx-bar{position:absolute;left:0;right:0;height:calc(var(--fxk)*52px);
     display:flex;align-items:flex-start;padding:0 calc(var(--fxk)*24px)}
@@ -670,15 +678,26 @@ const STYLE = `
      顏色變數收在 .hg 內（本頁 :root 的 --mut／--disp／--mono 與原檔不同）。--hgs＝整體縮放 */
   .hg{--bg:#05090c;--cy:#3ec4de;--cy2:#8fe4f2;--am:#f08050;--am2:#ff9d6b;--ink:#d7e6ec;--mut:#6a8490;
     --disp:'Chakra Petch','Noto Sans TC',sans-serif;--mono:'Share Tech Mono','IBM Plex Mono',monospace;
-    --hgs:.355;position:relative;flex:none;width:calc(640px*var(--hgs));height:calc(620px*var(--hgs));
+    --hgs:.355;--fxk:.3;--hggl:3px;--hgpad:calc(var(--fxk)*52px + var(--hggl));
+    position:relative;flex:none;width:calc(640px*var(--hgs));
+    height:calc(620px*var(--hgs) + 2*var(--hgpad));
     overflow:hidden;background:transparent;box-shadow:none}
-  .hg .hg-scan{position:absolute;inset:0;pointer-events:none;z-index:4;
+  /* 迷你機殼：z-index 6＝壓在黑網格(4)與 callout(5) 之上（使用者指定框要乾淨、不被網格打格）。
+     ⚠️ --hggl 是留給輝光的邊距：.hg 必須 overflow:hidden（640px 的 stage 佈局框不擋就會撐出
+     水平捲軸），所以輝光碰到邊會被切。橫帶的墨色本身自 28×--fxk＝8.4px 才開始，補 3px ⇒ 離邊
+     11.4px，近場那段切乾淨；11px drop-shadow 的高斯尾巴仍有殘留（實測邊界色階 19.6→11.2，
+     約 3%，肉眼看不出），要完全消掉得留 ~16px 空白，不值得那個高度。 */
+  .hg .hgfx{position:absolute;left:0;right:0;top:var(--hggl);bottom:var(--hggl);z-index:6;
+    pointer-events:none;
+    filter:drop-shadow(0 0 3px rgba(1,215,235,.72)) drop-shadow(0 0 11px rgba(1,215,235,.28))}
+  .hg .hg-scan{position:absolute;left:0;right:0;top:var(--hgpad);bottom:var(--hgpad);
+    pointer-events:none;z-index:4;
     background-image:
       repeating-linear-gradient(180deg, rgba(0,0,0,.28) 0 1px, transparent 1px 3px),
       repeating-linear-gradient(90deg, rgba(0,0,0,.28) 0 1px, transparent 1px 3px);
     mix-blend-mode:multiply;opacity:.7;animation:hgScanDrift 9s linear infinite}
   @keyframes hgScanDrift{to{background-position:0 12px, 12px 0}}
-  .hg .hg-stage{position:relative;width:640px;height:620px;background:var(--bg);
+  .hg .hg-stage{position:relative;margin-top:var(--hgpad);width:640px;height:620px;background:var(--bg);
     box-shadow:inset 0 0 0 1px rgba(62,196,222,.14);overflow:hidden;
     background-image:
       repeating-linear-gradient(180deg, rgba(210,235,240,.045) 0 1px, transparent 1px 3px),
@@ -701,7 +720,7 @@ const STYLE = `
   .hg .hg-lab.hg-top{text-align:center}
   .hg .hg-lab.hg-bot{text-align:center}
   .hg .hg-lab.hg-bot b{font-size:18px;color:var(--mut)}
-  .hg .hg-co{position:absolute;left:0;top:0;width:640px;height:620px;z-index:5;overflow:visible;
+  .hg .hg-co{position:absolute;left:0;top:var(--hgpad);width:640px;height:620px;z-index:5;overflow:visible;
     pointer-events:none;transform:scale(var(--hgs));transform-origin:0 0}
   .hg .hg-co .hg-lead{fill:none;stroke:#e8f0f4;stroke-width:1.2;stroke-linecap:butt;stroke-linejoin:miter}
   .hg .hg-co .hg-tag rect{fill:#e8f0f4;stroke:none}
@@ -1483,6 +1502,7 @@ export function renderGcpWatch(vm: DashboardVM): string {
           <div class="hg-lab hg-bot" id="hgBot"><i>UPDATE</i><b>ZERO BANK</b></div>
         </div>
         <svg class="hg-co" id="hgco" xmlns="http://www.w3.org/2000/svg"></svg>
+        ${HG_FRAME_HTML}
       </div>
     </div>
     <div class="console hud">
