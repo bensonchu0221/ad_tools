@@ -55,7 +55,8 @@ const FRAME_HTML = `<div class="fxframe" aria-hidden="true">
 <div class="fxhatch" aria-hidden="true">
   <i class="fx-hz t l"></i><i class="fx-hz t r"></i>
   <i class="fx-hz b l"></i><i class="fx-hz b r"></i>
-</div>`;
+</div>
+<div class="fxmask" aria-hidden="true"><i class="t"></i><i class="b"></i></div>`;
 
 // 環形讀數的迷你機殼（2026-09-16）：沿用頁面外框的**上下橫帶**（FX_BAR，同一份 markup），
 // 不要側軌、不要斜紋帶（斜紋 pitch 10×--fxk≈3px 在這個尺寸會糊成一條色帶）。
@@ -633,6 +634,24 @@ const STYLE = `
   .fx-hz.b{bottom:calc(var(--fxk)*61px)}
   .fx-hz.l{left:calc(var(--fxk)*98px);  right:calc(50% + var(--fxk)*110px)}
   .fx-hz.r{right:calc(var(--fxk)*98px); left: calc(50% + var(--fxk)*110px)}
+  /* 外框遮罩（2026-09-16）：內容捲到外框那一段就被蓋掉，框不再像浮在內容上的貼紙。
+     ⚠️ 必須放在 .fxframe／.fxhatch 之外、且 z-index 低一階（19）：塞進那兩層會被 11px 輝光
+     照成一塊發光的實心方塊；高於 20 則會蓋掉外框本身。
+     背景逐字照抄 body（含 background-attachment:fixed ⇒ 定位區是視窗，網格／掃描線與 body
+     對得上、看不出接縫）。高度 68＝斜紋帶底緣（61+7），內容會在斜紋帶正下方被切掉。 */
+  .fxmask{position:fixed;left:0;right:0;top:var(--tbh);bottom:0;z-index:19;pointer-events:none}
+  .fxmask i{position:absolute;left:0;right:0;height:calc(var(--fxk)*68px);
+    background-color:var(--void);
+    background-image:
+      repeating-linear-gradient(180deg,rgba(220,229,239,.016) 0 1px,transparent 1px 3px),
+      linear-gradient(rgba(122,165,240,.05) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(122,165,240,.05) 1px,transparent 1px),
+      radial-gradient(120% 60% at 50% -8%,rgba(122,165,240,.09),transparent 62%);
+    background-size:100% 3px,44px 44px,44px 44px,100% 100%;
+    background-position:0 0,-1px -1px,-1px -1px,0 0;
+    background-attachment:fixed}
+  .fxmask i.t{top:0}
+  .fxmask i.b{bottom:0}
   /* 內容讓開外框：左右各留 76px、上下留出橫帶高度 */
   .wrap{padding-left:calc(var(--fxk)*76px);padding-right:calc(var(--fxk)*76px)}
   .crumb{padding-top:calc(var(--fxk)*100px)}   /* 讓開橫帶(43)＋斜紋帶(61..68) */
@@ -640,7 +659,7 @@ const STYLE = `
   @media(max-width:900px){:root{--fxk:.6}}
   /* 手機：外框會吃掉太多可用寬，直接關掉並還原共用外殼的間距 */
   @media(max-width:600px){
-    .fxframe,.fxhatch{display:none}
+    .fxframe,.fxhatch,.fxmask{display:none}
     .wrap{padding-left:16px;padding-right:16px}
     .crumb{padding-top:40px}
     footer{padding-bottom:40px}
