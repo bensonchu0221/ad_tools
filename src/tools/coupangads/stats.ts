@@ -6,7 +6,8 @@
 // 自己（全平台每小時批次更新，實測約 :20），抓再密也拿不到更新的數字。
 import {
   listCoupangDailyStats, listCoupangPDailyStats, listCoupangSlots, listCoupangProducts,
-  type CoupangDailyStatRow, type CoupangPDailyStatRow,
+  listCoupangCommissionDaily, listCoupangOrders,
+  type CoupangDailyStatRow, type CoupangPDailyStatRow, type CoupangCommissionDailyRow, type CoupangOrderRow,
 } from '../../core/store.js';
 import { PENDING_REVIEW } from './sync.js';
 import { readBalance, type StoredBalance } from './settings.js';
@@ -29,6 +30,9 @@ export interface DailyRow {
   imp: number;
   click: number;
   ctr: number | null;
+  /** Coupang 聯盟淨佣金（已扣取消）；報表約晚一天，今天通常還是 0。 */
+  commission: number;
+  orders: number;
 }
 
 export interface ProductRow {
@@ -46,6 +50,13 @@ export interface ProductRow {
   pendingReview: boolean;
   lastChangedAt: string | null;
   imp: number; click: number; ctr: number | null; spend: number;
+  /** 這個**廣告**帶進來的訂單與佣金——買的通常不是這個商品本身（cookie 歸因，見 affiliate.ts）。 */
+  orders: number; commission: number;
+}
+
+/** 訂單明細（看板「訂單明細」區）：廣告商品 → 實際買了什麼。 */
+export interface OrderView extends CoupangOrderRow {
+  adTitle: string;
 }
 
 export interface StatsResult {
@@ -54,11 +65,18 @@ export interface StatsResult {
   pendingReview: number;
   paused: number;
   /** spend＝R＋P；rSpend／pSpend 是拆分；imp／click／ctr 只算 R。 */
-  totals: { spend: number; rSpend: number; pSpend: number; imp: number; click: number; ctr: number | null };
+  totals: {
+    spend: number; rSpend: number; pSpend: number; imp: number; click: number; ctr: number | null;
+    /** Coupang 聯盟：淨佣金／訂單數／GMV（皆已扣取消） */
+    commission: number; orders: number; gmv: number;
+    /** 佣金 ÷ R 花費。只除 R：P 的流量不帶我們的 subId，它帶來的單不會算在這裡 */
+    commissionRate: number | null;
+  };
   /** R 帳戶餘額（每小時 :30 collect 查一次）；從沒查到過＝null */
   balance: StoredBalance | null;
   daily: DailyRow[];
   products: ProductRow[];
+  orders: OrderView[];
   warnings: string[];
   fetchedAt: string;
 }
@@ -100,10 +118,19 @@ export function compareByCtr(a: { ctr: number | null; spend: number; imp: number
  * 每日列：R（日×商品×裝置×group）與 P（日×domain×裝置）都加總到「日」。純函式。
  * 花費＝R＋P；曝光／點擊／CTR 只算 R。區間外的列忽略。
  */
-export function buildDaily(sd: string, ed: string, rStats: CoupangDailyStatRow[], pStats: CoupangPDailyStatRow[]): DailyRow[] {
+export function buildDaily(
+  sd: string, ed: string, rStats: CoupangDailyStatRow[], pStats: CoupangPDailyStatRow[],
+  commission: CoupangCommissionDailyRow[] = [],
+): DailyRow[] {
   const dayMap = new Map<string, DailyRow>();
   for (const d of enumDays(sd, ed)) {
-    dayMap.set(d, { date: d, hasData: false, hasR: false, spend: 0, rSpend: 0, pSpend: null, imp: 0, click: 0, ctr: null });
+    dayMap.set(d, { date: d, hasData: false, hasR: false, spend: 0, rSpend: 0, pSpend: null, imp: 0, click: 0, ctr: null, commission: 0, orders: 0 });
+  }
+  // 佣金不影響 hasData：沒投放的日子不會有我們 subId 的單（有也是 cookie 延續，照記但不讓圖表畫花費線）
+  for (const r of commission) {
+    const d = dayMap.get(r.dt);
+    if (!d) continue;
+    d.commission += r.commission; d.orders += r.orders;
   }
   // 一列＝日 × 商品 × 裝置；看板不分裝置，直接加總掉
   for (const r of rStats) {
@@ -130,8 +157,9 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
   const { sd, ed } = range ?? rangeOf(days);
   const warnings: string[] = [];
 
-  const [stats, pStats, slots, balance] = await Promise.all([
+  const [stats, pStats, slots, balance, comm, orderRows] = await Promise.all([
     listCoupangDailyStats(sd, ed), listCoupangPDailyStats(sd, ed), listCoupangSlots(), readBalance(),
+    listCoupangCommissionDaily(sd, ed), listCoupangOrders(sd, ed),
   ]);
 
   // 商品資料：先用 slot 上的（就是廣告上真正在跑的文案），沒有的再查商品表（已下架但期間有數據者）
@@ -145,7 +173,10 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     slotsByProduct.set(s.productId, list);
   }
   for (const list of slotsByProduct.values()) list.sort((a, b) => a.groupId - b.groupId);
-  const allIds = [...new Set([...stats.map((r) => r.productId), ...slots.map((s) => s.productId).filter(Boolean) as string[]])];
+  const allIds = [...new Set([
+    ...stats.map((r) => r.productId), ...slots.map((s) => s.productId).filter(Boolean) as string[],
+    ...orderRows.map((o) => o.adProductId),
+  ])];
   const meta = allIds.length ? await listCoupangProducts(allIds) : new Map();
 
   const prodMap = new Map<string, ProductRow>();
@@ -169,7 +200,7 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
         active: live.length > 0,
         pendingReview: live.some((x) => x.summaryStatus === PENDING_REVIEW),
         lastChangedAt: list.map((x) => x.lastChangedAt).filter(Boolean).sort().pop() ?? null,
-        imp: 0, click: 0, ctr: null, spend: 0,
+        imp: 0, click: 0, ctr: null, spend: 0, orders: 0, commission: 0,
       });
     }
     return prodMap.get(pid)!;
@@ -186,7 +217,16 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     p.imp += r.imp; p.click += r.click; p.spend += r.spend;
   }
 
-  const daily = buildDaily(sd, ed, stats, pStats);
+  // 佣金掛在廣告商品上；那個商品期間內沒曝光（例如 cookie 延續到下架後才下單）也會出現在清單
+  for (const r of comm) {
+    const p = prod(r.productId);
+    p.orders += r.orders; p.commission += r.commission;
+  }
+
+  const daily = buildDaily(sd, ed, stats, pStats, comm);
+  const orders: OrderView[] = orderRows.map((o) => ({
+    ...o, adTitle: slotsByProduct.get(o.adProductId)?.[0]?.title ?? meta.get(o.adProductId)?.name ?? '',
+  }));
 
   const products = [...prodMap.values()];
   for (const p of products) p.ctr = ctrOf(p.imp, p.click);
@@ -194,6 +234,8 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
 
   const sum = (f: (d: DailyRow) => number) => daily.reduce((s, d) => s + f(d), 0);
   const spend = sum((d) => d.spend);
+  const rSpend = sum((d) => d.rSpend);
+  const commission = Math.round(sum((d) => d.commission) * 100) / 100;
   // KPI 一律數「商品」不數 group（一個商品在兩支 campaign 底下各一個 group，數 group 會直接翻倍）
   const running = products.filter((p) => p.active).length;
   const pendingReview = products.filter((p) => p.pendingReview).length;
@@ -206,14 +248,17 @@ export async function buildStats(days = 7, range?: { sd: string; ed: string }): 
     pendingReview,
     paused: products.filter((p) => !p.active).length,
     totals: {
-      spend, rSpend: sum((d) => d.rSpend), pSpend: sum((d) => d.pSpend ?? 0),
+      spend, rSpend, pSpend: sum((d) => d.pSpend ?? 0),
       imp: sum((d) => d.imp), click: sum((d) => d.click),
       ctr: ctrOf(sum((d) => d.imp), sum((d) => d.click)),
+      commission, orders: sum((d) => d.orders), gmv: Math.round(comm.reduce((s, r) => s + r.gmv, 0) * 100) / 100,
+      commissionRate: rSpend > 0 ? commission / rSpend : null,
     },
     // 2026-09-14 取代原本「兩支 campaign 日預算合計」（2026-09-07 起只剩一支 campaign，那句已失真）
     balance,
     daily,
     products,
+    orders,
     warnings,
     fetchedAt: new Date().toISOString(),
   };

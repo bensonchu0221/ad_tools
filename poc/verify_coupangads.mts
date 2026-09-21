@@ -19,6 +19,9 @@ import { isInvalidToken } from '../src/core/rixbee_admin.js';
 import { pickAdvBalance } from '../src/core/rixbee_console.js';
 import { encodeBalance, decodeBalance } from '../src/tools/coupangads/settings.js';
 import { coupangAdsPage } from '../src/tools/coupangads/page.js';
+import { adProductOf, aggregateCommission, buildOrderRows, AFFILIATE_WINDOW_DAYS } from '../src/tools/coupangads/affiliate.js';
+import { REPORT_MAX_SPAN_DAYS } from '../src/core/coupang.js';
+import { readFileSync } from 'node:fs';
 
 let pass = 0, fail = 0;
 const check = (name: string, ok: boolean, got?: unknown) => {
@@ -589,6 +592,62 @@ console.log('\n[即時更新審核狀態：看板原本只讀 DB，要等每小�
   check('送審前要確認，且講明會把人踢出後台',
     html.includes("$('#btn-review').onclick") && /confirm\('會把目前「在跑且待審」的素材全部送審。[^']*踢掉/.test(html));
   check('沒設帳密時要講清楚是功能沒開，不是失敗', html.includes('configured'));
+}
+
+console.log('\n== Coupang 聯盟報表（佣金／訂單，2026-09-21 接回） ==');
+{
+  check('subId 解出廣告商品', adProductOf('r10222_493191128121354') === '493191128121354');
+  check('空白 subId（同帳號別的來源）→ null', adProductOf('') === null && adProductOf(undefined) === null);
+  check('別的前綴不算我們的', adProductOf('r10223_1') === null && adProductOf('xr10222_1') === null);
+  check('前綴後面不是純數字不算', adProductOf('r10222_abc') === null && adProductOf('r10222_1_2') === null);
+
+  // 取自 2026-09-21 真實回應的形狀（commission 報表已扣取消：9/16 orders 22 + cancel -22 = 0）
+  const comm = [
+    { date: '20260915', trackingCode: 'AF0622336', subId: 'r10222_475897849135116', commission: 44, gmv: 1248, order: 3, click: 0, firstPurchaseOrder: 1 },
+    { date: '20260915', trackingCode: 'AF0622336', subId: 'r10222_475897849135116', commission: 6, gmv: 100, order: 1, click: 0, firstPurchaseOrder: 1 },
+    { date: '20260916', trackingCode: 'AF0622336', subId: 'r10222_722600065777677', commission: 0, gmv: 0, order: 0, click: 0 },
+    { date: '20260915', trackingCode: 'AF0622336', subId: '', commission: 185, gmv: 5306, order: 9, click: 846 },
+    { date: 'bad', subId: 'r10222_1', commission: 99, gmv: 1, order: 1 },
+  ] as any[];
+  const agg = aggregateCommission(comm);
+  check('只留我們的 subId、壞日期丟掉', agg.length === 2, agg);
+  const a0 = agg.find((r) => r.dt === '2026-09-15')!;
+  check('同日同 subId 加總（佣金／單數／GMV／首購）', a0.commission === 50 && a0.orders === 4 && a0.gmv === 1348 && a0.firstOrders === 2, a0);
+  check('日期 YYYYMMDD → YYYY-MM-DD', a0.dt === '2026-09-15');
+  check('淨額為 0 的日子照留（取消沖銷後的真實結果）', agg.some((r) => r.dt === '2026-09-16' && r.commission === 0));
+  check('空白 subId 的 185 元不算進來', agg.reduce((s, r) => s + r.commission, 0) === 50);
+
+  const orders = [
+    { orderTime: 1789401600, date: '20260915', subId: 'r10222_475897849135116', productId: 479517441196039, productName: 'MUJI 去角質洗面乳', quantity: 2, gmv: 198, commissionRate: 3.5, commission: 7, isFirstPurchase: 0 },
+    { orderTime: 1789401700, date: '20260915', subId: '', productId: 1, productName: '別人的', quantity: 1, gmv: 100, commissionRate: 3.5, commission: 3 },
+  ] as any[];
+  const cancels = [
+    { orderDate: '20260915', orderTime: 1789401600, date: '20260915', subId: 'r10222_475897849135116', productId: 479517441196039, productName: 'MUJI 去角質洗面乳', quantity: -2, gmv: -198, commissionRate: 3.5, commission: -7 },
+  ] as any[];
+  const od = buildOrderRows(orders, cancels);
+  check('訂單明細只留我們的 subId', od.length === 2, od.length);
+  check('取消列標 cancel 且保留負數', od.some((o) => o.kind === 'cancel' && o.quantity === -2 && o.commission === -7));
+  check('明細的訂單＋取消加總＝淨額 0', od.reduce((s, o) => s + o.commission, 0) === 0);
+  check('廣告商品與實際購買分開存', od[0].adProductId === '475897849135116' && od[0].productId === '479517441196039');
+
+  // 佣金進每日列，但不讓「沒投放的日子」變成有資料（花費線不能在那天畫 0）
+  const d = buildDaily('2026-09-15', '2026-09-16', [], [], agg);
+  check('每日佣金加總', d[0].commission === 50 && d[0].orders === 4, d[0]);
+  check('只有佣金的日子 hasData 仍是 false', d.every((x) => !x.hasData));
+  check('舊呼叫（不帶佣金）照常：佣金 0', buildDaily('2026-09-15', '2026-09-15', [], [])[0].commission === 0);
+
+  check('每次重抓天數不超過報表上限 30 天', AFFILIATE_WINDOW_DAYS <= REPORT_MAX_SPAN_DAYS);
+  // clicks 報表永遠沒有我們的 subId：接了只會在看板上顯示 0、讓人以為追蹤壞了
+  const coupangSrc = readFileSync(new URL('../src/core/coupang.ts', import.meta.url), 'utf8');
+  check('不接 reports/clicks（不記我們的點擊）',
+    coupangSrc.includes("name: 'commission' | 'orders' | 'cancels'") && !coupangSrc.includes("'clicks'"));
+
+  const html = coupangAdsPage();
+  check('KPI 有聯盟佣金磚，且講明只除 R 花費', html.includes('聯盟佣金 · Coupang') && html.includes('佣金 ÷ R 花費'));
+  check('商品表有 訂單／佣金 兩欄且可排序', html.includes('data-sort="orders"') && html.includes('data-sort="commission"'));
+  check('商品表 colspan 跟著改成 11', html.includes('colspan="11"') && !html.includes('colspan="9"'));
+  check('訂單明細區存在且講明 cookie 歸因', html.includes('id="obody"') && html.includes('cookie 歸因'));
+  check('tooltip 帶佣金', html.includes("['聯盟佣金'"));
 }
 
 console.log('\n' + (fail === 0 ? '✅ 全部通過' : '❌ 有失敗') + '：' + pass + ' 過 / ' + fail + ' 失敗\n');

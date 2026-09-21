@@ -1,8 +1,8 @@
-// Coupang Partners Open API（台灣站）封裝：拉商品、轉 deeplink（帶 subId 追蹤）。
-// ⚠️ 2026-08-27 移除聯盟報表三支（reports/commission、reports/orders、reports/cancels）：
-//    我們的 subId 在 Coupang 端從頭到尾查不到任何點擊／訂單（見 CLAUDE.md 那條未結案記錄），
-//    存進 DB 的 104 列 commission/orders/gmv 全部是 0 ⇒ 每次收集白打三支 API。
-//    要重新啟用的話，git 記錄裡有原本的 fetchCommission／fetchOrders／fetchCancels。
+// Coupang Partners Open API（台灣站）封裝：拉商品、轉 deeplink（帶 subId 追蹤）、聯盟報表（佣金／訂單／取消）。
+// ⚠️ 聯盟報表沿革：2026-08-27 以「subId 查不到任何點擊／訂單」為由移除，2026-09-21 重測後接回。
+//    真相是**第一筆訂單在 8/28**（拿掉的隔天），而 `reports/clicks` **至今一列都沒有我們的 subId**
+//    （同帳號其他來源的點擊有記）——點擊報表不記我們的點擊，但訂單與佣金照常依 subId 歸因。
+//    ⇒ 只接 commission／orders／cancels，**clicks 不要接**（永遠是 0，會誤導成「追蹤壞了」）。
 // 知識來源＝skill coupang-partners-api（2026-08-17 實測）＋2026-08-25 本次補測。
 // ⚠️ 台灣站 host 與韓國站不同，金鑰綁 VDC，打錯站回 403 The HMAC token is not for the target VDC.
 import crypto from 'node:crypto';
@@ -89,3 +89,39 @@ export async function createDeeplink(productId: number | string, subId: string):
   }
   return d as DeeplinkResult;
 }
+
+// ---------- 聯盟報表 ----------
+
+/** ⚠️ 單次區間上限 30 天（duration）：`startDate=20260601&endDate=20260921` 回 400
+ *  `startDate endDate duration can't be over 30 days`；實測 0822~0921（含頭尾 31 天）仍可。 */
+export const REPORT_MAX_SPAN_DAYS = 30;
+
+/** 日 × subId 的佣金淨額（**已扣掉取消**：實測 9/15、9/16 恰等於 orders＋cancels）。
+ *  以這支為準：9/09 orders 報表缺列、commission 報表卻有 60 元。 */
+export interface CommissionRow {
+  date: string; subId: string; commission: number; gmv: number; order: number;
+  click?: number; firstPurchaseOrder?: number;
+}
+
+/** 訂單明細（一列＝一個訂單品項）。`productId` 是**實際買的商品**，常常不是廣告那個（cookie 歸因）。 */
+export interface OrderRow {
+  orderTime: number; date: string; subId: string; productId: number; productName: string;
+  quantity: number; gmv: number; commissionRate: number; commission: number; isFirstPurchase?: number;
+}
+
+/** 取消明細：與 orders 同構，數量／金額為負；`date`＝取消日、`orderDate`＝原下單日。 */
+export interface CancelRow extends OrderRow { orderDate?: string }
+
+/** 報表日期格式為 YYYYMMDD。 */
+export function ymdCompact(d: string): string {
+  return d.replace(/-/g, '');
+}
+
+async function report<T>(name: 'commission' | 'orders' | 'cancels', sd: string, ed: string): Promise<T[]> {
+  const j = await call('GET', `${BASE}/reports/${name}`, `startDate=${ymdCompact(sd)}&endDate=${ymdCompact(ed)}`);
+  return (Array.isArray(j.data) ? j.data : []) as T[];
+}
+
+export const fetchCommission = (sd: string, ed: string) => report<CommissionRow>('commission', sd, ed);
+export const fetchOrders = (sd: string, ed: string) => report<OrderRow>('orders', sd, ed);
+export const fetchCancels = (sd: string, ed: string) => report<CancelRow>('cancels', sd, ed);

@@ -1,7 +1,8 @@
 // 酷澎聯盟投放（tool#6）看板頁。Slot Board 外殼＋本頁特有樣式。
 // 進頁面 fetch /api/stats（後端讀 coupang_daily_stats，每小時 :30 由收集器更新）。
-// ⚠️ 2026-08-27 移除 Coupang 聯盟報表相關欄位（訂單／GMV／佣金）：那三欄的來源 API
-//    我們的 subId 一筆都收不到，DB 裡從頭到尾都是 0 ⇒ 版面上只是三欄永遠的 0。
+// 2026-09-21 接回 Coupang 聯盟報表（2026-08-27 以「全是 0」拿掉，其實第一筆單在隔天 8/28）：
+// KPI 佣金磚、商品表 訂單／佣金 兩欄、訂單明細區。**商品表的佣金是「這個廣告帶進來的人買的」**，
+// 買的幾乎都不是廣告那個商品（cookie 歸因），訂單明細區就是為了把這件事攤開來看。
 import { sbPage } from '../../core/sbui.js';
 
 // 配色經 dataviz validator 驗過（light/#FFFFFF、--pairs all 四色：CVD 最差 ΔE 9.6、normal 最差 16.3、對比 ≥3:1 全 PASS）。
@@ -93,7 +94,7 @@ const BODY = `
   <div class="crumb"><a href="/">ad_tools</a> / 酷澎聯盟投放</div>
   <h1>酷澎聯盟投放</h1>
   <p class="muted" style="margin:10px 0 0;font-size:13px">
-    Coupang 聯盟商品自動上架到 R 平台投放，看曝光／點擊／花費成效。每天 09:50 依 reco 最新清單輪替素材。
+    Coupang 聯盟商品自動上架到 R 平台投放，看曝光／點擊／花費與聯盟佣金。每天 09:50 依 reco 最新清單輪替素材。
   </p>
 
   <div id="review"></div>
@@ -167,6 +168,8 @@ const BODY = `
             <th class="n sort" data-sort="click" aria-sort="none">點擊<span class="ar"></span></th>
             <th class="n sort" data-sort="ctr" aria-sort="descending">CTR<span class="ar"></span></th>
             <th class="n sort" data-sort="spend" aria-sort="none">花費<span class="ar"></span></th>
+            <th class="n sort" data-sort="orders" aria-sort="none" title="這個廣告帶進來的訂單（買的通常不是這個商品）">訂單<span class="ar"></span></th>
+            <th class="n sort" data-sort="commission" aria-sort="none" title="Coupang 聯盟淨佣金（已扣取消）">佣金<span class="ar"></span></th>
             <th class="n">日預算</th><th>狀態</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
@@ -176,12 +179,26 @@ const BODY = `
   </div>
 
   <div class="sec">
+    <h2>訂單明細 <span class="muted" id="ocount" style="text-transform:none;letter-spacing:0"></span></h2>
+    <p class="muted" style="margin:-4px 0 10px;font-size:12px">Coupang 是 cookie 歸因：點了 A 商品的廣告、進站後買了 B 也算我們的。取消列為負數。</p>
+    <div class="panel" style="padding:0;overflow-x:auto">
+      <table class="tb">
+        <thead><tr>
+          <th style="width:88px">日期</th><th>點進來的廣告</th><th>實際購買</th>
+          <th class="n">數量</th><th class="n hide-s">GMV</th><th class="n">佣金</th>
+        </tr></thead>
+        <tbody id="obody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="sec">
     <h2>同步紀錄 <span class="muted" style="text-transform:none;letter-spacing:0">（每天 09:50 自動輪替）</span></h2>
     <div class="panel logs" id="logs">讀取中…</div>
   </div>
 
   <div class="foot" style="margin-top:30px">
-    R 帳戶 10222 ｜ P 花費讀自 BigQuery reporting.coupang_report（主管排程台北 03:00 重算，只到前一天）｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新，實測約每小時 :20，所以當天數字會落後一個批次）｜ 下載 CSV 可再切 PC／Mobile／Tablet／Others
+    R 帳戶 10222 ｜ 佣金／訂單讀自 Coupang 聯盟報表（每小時重抓近 30 天，約晚一天）｜ P 花費讀自 BigQuery reporting.coupang_report（主管排程台北 03:00 重算，只到前一天）｜ 成效每小時 :30 收集一次（R 報表本身是每小時批次更新，實測約每小時 :20，所以當天數字會落後一個批次）｜ 下載 CSV 可再切 PC／Mobile／Tablet／Others
   </div>
 `;
 
@@ -190,11 +207,12 @@ const C_SPEND=${JSON.stringify(C_SPEND)}, C_CTR=${JSON.stringify(C_CTR)}, C_R=${
 let data=null, pfilter='on';
 // 清單排序：預設與後端一致（CTR 由高到低），點表頭可改
 let sortKey='ctr', sortDir='desc';
-const SORT_LABEL={imp:'曝光',click:'點擊',ctr:'CTR',spend:'花費'};
+const SORT_LABEL={imp:'曝光',click:'點擊',ctr:'CTR',spend:'花費',orders:'訂單',commission:'佣金'};
 let selectedStart='', selectedEnd='', draftStart='', draftEnd='', calendarBase=null, pickingEnd=false;
 const $=(s)=>document.querySelector(s);
 const nf=(n,d=0)=>Number(n||0).toLocaleString('zh-TW',{minimumFractionDigits:d,maximumFractionDigits:d});
-const money=(n)=>'NT$'+nf(n,0);
+// 負數（取消沖銷）顯示成 -NT$617，不是 NT$-617
+const money=(n)=>(Number(n)<0?'-':'')+'NT$'+nf(Math.abs(Number(n)||0),0);
 // R 帳戶餘額（每小時 :30 由 collect 查一次存 DB）；附上查到的台北時間，數字舊不舊一眼看得出來。
 // 從沒查到過顯示「—」，不能顯示 NT$0（會被讀成餘額用完）。
 function balanceText(b){
@@ -247,6 +265,8 @@ function render(){
     // CTR 只算 R；花費＝R＋P（2026-09-15 使用者指定）
     ['CTR · R','',pct(t.ctr),nf(t.click)+' 點擊 / '+nf(t.imp)+' 曝光'],
     ['廣告花費 · R+P','',money(t.spend),'R '+money(t.rSpend)+' ＋ P '+money(t.pSpend)+'<br>'+balanceText(data.balance)],
+    // 佣金只除 R 花費：P 的流量不帶我們的 subId，它帶來的單不會出現在這裡
+    ['聯盟佣金 · Coupang','',money(t.commission),nf(t.orders)+' 單 · GMV '+money(t.gmv)+'<br>佣金 ÷ R 花費 '+pct(t.commissionRate)],
   ].map(([k,c,v,s])=>'<div class="kpi '+c+'"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>').join('');
 
   setSelectedRange(data.range.sd,data.range.ed);
@@ -265,7 +285,20 @@ function render(){
     ? '<div class="warn"><b>提醒</b><ul>'+data.warnings.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul></div>' : '';
 
   renderTable();
+  renderOrders();
   drawCharts();
+}
+
+function renderOrders(){
+  const list=data.orders||[];
+  $('#ocount').textContent=list.length?'（'+list.length+' 列'+(list.length>=300?'，只顯示最新 300 列':'')+'）':'';
+  $('#obody').innerHTML=list.length
+    ? list.map(o=>'<tr'+(o.kind==='cancel'?' style="color:#B33A1F"':'')+'>'+
+        '<td class="muted" style="white-space:nowrap">'+esc(o.dt)+(o.kind==='cancel'?'<br><span class="pill off">取消</span>':'')+'</td>'+
+        '<td><div class="nm">'+esc(o.adTitle||o.adProductId)+'</div><div class="muted" style="font-size:11px">'+esc(o.adProductId)+'</div></td>'+
+        '<td><div class="nm">'+esc(o.productName)+'</div>'+(o.productId===o.adProductId?'<div style="font-size:11px;color:#1B7A4B">＝廣告商品</div>':'')+'</td>'+
+        '<td class="n">'+nf(o.quantity)+'</td><td class="n hide-s">'+money(o.gmv)+'</td><td class="n">'+money(o.commission)+'</td></tr>').join('')
+    : '<tr><td colspan="6" class="muted" style="padding:20px;text-align:center">這段期間沒有訂單（Coupang 報表約晚一天）</td></tr>';
 }
 
 // 排序：CTR 可能是 null（無曝光算不出來，UI 顯示「—」）——升冪降冪都讓它沉底，
@@ -300,11 +333,12 @@ function renderTable(){
       '<td><div class="nm">'+(p.landingUrl?'<a href="'+esc(p.landingUrl)+'" target="_blank" rel="noopener">'+esc(p.title||p.productId)+'</a>':esc(p.title||p.productId))+'</div>'+
         '<div class="muted" style="font-size:11px">'+esc(p.productId)+'</div></td>'+
       '<td class="n hide-s">'+nf(p.imp)+'</td><td class="n">'+nf(p.click)+'</td><td class="n"><b>'+pct(p.ctr)+'</b></td><td class="n">'+money(p.spend)+'</td>'+
+      '<td class="n">'+(p.orders?nf(p.orders):'<span class="muted">0</span>')+'</td><td class="n">'+(p.commission?money(p.commission):'<span class="muted">—</span>')+'</td>'+
       '<td class="n">'+money(p.dayBudget)+'</td>'+
       '<td>'+statusPill(p)+'</td>';
     tb.appendChild(tr);
   }
-  if(!shown.length) tb.innerHTML='<tr><td colspan="9" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
+  if(!shown.length) tb.innerHTML='<tr><td colspan="11" class="muted" style="padding:20px;text-align:center">尚無商品，按「立即同步」開始</td></tr>';
 }
 
 function statusPill(p){
@@ -470,7 +504,8 @@ function drawCharts(){
     cross.setAttribute('x',(L+per*i).toFixed(1)); cross.setAttribute('opacity','.06');
     const rows=row.hasData
       ?[['花費合計',money(row.spend)],['　R 花費',row.hasR?money(row.rSpend):'—'],['　P 花費',row.pSpend==null?'尚無資料':money(row.pSpend)],
-        ['R CTR',pct(row.ctr)],['R 點擊',nf(row.click)],['R 曝光',nf(row.imp)]]
+        ['R CTR',pct(row.ctr)],['R 點擊',nf(row.click)],['R 曝光',nf(row.imp)],
+        ['聯盟佣金',row.orders?money(row.commission)+'（'+nf(row.orders)+' 單）':'—']]
       :[['—','這天尚未投放']];
     tip.innerHTML='<b>'+row.date+'</b>'+rows.map(([k,v])=>'<div class="r"><span>'+k+'</span><span>'+v+'</span></div>').join('');
     tip.style.opacity='1';

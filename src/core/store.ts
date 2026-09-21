@@ -1746,6 +1746,39 @@ async function migrateCoupangSchema(p: mysql.Pool): Promise<void> {
       PRIMARY KEY (dt, domain, device)
     ) DEFAULT CHARSET=utf8mb4
   `);
+  // 2026-09-21：Coupang 聯盟報表接回（見 core/coupang.ts 檔頭）。product_id＝**廣告商品**（subId 解出來的），
+  // 不是實際被買的商品——實測 46 筆訂單沒有一筆買的是廣告那個商品（cookie 歸因）。
+  // 兩張表都由 affiliate.ts 每小時按日期區間整段取代（Coupang 會回頭修正、取消會沖銷），無主鍵衝突問題。
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_commission_daily (
+      dt           DATE          NOT NULL,
+      product_id   VARCHAR(32)   NOT NULL COMMENT '廣告商品（subId r10222_{pid}）',
+      orders       INT           NOT NULL DEFAULT 0 COMMENT 'commission 報表的 order（已扣取消）',
+      gmv          DECIMAL(14,2) NOT NULL DEFAULT 0,
+      commission   DECIMAL(14,2) NOT NULL DEFAULT 0 COMMENT '淨佣金（已扣取消）',
+      first_orders INT           NOT NULL DEFAULT 0,
+      synced_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (dt, product_id)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS coupang_orders (
+      id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+      dt             DATE          NOT NULL COMMENT '報表 date：訂單＝下單日、取消＝取消日',
+      kind           VARCHAR(8)    NOT NULL COMMENT 'order / cancel',
+      order_time     BIGINT        NULL COMMENT 'Coupang 回的 orderTime（epoch 秒）',
+      ad_product_id  VARCHAR(32)   NOT NULL COMMENT '廣告商品（從 subId 解出）',
+      product_id     VARCHAR(32)   NOT NULL COMMENT '實際買的商品',
+      product_name   VARCHAR(500)  NULL,
+      quantity       INT           NOT NULL DEFAULT 0,
+      gmv            DECIMAL(14,2) NOT NULL DEFAULT 0,
+      commission_rate DECIMAL(6,2) NULL,
+      commission     DECIMAL(14,2) NOT NULL DEFAULT 0,
+      is_first       TINYINT       NOT NULL DEFAULT 0,
+      INDEX idx_dt (dt),
+      INDEX idx_ad (ad_product_id)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
   if (!(await hasColumn('coupang_sync_runs', 'reactivated'))) {
     await p.query(`ALTER TABLE coupang_sync_runs ADD COLUMN reactivated INT NOT NULL DEFAULT 0
                    COMMENT '重啟舊 group 的檔數（舊制的 replaced 欄留著給歷史紀錄）'`);
@@ -1991,6 +2024,89 @@ export async function listCoupangPDailyStats(sd: string, ed: string): Promise<Co
   return (rows as any[]).map((r) => ({
     dt: String(r.dt), domain: String(r.domain), device: String(r.device),
     imp: Number(r.imp), click: Number(r.click), spend: Number(r.spend),
+  }));
+}
+
+export interface CoupangCommissionDailyRow {
+  dt: string; productId: string; orders: number; gmv: number; commission: number; firstOrders: number;
+}
+
+export interface CoupangOrderRow {
+  dt: string; kind: 'order' | 'cancel'; orderTime: number | null;
+  adProductId: string; productId: string; productName: string;
+  quantity: number; gmv: number; commissionRate: number | null; commission: number; isFirst: boolean;
+}
+
+/**
+ * 聯盟報表整段取代：[sd, ed] 內兩張表先刪後寫、同一個 transaction。
+ * 空陣列也照寫（這段期間真的沒單＝清空是對的）；「API 回空但 DB 有資料」的防呆在呼叫端（affiliate.ts）。
+ */
+export async function replaceCoupangAffiliate(
+  daily: CoupangCommissionDailyRow[], orders: CoupangOrderRow[], sd: string, ed: string,
+): Promise<void> {
+  const p = await coupangPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(`DELETE FROM coupang_commission_daily WHERE dt BETWEEN ? AND ?`, [sd, ed]);
+    await conn.query(`DELETE FROM coupang_orders WHERE dt BETWEEN ? AND ?`, [sd, ed]);
+    for (let i = 0; i < daily.length; i += 500) {
+      await conn.query(
+        `INSERT INTO coupang_commission_daily (dt, product_id, orders, gmv, commission, first_orders) VALUES ?`,
+        [daily.slice(i, i + 500).map((r) => [r.dt, r.productId, r.orders, r.gmv, r.commission, r.firstOrders])]
+      );
+    }
+    for (let i = 0; i < orders.length; i += 500) {
+      await conn.query(
+        `INSERT INTO coupang_orders (dt, kind, order_time, ad_product_id, product_id, product_name,
+                                     quantity, gmv, commission_rate, commission, is_first) VALUES ?`,
+        [orders.slice(i, i + 500).map((r) => [
+          r.dt, r.kind, r.orderTime, r.adProductId, r.productId, r.productName.slice(0, 500),
+          r.quantity, r.gmv, r.commissionRate, r.commission, r.isFirst ? 1 : 0,
+        ])]
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback().catch(() => {});
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function countCoupangCommissionDaily(sd: string, ed: string): Promise<number> {
+  const p = await coupangPool();
+  const [rows] = await p.query(`SELECT COUNT(*) AS c FROM coupang_commission_daily WHERE dt BETWEEN ? AND ?`, [sd, ed]);
+  return Number((rows as any[])[0]?.c ?? 0);
+}
+
+export async function listCoupangCommissionDaily(sd: string, ed: string): Promise<CoupangCommissionDailyRow[]> {
+  const p = await coupangPool();
+  // dt 讓 MySQL 直接格式化（同 listCoupangDailyStats 的時區坑）
+  const [rows] = await p.query(
+    `SELECT DATE_FORMAT(dt, '%Y-%m-%d') AS dt, product_id, orders, gmv, commission, first_orders
+       FROM coupang_commission_daily WHERE dt BETWEEN ? AND ? ORDER BY dt, product_id`, [sd, ed]
+  );
+  return (rows as any[]).map((r) => ({
+    dt: String(r.dt), productId: String(r.product_id), orders: Number(r.orders),
+    gmv: Number(r.gmv), commission: Number(r.commission), firstOrders: Number(r.first_orders),
+  }));
+}
+
+export async function listCoupangOrders(sd: string, ed: string, limit = 300): Promise<CoupangOrderRow[]> {
+  const p = await coupangPool();
+  const [rows] = await p.query(
+    `SELECT DATE_FORMAT(dt, '%Y-%m-%d') AS dt, kind, order_time, ad_product_id, product_id, product_name,
+            quantity, gmv, commission_rate, commission, is_first
+       FROM coupang_orders WHERE dt BETWEEN ? AND ?
+      ORDER BY dt DESC, order_time DESC, id DESC LIMIT ?`, [sd, ed, limit]
+  );
+  return (rows as any[]).map((r) => ({
+    dt: String(r.dt), kind: r.kind === 'cancel' ? 'cancel' : 'order', orderTime: num(r.order_time),
+    adProductId: String(r.ad_product_id), productId: String(r.product_id), productName: String(r.product_name ?? ''),
+    quantity: Number(r.quantity), gmv: Number(r.gmv), commissionRate: num(r.commission_rate),
+    commission: Number(r.commission), isFirst: Number(r.is_first) === 1,
   }));
 }
 

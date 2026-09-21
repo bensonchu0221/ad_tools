@@ -8,10 +8,9 @@
 //    看板與 BQ 都會把 group 維度加總掉 ⇒ 對外數字不變（見 attributeRRows 註解）。
 // 換素材當天該 group 全天的量會算給「當下掛的商品」（R 報表拆不出時段），這是刻意的取捨。
 //
-// ⚠️ 2026-08-27 移除 Coupang 聯盟報表（commission/orders/cancels）：實測從上線到現在
-// coupangClick/orders/gmv/commission **一路都是 0**（Coupang 端收不到我們的點擊，見 CLAUDE.md
-// 那條未結案的記錄），留著只是每次多打三支 API、還讓看板與 CSV 掛著永遠是 0 的欄位。
-// 同一次把裝置（R 的 device_type）升成維度，CSV 才切得出 PC/Mobile/Tablet/Others。
+// 2026-08-27 把 Coupang 聯盟報表從這張表拿掉、改把裝置（R 的 device_type）升成維度，
+// CSV 才切得出 PC/Mobile/Tablet/Others。2026-09-21 聯盟報表接回，但**另存兩張表**
+// （affiliate.ts：coupang_commission_daily／coupang_orders），這張表維持只放 R。
 //
 // ⚠️ 2026-08-27 修重複計數：slots 只存「當下」的對映，但每次回補都重抓最近 4 天。
 // 原本無條件把 group 的歷史數字寫到當下掛的商品名下，而舊商品那幾列不會被刪 →
@@ -35,6 +34,7 @@ import { getAdvertiserBalance } from '../../core/rixbee_console.js';
 import { reviewConfigured } from './review.js';
 import { saveBalance } from './settings.js';
 import { syncPStats } from './pstats.js';
+import { syncAffiliate } from './affiliate.js';
 
 /** R 帳號型別：10222 實測是 direct（4A）。env 可覆蓋，避免每次跑都花 3 支 probe。 */
 const R_USER_TYPE = (process.env.COUPANG_R_USER_TYPE ?? 'direct') as 'agency' | 'direct' | 'super';
@@ -172,17 +172,31 @@ export async function refreshPStats(): Promise<string> {
   }
 }
 
-export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number; balance: string; p: string }> {
+/**
+ * Coupang 聯盟報表（佣金／訂單）。同 P：**失敗不影響 R 的收集**，只回字串進結果／log，看板用上一次成功的數字。
+ * Coupang 報表只有日粒度，每小時跑一次成本就是 3 支 GET。
+ */
+export async function refreshAffiliate(): Promise<string> {
+  try {
+    const r = await syncAffiliate();
+    return `${r.orders} 單 NT$${r.commission}（${r.sd}~${r.ed}）`;
+  } catch (e: any) {
+    return `失敗：${e?.message ?? e}`;
+  }
+}
+
+export async function collectStats(): Promise<{ sd: string; ed: string; rows: number; cleared: number; pendingReview: number; balance: string; p: string; affiliate: string }> {
   const now = new Date();
   const ed = twYmd(now);
   const sd = twYmd(new Date(now.getTime() - (BACKFILL_DAYS - 1) * 86400000));
 
   // slot 對映（group → 當下掛的商品）＋順便把 R 的開關/審核狀態同步回 DB
-  const [slots, status, balance, p] = await Promise.all([
+  const [slots, status, balance, p, affiliate] = await Promise.all([
     listCoupangSlots(),
     refreshSlotStatus().catch(() => ({ updated: 0, pendingReview: 0 })),
     refreshBalance(),
     refreshPStats(),
+    refreshAffiliate(),
   ]);
 
   // 只打這一支：day × group_id × device_type。實測裝置分項加總與不帶 device 的總數守恆
@@ -203,5 +217,5 @@ export async function collectStats(): Promise<{ sd: string; ed: string; rows: nu
   await upsertCoupangDailyStats(rows);
   // 先寫再掃：中途掛掉頂多多留一次髒列，下次跑就會清掉（反過來先清後寫會留下空窗）
   const cleared = await clearForeignStatMetrics(planStatOwnership(enumDays(sd, ed), slots));
-  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview, balance, p };
+  return { sd, ed, rows: rows.length, cleared, pendingReview: status.pendingReview, balance, p, affiliate };
 }
