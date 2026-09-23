@@ -1,0 +1,20 @@
+## nexus 資料倉庫核心（tool#9）
+
+- **目的**（2026-09-23 使用者定調）：四平台（D/R/M/P）**全部有在跑的帳戶**「素材 × 日」數據每天抓一次存進 BQ，之後 Report Hub、整合週報等內部報表工具都改讀倉庫、不再各自打 API；主管／老闆用 **Looker Studio** 直接看，會議上以 **customer（客戶）** 角度看整體。
+- **位置**：BQ `popinpoc1.reporting`（使用者拍板用既有 dataset、不另開），表名一律 **`nexus_` 前綴**（使用者指定，呼應 Cloud SQL 跨工具共用庫 `nexus`）。同 dataset 有主管的 `coupang_report*`（WRITE_TRUNCATE 只作用在那張表，碰不到我們；但 dataset 擁有者是主管，建表前使用者已自行知會）。
+- **表**（定義在 `schema.ts`，單一真相）：
+  - `nexus_d_ad_daily`／`nexus_r_cr_daily`／`nexus_m_teaser_daily`／`nexus_p_creative_daily`：各平台原生欄位全收（D 含 cv/mcv/mcv2＋cv_* 11 種；R 含 behavior0-6＋`exposure_report` 可視曝光＋agent 代理商；M 三階漏斗＋幣別；P 含 view_25~100、viewable）。**只存可加總的計數／金額，比率一律不存**。id 全轉 STRING。標題／落地頁／縮圖直接冗餘在事實表（量小，省 Looker join）。
+  - `nexus_device_daily`：四平台共用；D/R/P 到 campaign、M 只到帳戶（campaign_id NULL）；轉換事件放 `events`（JSON 字串，平台原生事件名→次數），讓報表工具依自己的 cv 桶取用。
+  - `nexus_customer_account_map`：**先建空表當介面**。customer 四平台 API 都沒有（見 memory ad-data-warehouse-plan），目前 AE/AM 在系統外維護；之後不論改 Sheet 外部表或 Cloud SQL＋web UI 同步，只要表名欄位不變，view 與 Looker 不用改。
+  - view `nexus_integrated_daily`：四平台 UNION 成同一套欄位＋LEFT JOIN customer（對照表先收斂成一帳一列，防誤填重複放大數字；沒對照到的 customer 退回 account_name）。**不含轉換**（四平台語意不同，硬加總會誤導）。
+  - 全部事實表**日分區＋requirePartitionFilter**：不帶 date 條件的查詢會被 BQ 拒絕（防全表掃描）。Looker 要設日期範圍。
+- **P 無 advertiser 的事件**：查全平台時會回 advertiser 為空字串的列（事件沒帶 adid；Report Hub 指定 advertiser 查所以從沒遇過）→ 歸到虛擬帳戶 `account_id='(unattributed)'`，不丟（2026-09-21~22 實測只有 12 曝光、0 花費）。
+- **抓取**（`fetch.ts`）：D／M 一帳一 job（token 表全部帳戶，M 排除 98 開頭壞資料）；R 用 **Super token + userIds:[]** 一次全平台（2026-09-23 實測 Super 看得到全部代理商）；P 用 `fetchPrismReportAll`（**省略** advertiser_ids＝全部；送空陣列會 500）。D 沿用週報的 campaign 三規則剪枝＋只對 bulk 有資料的 campaign 打 adLists／per-ad／裝置。
+- **寫入**（`run.ts writeSlice`）：load job 進暫存表（`nexus__stg_*`，2 小時自動過期）→ 單一 transaction `DELETE 區間(+帳戶) ; INSERT SELECT`。load job 不計費、無 streaming buffer；取代單位＝平台×帳戶×日期區間（R/P 整平台）。
+- **防呆**：①列的日期超出 job 區間或帳戶不符 → 拒寫 ②**倉庫原本有數字、這次抓回 0 列 → 拒絕清空、job 失敗重試**（API 抽風不能洗掉歷史）③R 單日超過 10000 列被截斷 → 整個 job 失敗 ④BQ 成功後才寫覆蓋紀錄。
+- **Cloud SQL（ad_tools 庫）**：`nexus_jobs`（佇列；失敗 10 分鐘後重試、最多 3 次；心跳停 15 分鐘收回）、`nexus_coverage`（每平台帳戶每天寫了幾列：全空帳戶跳過 BQ、上面的防呆②、狀態頁）。
+- **排程**：`/tools/nexus/cron` 每日入列 T-2~T-1（使用者定：抓兩天，T-2 順帶修好 M 洛杉磯時區帳戶的半天數字）；`/worker/cron` 每分鐘，**4 分鐘預算內連續認領**（Cloud Run timeout 600s，D 單帳 2 天實測 125 秒）；全域 GET_LOCK 並發 1。每日優先於回補。
+- **回補**：`/backfill/cron?key=&sd=&ed=&platforms=DRMP`，預設 **2026-05-21**（P 最早資料日，使用者拍板）~ T-3。D 14 天一段、R/M/P 30 天一段。
+- **排程時間＝台北 04:00**（使用者 2026-09-23 拍板）。**⚠️ D token 互踢**：`getAccessToken` 會讓同 token 舊的 access_token 失效。Report Hub `adstream-daily` 05:00 開跑、實測 05:00~06:10 結束 → 倉庫要在 05:00 前把 D 跑完，否則同一 D 帳號兩邊互踢 401（失敗的 job 10 分鐘後自動重試，能自癒但會吵）。上線後要看 D 全帳戶實際跑多久。
+- **成本**：load job 免費；每個有資料的 job 約 4 句 DML（每句最低計 10MB）；P 每 job 呼叫 2 次＝P 後端查 `prism_events` 2 次（dry-run 上限：每日 2 天約 4.76GB/次、回補全段約 113GB 一次性）。
+- 驗證：`tests/verify_nexus.mts`（純函式＋job 防呆，18 項）。**2026-09-23 本機真寫 BQ 驗過**（2026-09-21~22）：D 31243／R 全平台／M 867481／P 全平台，事實表＝裝置表＝view 三邊曝光與花費逐項一致（R 裝置花費差 0.03 為四捨五入）。

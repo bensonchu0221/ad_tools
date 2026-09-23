@@ -2165,3 +2165,252 @@ export async function getCoupangStatsSyncedAt(sd: string, ed: string): Promise<s
   );
   return (rows as any[])[0]?.t ?? null;
 }
+
+// ---------- tool#9 nexus 資料倉庫：工作佇列＋覆蓋紀錄（Cloud SQL ad_tools；數據本體在 BQ） ----------
+// 佇列比照 mgid_source_jobs：cron 一次入列、worker 每分鐘被叫醒後在時間預算內連續認領、全域並發 1。
+// 一個 job＝(平台, 帳戶, 日期區間)；R／P 一次抓全平台，account_id 記 '*'。
+// nexus_coverage 記「每個平台帳戶每天寫進 BQ 幾列」：①全空的帳戶可以跳過 BQ 寫入（D 每天 200 多個帳戶
+// 大多沒投放，不必每個都跑一次 BQ transaction）②防呆：以前有數字、這次抓回 0 列時拒寫 ③狀態頁用。
+
+export type NexusPlatform = 'D' | 'R' | 'M' | 'P';
+export type NexusJobKind = 'daily' | 'backfill';
+
+export interface NexusJobInput {
+  platform: NexusPlatform; accountId: string; accountName: string; sd: string; ed: string;
+}
+export interface NexusJobRow extends NexusJobInput {
+  id: number; batch: string; kind: NexusJobKind;
+  status: 'queued' | 'running' | 'success' | 'failed';
+  phase: string | null; attemptCount: number; message: string | null;
+  queuedAt: string | null; startedAt: string | null; finishedAt: string | null;
+}
+
+const NEXUS_LOCK = 'ad_tools:nexus:worker';
+const NEXUS_TIMEOUT_MIN = 15;
+/** 失敗自動重排的上限（含第一次）；超過就留在 failed 給人看。 */
+export const NEXUS_MAX_ATTEMPTS = 3;
+let nexusSchemaReady = false;
+
+async function nexusPool(): Promise<mysql.Pool> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  if (nexusSchemaReady) return p;
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS nexus_jobs (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      batch VARCHAR(64) NOT NULL,
+      kind ENUM('daily','backfill') NOT NULL,
+      platform CHAR(1) NOT NULL,
+      account_id VARCHAR(64) NOT NULL,
+      account_name VARCHAR(255) NOT NULL DEFAULT '',
+      sd DATE NOT NULL,
+      ed DATE NOT NULL,
+      status ENUM('queued','running','success','failed') NOT NULL DEFAULT 'queued',
+      phase VARCHAR(255) NULL,
+      attempt_count INT NOT NULL DEFAULT 0,
+      message TEXT NULL,
+      queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME NULL,
+      heartbeat_at DATETIME NULL,
+      finished_at DATETIME NULL,
+      retry_after DATETIME NULL,
+      UNIQUE KEY uniq_job (batch, platform, account_id, sd),
+      INDEX idx_status (status, kind, id)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS nexus_coverage (
+      platform CHAR(1) NOT NULL,
+      account_id VARCHAR(64) NOT NULL,
+      dt DATE NOT NULL,
+      account_name VARCHAR(255) NOT NULL DEFAULT '',
+      fact_rows INT NOT NULL DEFAULT 0,
+      imp BIGINT NOT NULL DEFAULT 0,
+      spend DECIMAL(18,4) NOT NULL DEFAULT 0,
+      synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (platform, account_id, dt),
+      INDEX idx_dt (platform, dt)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  nexusSchemaReady = true;
+  return p;
+}
+
+/** 入列（同 batch+平台+帳戶+起日 重複入列會被忽略＝cron 重打冪等）。 */
+export async function enqueueNexusJobs(
+  batch: string, kind: NexusJobKind, jobs: NexusJobInput[]
+): Promise<{ total: number; created: number }> {
+  const p = await nexusPool();
+  let created = 0;
+  // 回補一次可能上千筆，分批塞避免單一 SQL 過長
+  for (let i = 0; i < jobs.length; i += 500) {
+    const chunk = jobs.slice(i, i + 500);
+    const ph = chunk.map(() => `(?, ?, ?, ?, ?, ?, ?)`).join(',');
+    const params = chunk.flatMap((j) => [batch, kind, j.platform, j.accountId, j.accountName.slice(0, 255), j.sd, j.ed]);
+    const [res] = await p.query(
+      `INSERT IGNORE INTO nexus_jobs (batch, kind, platform, account_id, account_name, sd, ed) VALUES ${ph}`, params
+    );
+    created += Number((res as any).affectedRows ?? 0);
+  }
+  return { total: jobs.length, created };
+}
+
+function mapNexusJob(r: any): NexusJobRow {
+  return {
+    id: Number(r.id), batch: r.batch, kind: r.kind, platform: r.platform,
+    accountId: String(r.account_id), accountName: r.account_name, sd: r.sd, ed: r.ed,
+    status: r.status, phase: r.phase, attemptCount: Number(r.attempt_count), message: r.message,
+    queuedAt: r.queued_at ?? null, startedAt: r.started_at ?? null, finishedAt: r.finished_at ?? null,
+  };
+}
+const NEXUS_JOB_COLS = `id, batch, kind, platform, account_id, account_name,
+  DATE_FORMAT(sd,'%Y-%m-%d') AS sd, DATE_FORMAT(ed,'%Y-%m-%d') AS ed, status, phase, attempt_count, message,
+  DATE_FORMAT(CONVERT_TZ(queued_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS queued_at,
+  DATE_FORMAT(CONVERT_TZ(started_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS started_at,
+  DATE_FORMAT(CONVERT_TZ(finished_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS finished_at`;
+
+/**
+ * 認領下一筆（每日優先於回補，同類先進先出）。呼叫端須持有 withNexusWorkerLock，這裡就不必再防並發。
+ * 順手把心跳停太久的 running 收掉：還有重試額度就放回佇列，沒有就標失敗。
+ */
+export async function claimNextNexusJob(): Promise<NexusJobRow | null> {
+  const p = await nexusPool();
+  await p.query(
+    `UPDATE nexus_jobs
+        SET status = IF(attempt_count < ${NEXUS_MAX_ATTEMPTS}, 'queued', 'failed'),
+            phase = '執行逾時', message = '心跳停止超過 ${NEXUS_TIMEOUT_MIN} 分鐘（容器被中斷？）',
+            finished_at = IF(attempt_count < ${NEXUS_MAX_ATTEMPTS}, NULL, NOW())
+      WHERE status = 'running'
+        AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL ${NEXUS_TIMEOUT_MIN} MINUTE`
+  );
+  const [rows] = await p.query(
+    `SELECT id FROM nexus_jobs WHERE status = 'queued' AND (retry_after IS NULL OR retry_after <= NOW())
+      ORDER BY kind = 'daily' DESC, id ASC LIMIT 1`
+  );
+  const id = (rows as any[])[0]?.id;
+  if (!id) return null;
+  const [res] = await p.query(
+    `UPDATE nexus_jobs SET status='running', phase='開始執行…', attempt_count = attempt_count + 1,
+       started_at = NOW(), heartbeat_at = NOW(), finished_at = NULL
+     WHERE id = ? AND status = 'queued'`, [id]
+  );
+  if (Number((res as any).affectedRows ?? 0) === 0) return null;
+  const [one] = await p.query(`SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs WHERE id = ?`, [id]);
+  return (one as any[])[0] ? mapNexusJob((one as any[])[0]) : null;
+}
+
+export async function markNexusJobPhase(id: number, phase: string): Promise<void> {
+  const p = await nexusPool();
+  await p.query(`UPDATE nexus_jobs SET phase = ?, heartbeat_at = NOW() WHERE id = ? AND status = 'running'`, [phase.slice(0, 255), id]);
+}
+
+export async function markNexusJobDone(id: number, message: string): Promise<void> {
+  const p = await nexusPool();
+  await p.query(
+    `UPDATE nexus_jobs SET status='success', phase='完成', message=?, heartbeat_at=NOW(), finished_at=NOW() WHERE id=?`,
+    [message, id]
+  );
+}
+
+/** 失敗：還有重試額度就放回佇列、10 分鐘後才可再認領（限流類錯誤立刻重打只會再撞），否則標 failed。回傳是否已放棄。 */
+export async function markNexusJobFailed(id: number, error: string): Promise<boolean> {
+  const p = await nexusPool();
+  const [rows] = await p.query(`SELECT attempt_count FROM nexus_jobs WHERE id = ?`, [id]);
+  const attempts = Number((rows as any[])[0]?.attempt_count ?? NEXUS_MAX_ATTEMPTS);
+  const giveUp = attempts >= NEXUS_MAX_ATTEMPTS;
+  await p.query(
+    `UPDATE nexus_jobs SET status=?, phase=?, message=?, heartbeat_at=NOW(), finished_at=IF(?, NOW(), NULL),
+       started_at=IF(?, started_at, NULL), retry_after=IF(?, NULL, NOW() + INTERVAL 10 MINUTE) WHERE id=?`,
+    [giveUp ? 'failed' : 'queued', giveUp ? '失敗' : `第 ${attempts} 次失敗，10 分鐘後重試`, error.slice(0, 4000), giveUp, giveUp, giveUp, id]
+  );
+  return giveUp;
+}
+
+export async function listNexusJobs(limit = 200): Promise<NexusJobRow[]> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs
+      ORDER BY FIELD(status,'running','failed','queued','success'), id DESC LIMIT ?`, [limit]
+  );
+  return (rows as any[]).map(mapNexusJob);
+}
+
+export async function nexusJobCounts(): Promise<{ kind: string; status: string; n: number }[]> {
+  const p = await nexusPool();
+  const [rows] = await p.query(`SELECT kind, status, COUNT(*) AS n FROM nexus_jobs GROUP BY kind, status`);
+  return (rows as any[]).map((r) => ({ kind: r.kind, status: r.status, n: Number(r.n) }));
+}
+
+/** 整個 worker 迴圈持有的全域鎖；拿不到＝另一個 worker 正在跑，這次直接收工。 */
+export async function withNexusWorkerLock<T>(work: () => Promise<T>): Promise<T | null> {
+  const p = await nexusPool();
+  const conn = await p.getConnection();
+  let locked = false;
+  try {
+    const [rows] = await conn.query(`SELECT GET_LOCK(?, 0) AS acquired`, [NEXUS_LOCK]);
+    locked = Number((rows as any[])[0]?.acquired ?? 0) === 1;
+    if (!locked) return null;
+    return await work();
+  } finally {
+    if (locked) await conn.query(`SELECT RELEASE_LOCK(?)`, [NEXUS_LOCK]);
+    conn.release();
+  }
+}
+
+/** 某平台（某帳戶，或 accountId=null 表示全部帳戶）在區間內「曾寫進 BQ 的列數」合計。 */
+export async function nexusCoveredRows(platform: NexusPlatform, accountId: string | null, sd: string, ed: string): Promise<number> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT COALESCE(SUM(fact_rows),0) AS n FROM nexus_coverage
+      WHERE platform = ? AND dt BETWEEN ? AND ? ${accountId === null ? '' : 'AND account_id = ?'}`,
+    accountId === null ? [platform, sd, ed] : [platform, sd, ed, accountId]
+  );
+  return Number((rows as any[])[0]?.n ?? 0);
+}
+
+export interface NexusCoverageEntry { accountId: string; accountName: string; dt: string; factRows: number; imp: number; spend: number }
+
+/**
+ * BQ 寫入成功後同步覆蓋紀錄：先清掉這段區間（該帳戶，或 accountId=null＝整個平台）再寫入這次的結果。
+ * 必須在 BQ 成功之後才呼叫——順序反了，BQ 失敗時覆蓋紀錄會說「有寫」。
+ */
+export async function replaceNexusCoverage(
+  platform: NexusPlatform, accountId: string | null, sd: string, ed: string, entries: NexusCoverageEntry[]
+): Promise<void> {
+  const p = await nexusPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(
+      `DELETE FROM nexus_coverage WHERE platform = ? AND dt BETWEEN ? AND ? ${accountId === null ? '' : 'AND account_id = ?'}`,
+      accountId === null ? [platform, sd, ed] : [platform, sd, ed, accountId]
+    );
+    for (let i = 0; i < entries.length; i += 500) {
+      const chunk = entries.slice(i, i + 500);
+      await conn.query(
+        `INSERT INTO nexus_coverage (platform, account_id, dt, account_name, fact_rows, imp, spend) VALUES ${chunk.map(() => '(?,?,?,?,?,?,?)').join(',')}`,
+        chunk.flatMap((e) => [platform, e.accountId, e.dt, e.accountName.slice(0, 255), e.factRows, e.imp, e.spend])
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+/** 狀態頁用：各平台已寫到哪天、最近 7 天每天多少列／帳戶。 */
+export async function nexusCoverageSummary(): Promise<{ platform: string; dt: string; accounts: number; rows: number; imp: number; spend: number }[]> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT platform, DATE_FORMAT(dt,'%Y-%m-%d') AS dt, SUM(fact_rows > 0) AS accounts, SUM(fact_rows) AS n,
+            SUM(imp) AS imp, SUM(spend) AS spend
+       FROM nexus_coverage WHERE dt >= CURDATE() - INTERVAL 14 DAY
+      GROUP BY platform, dt ORDER BY dt DESC, platform`
+  );
+  return (rows as any[]).map((r) => ({
+    platform: r.platform, dt: r.dt, accounts: Number(r.accounts), rows: Number(r.n), imp: Number(r.imp), spend: Number(r.spend),
+  }));
+}

@@ -9,6 +9,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#6＝酷澎聯盟投放：Coupang Partners 聯盟商品（reco）自動上架到 R 平台帳戶 10222 投放，看板對照聯盟佣金與廣告花費。2026-08-25 建立時零資料表，2026-08-26 起改建表（見下）。2026-09-21 接回 Coupang 聯盟佣金／訂單報表（08-27 誤判「全是 0」拿掉過）。2026-09-03 改成兩支 campaign、2026-09-07 又改回**一支**（R 端把流量調節改設在帳戶層），同期移除 Siri 捷徑 API。
 - tool#7＝FUI 面板（`/tools/fuidash`）：**視覺語言實驗頁，全部是合成假資料**，不接任何後端。2026-08-27 建立，起因是想把科幻片 HUD 那套「資訊密度＋發光訊號」在專案裡真的做一次。不上首頁導覽列（比照 `adstream-lab`），只走直接網址。
 - tool#8＝D1 影音報表（`/tools/d1videoad`）：D1 平台**影音廣告**的曝光／點擊／25-50-75%／完整播放報表，含折線圖、campaign 表格與 Excel 匯出。2026-09-01 建立，**零資料表、零排程**（清單即時查 Firestore、成效即時打 Action4）。**D 平台報表 API 完全拿不到影音**，見下。
+- tool#9＝nexus 資料倉庫（`/tools/nexus`，狀態頁不上導覽列）：四平台全帳戶「素材 × 日」每日寫進 BQ `popinpoc1.reporting.nexus_*`，給 Looker Studio（老闆以 customer 角度看）與各報表工具共用。2026-09-23 建立。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
@@ -49,6 +50,7 @@ popin 內部工具集（取代舊 dctool）。
 - `/tools/coupangads/cron?key=...`：酷澎聯盟投放輪替（Cloud Scheduler `coupangads-sync` 每天 09:50 POST）
 - `/tools/coupangads/collect/cron?key=...`：酷澎成效收集（Cloud Scheduler `coupangads-collect` 每小時 :30 POST，對齊 R 的每小時批次）
 - `/tools/coupangads/bq/cron?key=...`：酷澎 R 成效全量寫進 BigQuery（Cloud Scheduler `coupangads-bq`，**每天 04:00 台北**；帶 `&dry=1` 只算不寫）
+- `/tools/nexus/cron?key=...`：nexus 資料倉庫每日入列（T-2~T-1）；`/tools/nexus/worker/cron?key=...` 每分鐘 worker；`/tools/nexus/backfill/cron?key=...&sd=&ed=` 手動回補
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 各工具細節（放在子目錄，碰到該目錄檔案時自動載入）
@@ -59,5 +61,6 @@ popin 內部工具集（取代舊 dctool）。
 - tool#6 酷澎聯盟投放 → `src/tools/coupangads/CLAUDE.md`
 - tool#7 FUI 面板 → `src/tools/fuidash/CLAUDE.md`
 - tool#8 D1 影音報表 → `src/tools/d1videoad/CLAUDE.md`
+- tool#9 nexus 資料倉庫 → `src/tools/nexus/CLAUDE.md`
 - Token 管理頁 → `src/tools/tokens/CLAUDE.md`
 - 待辦（各工具線上待驗清單） → `docs/TODO.md`

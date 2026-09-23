@@ -31,12 +31,12 @@ export function normalizePrismDate(value: unknown): string {
   return new Date(ts).toISOString().slice(0, 10);
 }
 
-function validateOptions(opts: PrismReportOptions) {
+function validateOptions(opts: PrismReportOptions, allAdvertisers = false) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(opts.endDate)) {
     throw new Error('P API 日期格式錯誤');
   }
   if (opts.endDate < opts.startDate) throw new Error('P API 結束日不可早於開始日');
-  if (!opts.advertiserIds.length) throw new Error('P API 至少需要一個 advertiser ID');
+  if (!allAdvertisers && !opts.advertiserIds.length) throw new Error('P API 至少需要一個 advertiser ID');
   if (opts.advertiserIds.some((id) => !/^\d{3}-\d{3}-\d{4}$/.test(id))) {
     throw new Error('P API advertiser ID 格式錯誤（應為 000-000-0000）');
   }
@@ -50,7 +50,20 @@ function validateOptions(opts: PrismReportOptions) {
 
 /** 取得 P 報表原始列；送出前與收到後都驗欄位，避免 API 靜默吞掉打錯的欄位。 */
 export async function fetchPrismReport(opts: PrismReportOptions): Promise<PrismReportRow[]> {
-  validateOptions(opts);
+  return requestPrism(opts, false);
+}
+
+/**
+ * 全部廣告主（不帶 advertiser_ids）。**只給 tool#9 nexus 資料倉庫用**：倉庫本來就要收全平台，
+ * 其餘工具一律走 fetchPrismReport 並明確指定 advertiser，避免誤抓全平台資料。
+ * ⚠️ 注意是「省略欄位」而不是送空陣列——空陣列會讓 P 後端組出 `IN ()` 而 500。
+ */
+export async function fetchPrismReportAll(opts: Omit<PrismReportOptions, 'advertiserIds'>): Promise<PrismReportRow[]> {
+  return requestPrism({ ...opts, advertiserIds: [] }, true);
+}
+
+async function requestPrism(opts: PrismReportOptions, allAdvertisers: boolean): Promise<PrismReportRow[]> {
+  validateOptions(opts, allAdvertisers);
   const token = process.env.PRISM_API_TOKEN ?? '';
   if (!token) throw new Error('缺少 P API token（設定 env PRISM_API_TOKEN）');
 
@@ -64,7 +77,7 @@ export async function fetchPrismReport(opts: PrismReportOptions): Promise<PrismR
       dimensions: opts.dimensions,
       metrics: opts.metrics,
       format: 'json',
-      advertiser_ids: opts.advertiserIds,
+      ...(allAdvertisers ? {} : { advertiser_ids: opts.advertiserIds }),
     }),
     signal: AbortSignal.timeout(60_000),
   });

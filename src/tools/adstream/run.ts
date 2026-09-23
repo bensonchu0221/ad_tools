@@ -229,7 +229,7 @@ function perAdWindows(sd: string, ed: string): { sd: string; ed: string }[] {
  * ⚠️ per-ad 限流 1 req/s（最嚴），故此處是整個 D 抓取變慢的主因；失敗（getDateReports 內已重試兜底）
  *   往外拋，由 runConfig 的原子性接住（整次不寫、不推進游標）。
  */
-async function fetchCvDetailMap(
+export async function fetchCvDetailMap(
   accessToken: string,
   bulkRows: any[],
   sd: string,

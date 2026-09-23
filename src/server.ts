@@ -18,6 +18,7 @@ import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.
 import { registerMgidSource, BASE_PATH as MGIDSOURCE } from './tools/mgidsource/route.js';
 import { registerCoupangAds, BASE_PATH as COUPANGADS } from './tools/coupangads/route.js';
 import { registerD1VideoAd, BASE_PATH as D1VIDEOAD } from './tools/d1videoad/route.js';
+import { registerNexus } from './tools/nexus/route.js'; // tool#9 nexus 資料倉庫：不上首頁選單，狀態頁走直接網址
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
@@ -122,6 +123,7 @@ await registerGcpWatch(app);
 await registerMgidSource(app);
 registerCoupangAds(app);
 registerD1VideoAd(app);
+registerNexus(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));

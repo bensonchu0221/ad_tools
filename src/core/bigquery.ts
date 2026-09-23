@@ -97,3 +97,123 @@ export async function bqListTableRows(table: string, opts: { pageSize?: number; 
   } while (pageToken);
   return out;
 }
+
+// ---------- 建表／批次載入（tool#9 nexus 資料倉庫用） ----------
+
+export interface BqField { name: string; type: string; mode?: 'NULLABLE' | 'REQUIRED' | 'REPEATED'; description?: string }
+
+export interface BqTableSpec {
+  /** `project.dataset.table` */
+  table: string;
+  schema: BqField[];
+  /** 日分區欄（DATE）；有給就會開 requirePartitionFilter，防止有人不帶日期全表掃描。 */
+  partitionField?: string;
+  clustering?: string[];
+  description?: string;
+  /** 暫存表用：到期自動刪除（毫秒 epoch）。 */
+  expirationTime?: number;
+}
+
+function splitTable(table: string): { projectId: string; datasetId: string; tableId: string } {
+  const [projectId, datasetId, tableId] = table.split('.');
+  if (!projectId || !datasetId || !tableId) throw new Error(`表名格式要是 project.dataset.table：${table}`);
+  return { projectId, datasetId, tableId };
+}
+
+/** 表存在就回 false、不存在就照 spec 建立回 true（不會改既有表的 schema）。建表本身不計費。 */
+export async function bqEnsureTable(spec: BqTableSpec): Promise<boolean> {
+  const bq = getBq();
+  const ref = splitTable(spec.table);
+  try {
+    await bq.tables.get(ref);
+    return false;
+  } catch (e: any) {
+    if (Number(e?.code ?? e?.response?.status) !== 404) throw e;
+  }
+  await bq.tables.insert({
+    projectId: ref.projectId,
+    datasetId: ref.datasetId,
+    requestBody: {
+      tableReference: ref,
+      schema: { fields: spec.schema },
+      description: spec.description,
+      expirationTime: spec.expirationTime ? String(spec.expirationTime) : undefined,
+      timePartitioning: spec.partitionField
+        ? { type: 'DAY', field: spec.partitionField, requirePartitionFilter: true }
+        : undefined,
+      clustering: spec.clustering?.length ? { fields: spec.clustering } : undefined,
+    },
+  });
+  return true;
+}
+
+/** view 不存在就建、存在就把 SQL 蓋成最新版。 */
+export async function bqUpsertView(table: string, sql: string, description?: string): Promise<void> {
+  const bq = getBq();
+  const ref = splitTable(table);
+  const requestBody = { tableReference: ref, description, view: { query: sql, useLegacySql: false } };
+  try {
+    await bq.tables.get(ref);
+    await bq.tables.update({ ...ref, requestBody });
+  } catch (e: any) {
+    if (Number(e?.code ?? e?.response?.status) !== 404) throw e;
+    await bq.tables.insert({ projectId: ref.projectId, datasetId: ref.datasetId, requestBody });
+  }
+}
+
+/** 刪表（不存在視為成功）。 */
+export async function bqDeleteTable(table: string): Promise<void> {
+  const bq = getBq();
+  try {
+    await bq.tables.delete(splitTable(table));
+  } catch (e: any) {
+    if (Number(e?.code ?? e?.response?.status) !== 404) throw e;
+  }
+}
+
+/**
+ * 用 **load job** 把列寫進表（NDJSON 上傳）。load job 不計費，這是它比 INSERT DML／streaming insert 好的地方；
+ * 也沒有 streaming buffer，寫完馬上可以被 DML 刪改。
+ * rows 的 key 必須是 schema 欄名；日期給 'YYYY-MM-DD'、TIMESTAMP 給 ISO 字串。
+ */
+export async function bqLoadRows(
+  table: string, schema: BqField[], rows: Record<string, unknown>[],
+  opts: { writeDisposition?: 'WRITE_APPEND' | 'WRITE_TRUNCATE' } = {}
+): Promise<void> {
+  if (!rows.length) return;
+  const bq = getBq();
+  const ref = splitTable(table);
+  const ndjson = rows.map((r) => JSON.stringify(r)).join('\n');
+  const { Readable } = await import('node:stream');
+  const res: any = await bq.jobs.insert({
+    projectId: ref.projectId,
+    requestBody: {
+      jobReference: { projectId: ref.projectId, location: BQ_LOCATION },
+      configuration: {
+        load: {
+          destinationTable: ref,
+          schema: { fields: schema },
+          sourceFormat: 'NEWLINE_DELIMITED_JSON',
+          writeDisposition: opts.writeDisposition ?? 'WRITE_APPEND',
+          createDisposition: 'CREATE_NEVER',
+        },
+      },
+    },
+    media: { mimeType: 'application/octet-stream', body: Readable.from([Buffer.from(ndjson, 'utf8')]) },
+  });
+  const jobId = res.data?.jobReference?.jobId;
+  if (!jobId) throw new Error('BigQuery load: 沒有拿到 jobId');
+  for (let i = 0; i < 120; i++) {
+    const j: any = await bq.jobs.get({ projectId: ref.projectId, jobId, location: BQ_LOCATION });
+    if (j.data.status?.state === 'DONE') {
+      const err = j.data.status?.errorResult;
+      if (err) {
+        const detail = (j.data.status?.errors ?? []).slice(0, 3).map((x: any) => x.message).join('；');
+        throw new Error(`BigQuery load 失敗：${err.message}${detail ? `（${detail}）` : ''}`);
+      }
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error('BigQuery load: 等待 job 完成逾時');
+}

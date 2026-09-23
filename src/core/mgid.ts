@@ -150,6 +150,24 @@ export async function getClientTimezone(client: MgidClient): Promise<string> {
   return tz;
 }
 
+// 帳戶幣別快取（一帳一次 GET /clients/{id}，回應 wallet.currency；實測 twd／usd 兩種）。
+const currencyCache = new Map<string, string>();
+
+/** 取該帳戶幣別（小寫，如 twd／usd）。查不到回空字串，不讓幣別查詢中斷報表抓取。 */
+export async function getClientCurrency(client: MgidClient): Promise<string> {
+  const hit = currencyCache.get(client.apiClientId);
+  if (hit !== undefined) return hit;
+  let cur = '';
+  try {
+    const j = await get(`${BASE}/clients/${client.apiClientId}`, client.token);
+    cur = String(j?.wallet?.currency ?? '').trim().toLowerCase();
+  } catch {
+    // 幣別只是標註用，查不到就留空
+  }
+  currencyCache.set(client.apiClientId, cur);
+  return cur;
+}
+
 // YYYY-MM-DD 加 n 天（純 UTC 字串運算）
 function addDays(ymd: string, n: number): string {
   const d = new Date(`${ymd}T00:00:00Z`);
