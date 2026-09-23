@@ -50,7 +50,7 @@ popin 內部工具集（取代舊 dctool）。
 - `/tools/coupangads/cron?key=...`：酷澎聯盟投放輪替（Cloud Scheduler `coupangads-sync` 每天 09:50 POST）
 - `/tools/coupangads/collect/cron?key=...`：酷澎成效收集（Cloud Scheduler `coupangads-collect` 每小時 :30 POST，對齊 R 的每小時批次）
 - `/tools/coupangads/bq/cron?key=...`：酷澎 R 成效全量寫進 BigQuery（Cloud Scheduler `coupangads-bq`，**每天 04:00 台北**；帶 `&dry=1` 只算不寫）
-- `/tools/nexus/cron?key=...`：nexus 資料倉庫每日入列（T-2~T-1）；`/tools/nexus/worker/cron?key=...` 每分鐘 worker；`/tools/nexus/backfill/cron?key=...&sd=&ed=` 手動回補
+- `/tools/nexus/cron?key=...`：nexus 資料倉庫每日入列（T-2~T-1）；`/tools/nexus/worker/cron?key=...` 每分鐘 worker；`/tools/nexus/backfill/cron?key=...&sd=&ed=` 手動回補；`/tools/nexus/health/cron?key=...` 每日健檢推 Google Chat（Scheduler `nexus-health` 07:00）
 - **⚠️ 凡是給機器打、沒有登入 cookie 的端點（/health/*、/cron）都必須在 `auth.ts` preHandler 白名單放行**，否則會被 OAuth 守衛 302 導去 /login（外部呼叫端看到 404/redirect，從不進 handler）。現行白名單：`/login`、`/auth/*`、`/health*`、`path.endsWith('/cron')`。新增排程工具時別忘了這條（曾因此 AdStream 排程一直沒跑成功）
 
 ## 各工具細節（放在子目錄，碰到該目錄檔案時自動載入）

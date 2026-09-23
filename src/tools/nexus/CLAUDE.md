@@ -17,4 +17,5 @@
 - **回補**：`/backfill/cron?key=&sd=&ed=&platforms=DRMP`，預設 **2026-05-21**（P 最早資料日，使用者拍板）~ T-3。D 14 天一段、R/M/P 30 天一段。
 - **排程時間＝台北 04:00**（使用者 2026-09-23 拍板）。**⚠️ D token 互踢**：`getAccessToken` 會讓同 token 舊的 access_token 失效。Report Hub `adstream-daily` 05:00 開跑、實測 05:00~06:10 結束 → 倉庫要在 05:00 前把 D 跑完，否則同一 D 帳號兩邊互踢 401（失敗的 job 10 分鐘後自動重試，能自癒但會吵）。上線後要看 D 全帳戶實際跑多久。
 - **成本**：load job 免費；每個有資料的 job 約 4 句 DML（每句最低計 10MB）；P 每 job 呼叫 2 次＝P 後端查 `prism_events` 2 次（dry-run 上限：每日 2 天約 4.76GB/次、回補全段約 113GB 一次性）。
-- 驗證：`tests/verify_nexus.mts`（純函式＋job 防呆，18 項）。**2026-09-23 本機真寫 BQ 驗過**（2026-09-21~22）：D 31243／R 全平台／M 867481／P 全平台，事實表＝裝置表＝view 三邊曝光與花費逐項一致（R 裝置花費差 0.03 為四捨五入）。
+- **每日健檢**（`health.ts`，2026-09-23）：Cloud Scheduler `nexus-health` 台北 **07:00** POST `/tools/nexus/health/cron`（`&dry=1` 只算不發）→ Google Chat（webhook 在 Secret Manager `ad-tools-nexus-chat-webhook` → env `NEXUS_CHAT_WEBHOOK`；**網址即憑證，不可進 repo**）。**每天都發**（正常一行綠燈），因為只在異常才發的話，健檢自己壞掉跟一切正常看起來一樣。只讀 Cloud SQL、不查 BQ。檢查：①今天每日批次有沒有入列、跑完沒、幾點跑完（>04:50 黃燈）②近 24h 重試 3 次仍失敗的 job（紅）③各平台 T-1 有沒有資料（紅）、曝光／花費對前 7 天中位數 <50% 紅、>3 倍黃 ④前 3 天天天有花費、T-1 突然沒有的帳戶（黃）⑤回補進度。門檻在 `HEALTH` 常數。狀態頁最上方即時顯示同一份結果。**偵測不到的**：D/M 新開帳戶沒登錄 token（API 拿不到代理商底下的帳戶清單）。
+- 驗證：`tests/verify_nexus.mts`（純函式＋job 防呆＋健檢，24 項）。**2026-09-23 本機真寫 BQ 驗過**（2026-09-21~22）：D 31243／R 全平台／M 867481／P 全平台，事實表＝裝置表＝view 三邊曝光與花費逐項一致（R 裝置花費差 0.03 為四捨五入）。

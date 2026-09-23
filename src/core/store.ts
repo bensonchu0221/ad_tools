@@ -2414,3 +2414,64 @@ export async function nexusCoverageSummary(): Promise<{ platform: string; dt: st
     platform: r.platform, dt: r.dt, accounts: Number(r.accounts), rows: Number(r.n), imp: Number(r.imp), spend: Number(r.spend),
   }));
 }
+
+// ---------- tool#9 nexus 每日健檢用查詢（只讀 Cloud SQL，不碰 BQ） ----------
+
+export interface NexusBatchStats {
+  total: number; queued: number; running: number; success: number; failed: number;
+  /** 台北時間 YYYY-MM-DD HH:MM:SS；還沒有任何 job 完成時為 null */
+  lastFinished: string | null;
+}
+
+export async function nexusBatchStats(batch: string): Promise<NexusBatchStats> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT COUNT(*) AS total, SUM(status='queued') AS queued, SUM(status='running') AS running,
+            SUM(status='success') AS success, SUM(status='failed') AS failed,
+            DATE_FORMAT(CONVERT_TZ(MAX(finished_at),'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS last_finished
+       FROM nexus_jobs WHERE batch = ?`, [batch]
+  );
+  const r = (rows as any[])[0] ?? {};
+  return {
+    total: Number(r.total ?? 0), queued: Number(r.queued ?? 0), running: Number(r.running ?? 0),
+    success: Number(r.success ?? 0), failed: Number(r.failed ?? 0), lastFinished: r.last_finished ?? null,
+  };
+}
+
+/** 最近 N 小時內放棄重試（最終 failed）的 job。 */
+export async function nexusRecentFailures(hours: number, limit = 20): Promise<NexusJobRow[]> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs
+      WHERE status = 'failed' AND finished_at >= NOW() - INTERVAL ? HOUR
+      ORDER BY id DESC LIMIT ?`, [hours, limit]
+  );
+  return (rows as any[]).map(mapNexusJob);
+}
+
+/** 回補批次整體狀態（健檢順帶報進度）。 */
+export async function nexusBackfillStats(): Promise<{ queued: number; running: number; success: number; failed: number }> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT SUM(status='queued') AS queued, SUM(status='running') AS running,
+            SUM(status='success') AS success, SUM(status='failed') AS failed
+       FROM nexus_jobs WHERE kind = 'backfill'`
+  );
+  const r = (rows as any[])[0] ?? {};
+  return { queued: Number(r.queued ?? 0), running: Number(r.running ?? 0), success: Number(r.success ?? 0), failed: Number(r.failed ?? 0) };
+}
+
+/** 覆蓋紀錄逐帳戶逐日（健檢比對量的異常用）。 */
+export async function nexusCoverageRows(sd: string, ed: string): Promise<{
+  platform: NexusPlatform; accountId: string; accountName: string; dt: string; rows: number; imp: number; spend: number;
+}[]> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT platform, account_id, account_name, DATE_FORMAT(dt,'%Y-%m-%d') AS dt, fact_rows, imp, spend
+       FROM nexus_coverage WHERE dt BETWEEN ? AND ?`, [sd, ed]
+  );
+  return (rows as any[]).map((r) => ({
+    platform: r.platform, accountId: String(r.account_id), accountName: r.account_name, dt: r.dt,
+    rows: Number(r.fact_rows), imp: Number(r.imp), spend: Number(r.spend),
+  }));
+}

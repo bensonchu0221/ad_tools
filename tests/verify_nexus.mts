@@ -8,6 +8,7 @@ import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
+import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
 import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
 
 const T = '2026-09-23T00:00:00.000Z';
@@ -226,6 +227,82 @@ await ok('view SQL：四平台 UNION＋customer 對照先收斂成一帳一列',
   }
   assert.equal((sql.match(/UNION ALL/g) ?? []).length, 3);
   assert.match(sql, /GROUP BY platform, account_id/);
+});
+
+// ── 每日健檢 ──
+function healthBase(): HealthInput {
+  const coverage: HealthInput['coverage'] = [];
+  // 前 8 天：四平台每天都有量；D 帳戶 A 天天有花費
+  for (let k = 1; k <= 8; k++) {
+    const dt = addDays('2026-09-24', -k);
+    coverage.push({ platform: 'D', accountId: 'A', accountName: '帳A', dt, rows: 10, imp: 1000, spend: 100 });
+    coverage.push({ platform: 'R', accountId: '9', accountName: 'R帳', dt, rows: 50, imp: 50000, spend: 5000 });
+    coverage.push({ platform: 'M', accountId: 'm', accountName: 'M帳', dt, rows: 5, imp: 3000, spend: 300 });
+    coverage.push({ platform: 'P', accountId: 'p', accountName: 'P帳', dt, rows: 3, imp: 9000, spend: 900 });
+  }
+  return {
+    today: '2026-09-24',
+    batch: { total: 290, queued: 0, running: 0, success: 290, failed: 0, lastFinished: '2026-09-24 04:31:00' },
+    failures: [], backfill: { queued: 0, running: 0, success: 10, failed: 0 }, coverage,
+  };
+}
+
+await ok('健檢：一切正常 → 綠燈、摘要含各平台', () => {
+  const r = evaluateHealth(healthBase());
+  assert.equal(r.level, 'ok');
+  assert.deepEqual(r.items, []);
+  assert.match(r.summary.join('|'), /290\/290 成功，04:31 跑完/);
+  assert.match(formatChat(r, 'URL'), /🟢/);
+});
+
+await ok('健檢：批次沒入列／沒跑完 → 紅燈；跑太晚 → 黃燈', () => {
+  const a = healthBase(); a.batch = { total: 0, queued: 0, running: 0, success: 0, failed: 0, lastFinished: null };
+  assert.equal(evaluateHealth(a).level, 'alert');
+  const b = healthBase(); b.batch = { ...b.batch, queued: 3, success: 287 };
+  assert.match(evaluateHealth(b).items[0].text, /還有 3／290/);
+  const c = healthBase(); c.batch = { ...c.batch, lastFinished: '2026-09-24 05:12:00' };
+  const rc = evaluateHealth(c);
+  assert.equal(rc.level, 'warn');
+  assert.match(rc.items[0].text, /05:12 才跑完/);
+});
+
+await ok('健檢：有 job 放棄重試 → 紅燈並列出錯誤', () => {
+  const a = healthBase();
+  a.failures = [{ id: 1, batch: 'daily:2026-09-24', kind: 'daily', platform: 'D', accountId: 'A', accountName: '帳A',
+    sd: '2026-09-22', ed: '2026-09-23', status: 'failed', phase: null, attemptCount: 3, message: 'token 失效',
+    queuedAt: null, startedAt: null, finishedAt: null }];
+  const r = evaluateHealth(a);
+  assert.equal(r.level, 'alert');
+  assert.match(r.items[0].text, /D 帳A 2026-09-22~2026-09-23：token 失效/);
+});
+
+await ok('健檢：某平台 T-1 完全沒資料 → 紅燈', () => {
+  const a = healthBase();
+  a.coverage = a.coverage.filter((c) => !(c.platform === 'P' && c.dt === '2026-09-23'));
+  const r = evaluateHealth(a);
+  assert.equal(r.level, 'alert');
+  assert.ok(r.items.some((i) => /P（Prism） 2026-09-23 沒有任何資料/.test(i.text)));
+});
+
+await ok('健檢：T-1 量掉到中位數一半以下 → 紅燈；暴增 3 倍以上 → 黃燈', () => {
+  const a = healthBase();
+  for (const c of a.coverage) if (c.platform === 'R' && c.dt === '2026-09-23') { c.imp = 20000; c.spend = 5000; }
+  const ra = evaluateHealth(a);
+  assert.equal(ra.level, 'alert');
+  assert.ok(ra.items.some((i) => /R（Rixbee）.*曝光 20,000.*40%/.test(i.text)));
+  const b = healthBase();
+  for (const c of b.coverage) if (c.platform === 'M' && c.dt === '2026-09-23') c.spend = 1200;
+  const rb = evaluateHealth(b);
+  assert.equal(rb.level, 'warn');
+  assert.ok(rb.items.some((i) => /M（MGID）.*花費.*4\.0 倍/.test(i.text)));
+});
+
+await ok('健檢：帳戶前 3 天天天有花費、T-1 突然沒有 → 黃燈列帳戶；平台總量仍在就不紅', () => {
+  const a = healthBase();
+  a.coverage.push(...[2, 3, 4].map((k) => ({ platform: 'D' as const, accountId: 'B', accountName: '帳B', dt: addDays('2026-09-24', -k), rows: 1, imp: 10, spend: 1 })));
+  const r = evaluateHealth(a);
+  assert.equal(r.level, 'warn');
+  assert.match(r.items[0].text, /1 個帳戶.*D 帳B/);
 });
 
 console.log(`\n全部 ${n} 項通過`);
