@@ -6,8 +6,10 @@ import {
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
+  isSkipped, NexusNoRetryError, UNREACHABLE_TAG,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
+import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
 import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
 
@@ -266,14 +268,19 @@ await ok('健檢：批次沒入列／沒跑完 → 紅燈；跑太晚 → 黃燈
   assert.match(rc.items[0].text, /05:12 才跑完/);
 });
 
-await ok('健檢：有 job 放棄重試 → 紅燈並列出錯誤', () => {
+await ok('健檢：有 job 放棄重試 → 紅燈、同帳戶合併成一行', () => {
   const a = healthBase();
   a.failures = [{ id: 1, batch: 'daily:2026-09-24', kind: 'daily', platform: 'D', accountId: 'A', accountName: '帳A',
     sd: '2026-09-22', ed: '2026-09-23', status: 'failed', phase: null, attemptCount: 3, message: 'token 失效',
     queuedAt: null, startedAt: null, finishedAt: null }];
+  // 同帳戶再多兩個回補 job 失敗 → 合併成一行
+  a.failures.push({ ...a.failures[0], id: 2, kind: 'backfill', sd: '2026-07-01', ed: '2026-07-14' },
+    { ...a.failures[0], id: 3, kind: 'backfill', sd: '2026-07-15', ed: '2026-07-28' });
   const r = evaluateHealth(a);
   assert.equal(r.level, 'alert');
-  assert.match(r.items[0].text, /D 帳A 2026-09-22~2026-09-23：token 失效/);
+  assert.match(r.items[0].text, /1 個帳戶、共 3 個 job/);
+  assert.match(r.items[0].text, /D 帳A（3 個 job，2026-07-01~2026-09-23）：token 失效/);
+  assert.equal((r.items[0].text.match(/·/g) ?? []).length, 1);
 });
 
 await ok('健檢：某平台 T-1 完全沒資料 → 紅燈', () => {
@@ -303,6 +310,56 @@ await ok('健檢：帳戶前 3 天天天有花費、T-1 突然沒有 → 黃燈�
   const r = evaluateHealth(a);
   assert.equal(r.level, 'warn');
   assert.match(r.items[0].text, /1 個帳戶.*D 帳B/);
+});
+
+await ok('排除清單：3 個 MediaGo 舊帳戶略過、其他帳戶照抓', () => {
+  assert.equal(isSkipped({ platform: 'D', accountId: '1319' }), true);
+  assert.equal(isSkipped({ platform: 'D', accountId: '24492' }), true);
+  assert.equal(isSkipped({ platform: 'D', accountId: '31243' }), false);
+  assert.equal(isSkipped({ platform: 'M', accountId: '1319' }), false); // 只排除 D 平台的那個 id
+});
+
+await ok('job：D 拿不到帳戶＋倉庫從無數字 → 不重試錯誤（帶標記）；有過數字 → 原錯誤照走重試', async () => {
+  const boom = '認證失敗，請確認帳號 token（API 回應: {"errmsg":"invalid api token","errno":-1}）';
+  const a = fakeDeps({ prev: 0 });
+  a.deps.fetch = async () => { throw new Error(boom); };
+  const e1 = await runNexusJob(job, () => {}, a.deps).catch((e) => e);
+  assert.ok(e1 instanceof NexusNoRetryError);
+  assert.ok(String(e1.message).startsWith(UNREACHABLE_TAG));
+  const b = fakeDeps({ prev: 5 });
+  b.deps.fetch = async () => { throw new Error(boom); };
+  const e2 = await runNexusJob(job, () => {}, b.deps).catch((e) => e);
+  assert.ok(!(e2 instanceof NexusNoRetryError));
+  assert.equal(e2.message, boom);
+  const c = fakeDeps({ prev: 0 }); // 其他錯誤（例如限流）不受影響
+  c.deps.fetch = async () => { throw new Error('operateTooMuch'); };
+  assert.ok(!((await runNexusJob(job, () => {}, c.deps).catch((e) => e)) instanceof NexusNoRetryError));
+});
+
+await ok('健檢：拿不到但從無數字的帳戶 → 黃燈一行，不算紅燈', () => {
+  const a = healthBase();
+  const f = { id: 9, batch: 'daily:2026-09-24', kind: 'daily' as const, platform: 'D' as const, accountId: '999', accountName: '舊帳',
+    sd: '2026-09-22', ed: '2026-09-23', status: 'failed' as const, phase: null, attemptCount: 1,
+    message: `${UNREACHABLE_TAG} D 舊帳 …`, queuedAt: null, startedAt: null, finishedAt: null };
+  a.failures = [f, { ...f, id: 10, kind: 'backfill' }];
+  const r = evaluateHealth(a);
+  assert.equal(r.level, 'warn');
+  assert.equal(r.items.length, 1);
+  assert.match(r.items[0].text, /1 個帳戶 D 平台 API 拿不到.*D 舊帳（999）/);
+});
+
+await ok('getCampaigns：平台回錯誤要丟出來，不能當成 0 個 campaign', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ errmsg: "Please use Mediago's API to request.", errno: 403 }))) as any;
+    await assert.rejects(getCampaigns('x'), /Mediago/);
+    globalThis.fetch = (async () => new Response(JSON.stringify({ code: 0, data: [], message: 'Success' }))) as any;
+    assert.deepEqual(await getCampaigns('x'), []);
+    globalThis.fetch = (async () => new Response(JSON.stringify({ code: '0', data: [{ mongo_id: '1' }] }))) as any;
+    assert.equal((await getCampaigns('x')).length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 console.log(`\n全部 ${n} 項通過`);

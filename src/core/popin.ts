@@ -46,7 +46,14 @@ export async function getCampaigns(accessToken: string): Promise<any[]> {
     },
   ]);
   const json = JSON.parse(text);
-  return json?.data ?? [];
+  // 平台回錯誤要丟出來，不可當成「0 個 campaign」：2026-09-24 發現 MediaGo 帳戶會回
+  // {"errno":403,"errmsg":"Please use Mediago's API to request."}，舊寫法 `data ?? []` 把它吞成空清單，
+  // 報表看起來只是「沒投放」，其實是根本拿不到。
+  const code = json?.code ?? json?.errno;
+  if (code !== undefined && String(code) !== '0') {
+    throw new Error(`D campaign 清單取得失敗：${json?.errmsg ?? json?.message ?? `code=${code}`}`);
+  }
+  return Array.isArray(json?.data) ? json.data : [];
 }
 
 /** 取得多個 campaign 的廣告清單，攤平回傳 */

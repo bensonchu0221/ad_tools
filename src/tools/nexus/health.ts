@@ -8,7 +8,7 @@ import {
   nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows,
   type NexusBatchStats, type NexusJobRow, type NexusPlatform,
 } from '../../core/store.js';
-import { addDays, twToday } from './run.js';
+import { addDays, twToday, UNREACHABLE_TAG } from './run.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
 export interface HealthItem { level: Exclude<Level, 'ok'>; text: string }
@@ -66,11 +66,32 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     summary.push(`每日批次 ${b.success}/${b.total} 成功${hhmm ? `，${hhmm} 跑完` : ''}`);
   }
 
-  // ② 放棄重試的 job
-  if (inp.failures.length) {
-    const lines = inp.failures.slice(0, 8).map((f) =>
-      `  · ${f.platform} ${f.accountName} ${f.sd}~${f.ed}：${String(f.message ?? '').slice(0, 120)}`);
-    items.push({ level: 'alert', text: `近 24 小時有 ${inp.failures.length} 個 job 重試 3 次仍失敗：\n${lines.join('\n')}` });
+  // ② 放棄重試的 job。「D 平台拿不到、倉庫也從無數字」的帳戶單獨歸一行黃燈（多半是停用的舊帳戶），
+  //    其餘照紅燈——有數字的帳戶斷了才是真的會漏資料
+  const unreachable = inp.failures.filter((f) => String(f.message ?? '').startsWith(UNREACHABLE_TAG));
+  const failures = inp.failures.filter((f) => !String(f.message ?? '').startsWith(UNREACHABLE_TAG));
+  if (unreachable.length) {
+    const names = [...new Map(unreachable.map((f) => [`${f.platform}|${f.accountId}`, `${f.platform} ${f.accountName}（${f.accountId}）`])).values()];
+    items.push({
+      level: 'warn',
+      text: `${names.length} 個帳戶 D 平台 API 拿不到、倉庫也從未有它的數字（停用舊帳戶或已移到 MediaGo？確認後可加進排除清單）：${names.slice(0, 10).join('、')}${names.length > 10 ? '…' : ''}`,
+    });
+  }
+  if (failures.length) {
+    // 依帳戶合併：同一帳戶的每日＋回補 job 通常是同一個原因（例如 token 壞），逐條列只會洗版
+    const byAcct = new Map<string, { f: NexusJobRow; n: number; min: string; max: string }>();
+    for (const f of failures) {
+      const k = `${f.platform}|${f.accountId}`;
+      const g = byAcct.get(k);
+      if (!g) byAcct.set(k, { f, n: 1, min: f.sd, max: f.ed });
+      else { g.n++; if (f.sd < g.min) g.min = f.sd; if (f.ed > g.max) g.max = f.ed; }
+    }
+    const lines = [...byAcct.values()].slice(0, 8).map(({ f, n, min, max }) =>
+      `  · ${f.platform} ${f.accountName}（${n} 個 job，${min}~${max}）：${String(f.message ?? '').slice(0, 120)}`);
+    items.push({
+      level: 'alert',
+      text: `近 24 小時有 ${byAcct.size} 個帳戶、共 ${failures.length} 個 job 重試 3 次仍失敗：\n${lines.join('\n')}${byAcct.size > 8 ? '\n  · …' : ''}`,
+    });
   }
 
   // ③ 各平台 T-1 有沒有資料、量正不正常
@@ -133,7 +154,7 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
 export async function gatherHealth(today = twToday()): Promise<HealthInput> {
   const [batch, failures, backfill, coverage] = await Promise.all([
     nexusBatchStats(`daily:${today}`),
-    nexusRecentFailures(24),
+    nexusRecentFailures(24, 200),
     nexusBackfillStats(),
     nexusCoverageRows(addDays(today, -8), addDays(today, -1)),
   ]);

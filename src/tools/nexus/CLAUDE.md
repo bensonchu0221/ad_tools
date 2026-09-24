@@ -8,6 +8,8 @@
   - `nexus_customer_account_map`：**先建空表當介面**。customer 四平台 API 都沒有（見 memory ad-data-warehouse-plan），目前 AE/AM 在系統外維護；之後不論改 Sheet 外部表或 Cloud SQL＋web UI 同步，只要表名欄位不變，view 與 Looker 不用改。
   - view `nexus_integrated_daily`：四平台 UNION 成同一套欄位＋LEFT JOIN customer（對照表先收斂成一帳一列，防誤填重複放大數字；沒對照到的 customer 退回 account_name）。**不含轉換**（四平台語意不同，硬加總會誤導）。
   - 全部事實表**日分區＋requirePartitionFilter**：不帶 date 條件的查詢會被 BQ 拒絕（防全表掃描）。Looker 要設日期範圍。
+- **排除清單＋拿不到的 D 帳戶**（2026-09-24）：`run.ts SKIP_ACCOUNTS` 列的帳戶不抓（現有 3 個 D 帳戶 1319／1732／24492＝**已移到 MediaGo、停用多年的舊帳戶**，使用者決定略過）。成因：D 平台 API 對 MediaGo 帳戶回 403 `Please use Mediago's API to request.`，而且**從 Cloud Run 連認證都回 `invalid api token`、從公司 IP 認證卻成功**（原因未明，不影響結論）。通則：D 帳戶認證失敗／MediaGo 403 時，**倉庫從未有它的數字 ⇒ `NexusNoRetryError`、訊息帶 `[無法取得]`、不重試、健檢黃燈一行**；以前有數字 ⇒ 一般失敗（重試＋紅燈）。新出現的黃燈帳戶確認是停用帳戶後，加進 `SKIP_ACCOUNTS` 即可。
+- **只抓台灣 campaign**：沿用各工具 `getCampaigns` 的 `country_id=tw`。2026-09-24 實測 token 表裡 `HK_Kaiyuan_FAT03`（香港 7 支）、`D2_plarium`（日本 10 支）有非台灣 campaign，但都停在 2023~2024 年初。
 - **P 無 advertiser 的事件**：查全平台時會回 advertiser 為空字串的列（事件沒帶 adid；Report Hub 指定 advertiser 查所以從沒遇過）→ 歸到虛擬帳戶 `account_id='(unattributed)'`，不丟（2026-09-21~22 實測只有 12 曝光、0 花費）。
 - **抓取**（`fetch.ts`）：D／M 一帳一 job（token 表全部帳戶，M 排除 98 開頭壞資料）；R 用 **Super token + userIds:[]** 一次全平台（2026-09-23 實測 Super 看得到全部代理商）；P 用 `fetchPrismReportAll`（**省略** advertiser_ids＝全部；送空陣列會 500）。D 沿用週報的 campaign 三規則剪枝＋只對 bulk 有資料的 campaign 打 adLists／per-ad／裝置。
 - **寫入**（`run.ts writeSlice`）：load job 進暫存表（`nexus__stg_*`，2 小時自動過期）→ 單一 transaction `DELETE 區間(+帳戶) ; INSERT SELECT`。load job 不計費、無 streaming buffer；取代單位＝平台×帳戶×日期區間（R/P 整平台）。
@@ -18,4 +20,5 @@
 - **排程時間＝台北 04:00**（使用者 2026-09-23 拍板）。**⚠️ D token 互踢**：`getAccessToken` 會讓同 token 舊的 access_token 失效。Report Hub `adstream-daily` 05:00 開跑、實測 05:00~06:10 結束 → 倉庫要在 05:00 前把 D 跑完，否則同一 D 帳號兩邊互踢 401（失敗的 job 10 分鐘後自動重試，能自癒但會吵）。上線後要看 D 全帳戶實際跑多久。
 - **成本**：load job 免費；每個有資料的 job 約 4 句 DML（每句最低計 10MB）；P 每 job 呼叫 2 次＝P 後端查 `prism_events` 2 次（dry-run 上限：每日 2 天約 4.76GB/次、回補全段約 113GB 一次性）。
 - **每日健檢**（`health.ts`，2026-09-23）：Cloud Scheduler `nexus-health` 台北 **07:00** POST `/tools/nexus/health/cron`（`&dry=1` 只算不發）→ Google Chat（webhook 在 Secret Manager `ad-tools-nexus-chat-webhook` → env `NEXUS_CHAT_WEBHOOK`；**網址即憑證，不可進 repo**）。**每天都發**（正常一行綠燈），因為只在異常才發的話，健檢自己壞掉跟一切正常看起來一樣。只讀 Cloud SQL、不查 BQ。檢查：①今天每日批次有沒有入列、跑完沒、幾點跑完（>04:50 黃燈）②近 24h 重試 3 次仍失敗的 job（紅）③各平台 T-1 有沒有資料（紅）、曝光／花費對前 7 天中位數 <50% 紅、>3 倍黃 ④前 3 天天天有花費、T-1 突然沒有的帳戶（黃）⑤回補進度。門檻在 `HEALTH` 常數。狀態頁最上方即時顯示同一份結果。**偵測不到的**：D/M 新開帳戶沒登錄 token（API 拿不到代理商底下的帳戶清單）。
-- 驗證：`tests/verify_nexus.mts`（純函式＋job 防呆＋健檢，24 項）。**2026-09-23 本機真寫 BQ 驗過**（2026-09-21~22）：D 31243／R 全平台／M 867481／P 全平台，事實表＝裝置表＝view 三邊曝光與花費逐項一致（R 裝置花費差 0.03 為四捨五入）。
+- 首頁卡片（server.ts TOOLS）＋導覽列（sbui.ts NAV「資料倉庫」）都有入口（2026-09-24 使用者要求）。
+- 驗證：`tests/verify_nexus.mts`（純函式＋job 防呆＋健檢＋排除／拿不到帳戶＋getCampaigns 不吞錯，28 項）。**回補 2026-05-21~09-20 已於 2026-09-24 跑完**（2,740 job 全成功，含 30 個已排除）。**2026-09-23 本機真寫 BQ 驗過**（2026-09-21~22）：D 31243／R 全平台／M 867481／P 全平台，事實表＝裝置表＝view 三邊曝光與花費逐項一致（R 裝置花費差 0.03 為四捨五入）。

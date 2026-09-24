@@ -2313,11 +2313,11 @@ export async function markNexusJobDone(id: number, message: string): Promise<voi
 }
 
 /** 失敗：還有重試額度就放回佇列、10 分鐘後才可再認領（限流類錯誤立刻重打只會再撞），否則標 failed。回傳是否已放棄。 */
-export async function markNexusJobFailed(id: number, error: string): Promise<boolean> {
+export async function markNexusJobFailed(id: number, error: string, opts: { noRetry?: boolean } = {}): Promise<boolean> {
   const p = await nexusPool();
   const [rows] = await p.query(`SELECT attempt_count FROM nexus_jobs WHERE id = ?`, [id]);
   const attempts = Number((rows as any[])[0]?.attempt_count ?? NEXUS_MAX_ATTEMPTS);
-  const giveUp = attempts >= NEXUS_MAX_ATTEMPTS;
+  const giveUp = opts.noRetry === true || attempts >= NEXUS_MAX_ATTEMPTS;
   await p.query(
     `UPDATE nexus_jobs SET status=?, phase=?, message=?, heartbeat_at=NOW(), finished_at=IF(?, NOW(), NULL),
        started_at=IF(?, started_at, NULL), retry_after=IF(?, NULL, NOW() + INTERVAL 10 MINUTE) WHERE id=?`,

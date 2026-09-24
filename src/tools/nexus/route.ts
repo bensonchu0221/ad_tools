@@ -13,7 +13,7 @@ import {
   listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock,
 } from '../../core/store.js';
 import {
-  BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday,
+  BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat, type HealthReport } from './health.js';
 
@@ -73,7 +73,7 @@ export function registerNexus(app: FastifyInstance): void {
           done.push({ id: job.id, ok: true, message: r.message });
         } catch (e: any) {
           const msg = String(e?.message ?? e);
-          const gaveUp = await markNexusJobFailed(job.id, msg);
+          const gaveUp = await markNexusJobFailed(job.id, msg, { noRetry: e instanceof NexusNoRetryError });
           app.log.error({ jobId: job.id, platform: job.platform, account: job.accountId, gaveUp, error: msg }, 'nexus job failed');
           done.push({ id: job.id, ok: false, message: msg });
         }
@@ -163,6 +163,7 @@ function statusPage(
 
   return sbPage({
     title: 'nexus 資料倉庫',
+    active: 'nexus',
     width: '1100px',
     body,
     style: `.st-failed{color:var(--err);font-weight:600}.st-running{color:var(--accent);font-weight:600}.st-success{color:var(--ok)}

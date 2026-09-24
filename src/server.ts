@@ -18,7 +18,7 @@ import { registerGcpWatch, BASE_PATH as GCPWATCH } from './tools/gcpwatch/route.
 import { registerMgidSource, BASE_PATH as MGIDSOURCE } from './tools/mgidsource/route.js';
 import { registerCoupangAds, BASE_PATH as COUPANGADS } from './tools/coupangads/route.js';
 import { registerD1VideoAd, BASE_PATH as D1VIDEOAD } from './tools/d1videoad/route.js';
-import { registerNexus } from './tools/nexus/route.js'; // tool#9 nexus 資料倉庫：不上首頁選單，狀態頁走直接網址
+import { registerNexus, BASE_PATH as NEXUS } from './tools/nexus/route.js'; // tool#9 nexus 資料倉庫
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
@@ -40,7 +40,8 @@ const ICON = {
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
   gauge: '<path d="M22 12A10 10 0 1 0 2 12"/><path d="M12 12l5-3"/><circle cx="12" cy="12" r="1.6"/><path d="M2 12h3M19 12h3M12 4v1"/>',
   bag: '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
-  play: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>'
+  play: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>'
 };
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
@@ -49,7 +50,8 @@ const TOOLS: Tool[] = [
   { name: '營運監控', desc: '每日清零排程與 GCP 資源健康度，異常發生時即時看見', href: GCPWATCH, icon: ICON.gauge, code: 'OPS WATCH', tag: 'MONITOR · LIVE' },
   { name: 'MGID 媒體報表', desc: '廣告主角度看各媒體 source 成效，每日同步 raw', href: MGIDSOURCE, icon: ICON.chart, code: 'MGID SOURCE', tag: 'MEDIA · DAILY' },
   { name: '酷澎聯盟投放', desc: 'Coupang 聯盟商品自動上架 R 平台投放，收益與花費即時對照', href: COUPANGADS, icon: ICON.bag, code: 'COUPANG ADS', tag: 'AUTO · 30 MIN' },
-  { name: 'D1 影音報表', desc: 'D1 影音廣告的曝光／點擊／25-50-75% 播放進度，可匯出 Excel', href: D1VIDEOAD, icon: ICON.play, code: 'D1 VIDEO AD', tag: 'ACTION4 · LIVE' }
+  { name: 'D1 影音報表', desc: 'D1 影音廣告的曝光／點擊／25-50-75% 播放進度，可匯出 Excel', href: D1VIDEOAD, icon: ICON.play, code: 'D1 VIDEO AD', tag: 'ACTION4 · LIVE' },
+  { name: 'nexus 資料倉庫', desc: '四平台全帳戶素材×日每日寫進 BigQuery，給 Looker 與各報表共用；含每日健檢', href: NEXUS, icon: ICON.database, code: 'NEXUS', tag: 'BIGQUERY · DAILY' }
   // 站外工具與快捷連結統一在 slotboard.ts 的 QUICK_LINKS 維護
 ];
 

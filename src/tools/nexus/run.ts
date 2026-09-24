@@ -54,6 +54,25 @@ export function chunkRange(sd: string, ed: string, days: number): { sd: string; 
 
 export interface AccountRef { platform: NexusPlatform; accountId: string; accountName: string }
 
+/**
+ * 不抓的帳戶（使用者 2026-09-24 決定略過）。都是已移轉到 MediaGo 平台、停用多年的舊帳戶：
+ * D 平台 API 對它們回 403 "Please use Mediago's API to request."（從 Cloud Run 甚至認證就失敗），
+ * 改打 api.mediago.io 才看得到 campaign，且全部停用、近月零花費。
+ */
+export const SKIP_ACCOUNTS: Record<string, string> = {
+  'D:1319': 'Wavenet_Tena（MediaGo 帳戶，最後異動 2022-03）',
+  'D:1732': '4A_Springtrees_tsh_loan（MediaGo 帳戶，最後異動 2023-02）',
+  'D:24492': 'TW_affluentbyte_Eric_NEW（MediaGo 帳戶，最後異動 2023-12）',
+};
+export const isSkipped = (t: { platform: NexusPlatform; accountId: string }) => `${t.platform}:${t.accountId}` in SKIP_ACCOUNTS;
+
+/** job 失敗但不該重試（重試也不會好）；worker 看到這個就直接標失敗。 */
+export class NexusNoRetryError extends Error {}
+/** 失敗訊息的前綴：健檢靠它把「拿不到、但本來就沒數字」的帳戶降成黃燈。 */
+export const UNREACHABLE_TAG = '[無法取得]';
+/** D 平台 API 拿不到這個帳戶（token 失效、或帳戶已移到 MediaGo）的錯誤訊息特徵。 */
+export const isDUnreachable = (msg: string) => /invalid api token|認證失敗|Please use Mediago/i.test(msg);
+
 /** 目前要抓的帳戶：D／M 各自 token 表裡的全部帳戶（M 排除 98 開頭的壞資料），R／P 一個 '*' 代表全平台。 */
 export async function listTargets(): Promise<AccountRef[]> {
   const d = (await listDAccounts())
@@ -64,9 +83,9 @@ export async function listTargets(): Promise<AccountRef[]> {
     .map((a) => ({ platform: 'M' as const, accountId: a.apiClientId, accountName: a.clientName }));
   return [
     ...d, ...m,
-    { platform: 'R', accountId: '*', accountName: 'R 全平台' },
-    { platform: 'P', accountId: '*', accountName: 'P 全平台' },
-  ];
+    { platform: 'R' as const, accountId: '*', accountName: 'R 全平台' },
+    { platform: 'P' as const, accountId: '*', accountName: 'P 全平台' },
+  ].filter((t) => !isSkipped(t));
 }
 
 /** 每日：T-2 ~ T-1（台北日）。 */
@@ -220,8 +239,20 @@ export async function runNexusJob(
 ): Promise<JobResult> {
   const syncedAt = new Date().toISOString();
   const accountId = job.accountId === '*' ? null : job.accountId;
-  const res = await deps.fetch(job, syncedAt, onPhase);
   const label = `${job.platform} ${job.accountName} ${job.sd}~${job.ed}`;
+  let res: FetchResult;
+  try {
+    res = await deps.fetch(job, syncedAt, onPhase);
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    // D 帳戶拿不到：倉庫從來沒有它的數字 ⇒ 多半是停用的舊帳戶，重試也不會好，直接標失敗（健檢黃燈）；
+    // 倉庫以前有它的數字 ⇒ 有投放的帳戶斷了，照一般失敗走重試＋紅燈。
+    if (job.platform === 'D' && accountId !== null && isDUnreachable(msg)) {
+      const ever = await deps.coveredRows('D', accountId, '2000-01-01', '2999-12-31');
+      if (ever === 0) throw new NexusNoRetryError(`${UNREACHABLE_TAG} ${label}：D 平台 API 拿不到這個帳戶，倉庫也從未有它的數字，不重試（${msg.slice(0, 160)}）`);
+    }
+    throw e;
+  }
 
   if (!res.facts.length && !res.device.length) {
     const prev = await deps.coveredRows(job.platform, accountId, job.sd, job.ed);
