@@ -550,6 +550,7 @@ await ok('狀態頁：刻度一帳一格、R/P 畫整圈、吻合按鈕與明細
   assert.match(html, /1 個帳戶失敗/);
   assert.match(html, /aria-controls="rp-D"/);
   assert.match(html, /<dialog class="rp glass" id="rp-D"/); // 明細是浮動視窗，不佔版面
+  assert.match(html, /class="tick"[\s\S]*class="tk-fg"/); // 自動更新倒數環
   assert.match(html, /<b class="word">完成<\/b><small>2 \/ 2<\/small>/); // M 全部完成：大字「完成」、小字數字
   assert.match(html, /<b>1<\/b><i>\/ 3<\/i>/); // D 還沒完成：大字完成數
   assert.match(html, /<b class="word">執行中<\/b><small>0 \/ 1<\/small>/); // P 單一 job

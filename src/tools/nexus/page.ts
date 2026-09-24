@@ -192,7 +192,9 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       <div class="bf-bar"><i style="width:${(((bf.success + bf.failed) / bfTotal) * 100).toFixed(1)}%"></i></div></div>` : '';
 
   const body = `
-    <div class="crumb"><a href="/">// tools</a> / nexus</div>
+    <div class="crumb"><span><a href="/">// tools</a> / nexus</span>
+      <button type="button" class="tick" title="每 30 秒自動更新（明細開著時暫停），點一下立即更新" aria-label="每 30 秒自動更新，點一下立即更新">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="tk-bg" cx="10" cy="10" r="8" /><circle class="tk-fg" cx="10" cy="10" r="8" pathLength="100" /></svg></button></div>
     <h1>nexus 資料倉庫</h1>
     <p class="sub">四平台全帳戶「素材 × 日」每天寫進 BigQuery <code>popinpoc1.reporting.nexus_*</code>，給 Looker Studio 與各報表工具共用。</p>
 
@@ -250,6 +252,21 @@ const STYLE = `
   @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
     .glass{background:rgba(255,255,255,.93)}
   }
+
+  /* 自動更新倒數：20px 環，30 秒從滿圈退到空圈，退完就重整。計時交給 CSS 動畫（animationend 觸發重整），
+     明細視窗開著時動畫暫停、關掉從原處接著倒，所以不會看表看到一半被刷掉。點一下立即更新 */
+  .crumb{display:flex;align-items:center;gap:12px}
+  .tick{margin:-6px -4px -6px auto;flex:none;width:28px;height:28px;padding:4px;border:none;border-radius:50%;
+    background:none;color:var(--ink);cursor:pointer;transition:background .15s}
+  .tick:hover{background:rgba(255,255,255,.7)}
+  .tick:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .tick svg{display:block;width:20px;height:20px;transform:rotate(-90deg)}
+  .tick circle{fill:none;stroke-width:2.2}
+  .tk-bg{stroke:rgba(20,22,26,.14)}
+  .tk-fg{stroke:currentColor;stroke-dasharray:100;animation:countdown 30s linear forwards}
+  @keyframes countdown{to{stroke-dashoffset:100}}
+  html:has(dialog.rp[open]) .tick{color:var(--mut)}
+  html:has(dialog.rp[open]) .tk-fg{animation-play-state:paused}
 
   /* 一句話結論：燈號＋大字，整頁唯一的大字 */
   .head{margin:36px 0 0}
@@ -433,7 +450,8 @@ const SCRIPT = `
   var det=document.querySelector('.all-jobs');
   det.addEventListener('toggle',function(){ var s=store.get(); s.all=det.open; store.set(s); });
   var s=store.get(); if(s.p) open(s.p); if(s.all) det.open=true;
-  // 視窗開著時先不重整（看表看到一半被刷掉很煩），關掉後下一輪再刷
-  (function tick(){ setTimeout(function(){ if(document.querySelector('dialog.rp[open]')) tick(); else location.reload(); }, 30000); })();
+  // 倒數環跑完就重整（視窗開著時 CSS 會把倒數暫停）；點環立即重整
+  document.querySelector('.tk-fg').addEventListener('animationend',function(){ location.reload(); });
+  document.querySelector('.tick').addEventListener('click',function(){ location.reload(); });
 })();
 `;
