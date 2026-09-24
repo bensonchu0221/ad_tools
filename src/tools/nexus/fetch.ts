@@ -6,8 +6,10 @@ import {
 } from '../../core/popin.js';
 import { fetchReport } from '../../core/rixbee.js';
 import {
-  fetchMgidReport, fetchMgidDeviceReport, getClientCurrency, type MgidClient, type MgidReportRow, type MgidDeviceRow,
+  fetchMgidReport, fetchCampaignNameMap, getClientCurrency, getClientTimezone, type MgidClient, type MgidReportRow,
 } from '../../core/mgid.js';
+import { fetchRedashDeviceDaily, type RedashRow } from '../../core/mgidRedash.js';
+import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../core/store.js';
 import { fetchPrismReportAll, normalizePrismDate } from '../../core/prism.js';
 import { fetchCvDetailMap } from '../adstream/run.js';
 import { parseLooseDate } from '../weeklyreport/report.js';
@@ -117,7 +119,7 @@ export function toDDeviceRows(account: { id: string; name: string }, raw: any[],
       const d = { imp: int(r[`${prefix}_imp`]), click: int(r[`${prefix}_click`]), spend: money(r[`${prefix}_charge`]) };
       imp += d.imp; click += d.click; spend += d.spend;
       if (!d.imp && !d.click && !d.spend && !Object.keys(events).length) continue;
-      out.push({ ...base, device, ...d, events: JSON.stringify(events), synced_at: syncedAt });
+      out.push({ ...base, device, ...d, spend_usd: null, events: JSON.stringify(events), synced_at: syncedAt });
     }
     // Others＝平台總數 − PC − Mobile（平板等）。總數比兩者合計還小不應發生，真發生就寫 0、讓正確性比對亮燈，不硬湊
     const events: Record<string, number> = {};
@@ -127,7 +129,7 @@ export function toDDeviceRows(account: { id: string; name: string }, raw: any[],
       spend: Math.max(0, money(money(r.charge) - spend)),
     };
     if (!o.imp && !o.click && !o.spend && !Object.keys(events).length) continue;
-    out.push({ ...base, device: 'Others', ...o, events: JSON.stringify(events), synced_at: syncedAt });
+    out.push({ ...base, device: 'Others', ...o, spend_usd: null, events: JSON.stringify(events), synced_at: syncedAt });
   }
   return out;
 }
@@ -206,7 +208,7 @@ export function toRDeviceRows(raw: any[], syncedAt: string): Row[] {
     if (!o) {
       o = {
         date, platform: 'R', account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
-        campaign_id: str(r.cpg_id), device, imp: 0, click: 0, spend: 0, synced_at: syncedAt, _ev: {},
+        campaign_id: str(r.cpg_id), device, imp: 0, click: 0, spend: 0, spend_usd: null, synced_at: syncedAt, _ev: {},
       };
       acc.set(key, o);
     }
@@ -254,32 +256,125 @@ export function toMRows(account: { id: string; name: string }, currency: string,
   }));
 }
 
-/** MGID 裝置列（帳戶層，沒有 campaign）→ 倉庫列。純函式。 */
-export function toMDeviceRows(account: { id: string; name: string }, rows: MgidDeviceRow[], syncedAt: string): Row[] {
-  return rows
-    .filter((r) => r.imp || r.click || r.spend || r.conv_interest || r.conv_decision || r.conv_buy)
-    .map((r) => {
-      const events: Record<string, number> = {};
-      for (const k of ['conv_interest', 'conv_decision', 'conv_buy'] as const) if (r[k]) events[k] = r[k];
-      return {
-        date: requireDate(r.date, 'M'), platform: 'M', account_id: account.id, account_name: account.name,
-        campaign_id: null, device: r.device, imp: int(r.imp), click: int(r.click), spend: money(r.spend),
-        events: JSON.stringify(events), synced_at: syncedAt,
-      };
-    });
-}
-
-/** 抓單一 MGID 帳號（沿用 core/mgid：帳戶時區、零點擊 campaign 補救都已內建）。 */
+/** 抓單一 MGID 帳號的事實表（沿用 core/mgid：帳戶時區、零點擊 campaign 補救都已內建）。
+ * 裝置表不在這裡抓：MGID API 的裝置報表會整支排除零點擊 campaign，改由全平台 Redash job 產生（fetchMRedashDevice）。 */
 export async function fetchMAccount(
   client: MgidClient, sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void
 ): Promise<FetchResult> {
   onPhase(`M ${client.clientName}：teaser 報表`);
   const rows = await fetchMgidReport(client, sd, ed);
-  onPhase(`M ${client.clientName}：裝置報表`);
-  const dev = await fetchMgidDeviceReport(client, sd, ed);
-  const currency = rows.length || dev.length ? await getClientCurrency(client) : '';
+  const currency = rows.length ? await getClientCurrency(client) : '';
   const acc = { id: client.apiClientId, name: client.clientName };
-  return { facts: toMRows(acc, currency, rows, syncedAt), device: toMDeviceRows(acc, dev, syncedAt), warnings: [] };
+  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], warnings: [] };
+}
+
+// ── M 裝置表：MGID Redash（全部 Broadciel 帳戶一次撈，含零點擊 campaign） ──
+
+/** token 表沒有、只在 Redash 出現的帳戶：account_id 記成這個前綴＋Client ID（不丟，健檢會點名）。 */
+export const M_UNMAPPED_PREFIX = 'client:';
+/** 沒有對照到帳戶時用的時區（Broadciel 帳戶大多是台北）。 */
+export const M_DEFAULT_TZ = 'Asia/Taipei';
+
+export interface MOwner { accountId: string; accountName: string; tz: string; currency: string }
+
+const M_DEVICE: Record<string, string> = { desktop: 'PC', mobile: 'Mobile', tablet: 'Tablet' };
+
+/**
+ * Redash 日×campaign×裝置 → 倉庫裝置列。純函式。
+ *  - 帳戶：Redash 的 Client ID 跟 token 表的 api_client_id 是兩套編號，靠 campaign ID（兩邊同一套）對回 owner；
+ *    對不上＝token 表缺這個帳戶 → account_id 記 client:<Client ID>，照寫不丟。
+ *  - 時區：每個時區查一次，帳戶只取自己時區那份（M 事實表的日期是帳戶本地日，兩邊才對得齊）。
+ *  - 花費：Redash 的台幣是美金 × 當天固定匯率，跟 MGID 實際計費差 0.2~0.5%（使用者 2026-09-24 確認）。
+ *    ⇒ spend（帳戶幣別）＝該帳戶當天 API 計費金額（apiSpend，來自事實表）依各列美金比例分配，加總與計費一致；
+ *      spend_usd 原封存 Redash 美金。API 那邊沒有金額（帳戶缺 token、或事實 job 失敗）才退回 Redash 換算值。
+ */
+export function toMRedashDeviceRows(o: {
+  byTz: Record<string, RedashRow[]>; owners: Map<string, MOwner>; apiSpend: Map<string, number>;
+  sd: string; ed: string; syncedAt: string;
+}): { rows: Row[]; unmapped: { clientId: string; clientName: string }[] } {
+  type Acc = { date: string; accountId: string; accountName: string; owner: MOwner | undefined; campaignId: string; device: string;
+    imp: number; click: number; usd: number; twd: number; buy: number };
+  const cells = new Map<string, Acc>();
+  const unmapped = new Map<string, string>();
+  for (const [tz, list] of Object.entries(o.byTz)) {
+    for (const r of list) {
+      const owner = o.owners.get(r.campaignId);
+      if ((owner?.tz ?? M_DEFAULT_TZ) !== tz) continue; // 這個帳戶用別的時區那份
+      const date = ymdDash(r.date);
+      if (!date || date < o.sd || date > o.ed) continue;
+      if (!owner) unmapped.set(r.clientId, r.clientName);
+      const accountId = owner?.accountId ?? `${M_UNMAPPED_PREFIX}${r.clientId}`;
+      const device = M_DEVICE[r.device.toLowerCase()] ?? 'Others';
+      const key = `${date}|${accountId}|${r.campaignId}|${device}`;
+      const c = cells.get(key) ?? { date, accountId, accountName: owner?.accountName ?? r.clientName, owner, campaignId: r.campaignId, device,
+        imp: 0, click: 0, usd: 0, twd: 0, buy: 0 };
+      c.imp += r.imp; c.click += r.click; c.usd += r.spendUsd; c.twd += r.spendTwd; c.buy += r.convBuy;
+      cells.set(key, c);
+    }
+  }
+  // 依 帳戶×日 分配花費
+  const groups = new Map<string, Acc[]>();
+  for (const c of cells.values()) {
+    if (!c.imp && !c.click && !c.usd && !c.buy) continue;
+    const k = `${c.accountId}|${c.date}`;
+    groups.set(k, [...(groups.get(k) ?? []), c]);
+  }
+  const rows: Row[] = [];
+  const push = (c: Acc, spend: number, campaignId: string | null = c.campaignId, device = c.device) => rows.push({
+    date: c.date, platform: 'M', account_id: c.accountId, account_name: c.accountName, campaign_id: campaignId, device,
+    imp: c.imp, click: c.click, spend: money(spend), spend_usd: money(c.usd),
+    events: JSON.stringify(c.buy ? { conv_buy: c.buy } : {}), synced_at: o.syncedAt,
+  });
+  for (const [k, list] of groups) {
+    const target = o.apiSpend.get(k);
+    const usdSum = list.reduce((a, c) => a + c.usd, 0);
+    if (list[0].owner && target !== undefined && usdSum > 0) {
+      const alloc = list.map((c) => money((target * c.usd) / usdSum));
+      // 四捨五入的尾差補到美金最大的那列，加總才會剛好等於計費金額
+      const diff = money(target - alloc.reduce((a, b) => a + b, 0));
+      const big = list.reduce((bi, c, i) => (c.usd > list[bi].usd ? i : bi), 0);
+      alloc[big] = money(alloc[big] + diff);
+      list.forEach((c, i) => push(c, alloc[i]));
+    } else {
+      const usd = list[0].owner?.currency === 'usd';
+      list.forEach((c) => push(c, usd ? c.usd : c.twd));
+    }
+  }
+  return { rows, unmapped: [...unmapped].map(([clientId, clientName]) => ({ clientId, clientName })) };
+}
+
+/**
+ * M 全平台裝置表：對照帳戶（各帳戶 campaign 清單、時區、幣別）→ 每個時區查一次 Redash → 轉列。
+ * 某個帳戶 token 壞掉只記 warning：它的 campaign 對不上，照樣以 client:<Client ID> 寫入，不丟數字。
+ */
+export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
+  const warnings: string[] = [];
+  const owners = new Map<string, MOwner>();
+  const accounts = (await listMgidAccounts()).filter((a) => !/^98/.test(a.apiClientId));
+  for (const [i, a] of accounts.entries()) {
+    onPhase(`M 裝置：對照帳戶 ${i + 1}/${accounts.length}（${a.clientName}）`);
+    try {
+      const token = await getMgidTokenById(a.apiClientId);
+      if (!token) throw new Error('找不到 token');
+      const client: MgidClient = { apiClientId: a.apiClientId, token, clientName: a.clientName };
+      const campaigns = Object.keys(await fetchCampaignNameMap(client));
+      const owner = { accountId: a.apiClientId, accountName: a.clientName, tz: await getClientTimezone(client), currency: await getClientCurrency(client) };
+      for (const cid of campaigns) if (!owners.has(cid)) owners.set(cid, owner);
+    } catch (e: any) {
+      warnings.push(`M ${a.clientName}（${a.apiClientId}）campaign 清單抓不到，它的裝置數字會記在 client:<Client ID>：${String(e?.message ?? e).slice(0, 120)}`);
+    }
+  }
+  const apiSpend = new Map<string, number>();
+  for (const c of await nexusCoverageRows(sd, ed)) if (c.platform === 'M') apiSpend.set(`${c.accountId}|${c.dt}`, c.spend);
+  const tzs = [...new Set([M_DEFAULT_TZ, ...[...owners.values()].map((o) => o.tz)])];
+  const byTz: Record<string, RedashRow[]> = {};
+  for (const tz of tzs) {
+    onPhase(`M 裝置：Redash 查詢 ${sd}~${ed}（${tz}）`);
+    byTz[tz] = await fetchRedashDeviceDaily(sd, ed, tz, { onWait: (sec) => onPhase(`M 裝置：Redash 排隊中 ${sec} 秒（${tz}）`) });
+  }
+  const { rows, unmapped } = toMRedashDeviceRows({ byTz, owners, apiSpend, sd, ed, syncedAt });
+  if (unmapped.length) warnings.push(`Redash 有、token 表沒有的帳戶：${unmapped.map((u) => `${u.clientName}（Client ID ${u.clientId}）`).join('、')}`);
+  return { facts: [], device: rows, warnings };
 }
 
 // ────────────────────────────── P ──────────────────────────────
@@ -325,7 +420,7 @@ export function toPDeviceRows(raw: any[], syncedAt: string): Row[] {
     return {
       date, platform: 'P', account_id: acc.id, account_name: acc.name,
       campaign_id: str(r.campaign_id), device, imp: int(r.impressions), click: int(r.clicks), spend: money(r.spend),
-      events: '{}', synced_at: syncedAt,
+      spend_usd: null, events: '{}', synced_at: syncedAt,
     };
   });
 }

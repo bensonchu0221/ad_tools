@@ -246,7 +246,7 @@ async function fetchListPaged<T>(
 }
 
 /** 取 client 的 campaignId→name 對照（分頁把全部撈齊）。 */
-async function fetchCampaignNameMap(client: MgidClient): Promise<Record<string, string>> {
+export async function fetchCampaignNameMap(client: MgidClient): Promise<Record<string, string>> {
   return fetchListPaged(client, 'campaigns', (c) => c?.name ?? '');
 }
 

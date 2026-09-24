@@ -2339,6 +2339,26 @@ export async function markNexusJobFailed(id: number, error: string, opts: { noRe
   return giveUp;
 }
 
+/** 延後：放回佇列、N 分鐘後才可再認領，且不消耗重試次數（前置 job 還沒跑完不算失敗）。 */
+export async function deferNexusJob(id: number, reason: string, minutes = 5): Promise<void> {
+  const p = await nexusPool();
+  await p.query(
+    `UPDATE nexus_jobs SET status='queued', phase=?, message=?, attempt_count=GREATEST(attempt_count - 1, 0),
+       started_at=NULL, finished_at=NULL, retry_after=NOW() + INTERVAL ? MINUTE WHERE id=?`,
+    [`等待中：${reason}`.slice(0, 255), reason.slice(0, 4000), minutes, id]
+  );
+}
+
+/** 同批次、某平台還沒跑完（排隊或執行中）的 job 數，可排除某個帳戶（通常是自己）。 */
+export async function nexusPendingJobs(batch: string, platform: NexusPlatform, excludeAccountId: string): Promise<number> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = ? AND account_id <> ? AND status IN ('queued','running')`,
+    [batch, platform, excludeAccountId]
+  );
+  return Number((rows as any[])[0]?.n ?? 0);
+}
+
 export async function listNexusJobs(limit = 200): Promise<NexusJobRow[]> {
   const p = await nexusPool();
   const [rows] = await p.query(

@@ -158,7 +158,7 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
 
     cards.push(`<article class="pf">
       <header class="pf-h"><span class="src src-${p.toLowerCase()}">${p}</span><span class="pf-n">${PNAME[p]}</span>
-        <span class="pf-c">${pj.length > 1 ? `${num(pj.length)} 帳戶` : pj.length ? '全平台' : ''}</span></header>
+        <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台' : ''; })()}</span></header>
       <div class="dial-box">${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
       <dl class="pf-num">

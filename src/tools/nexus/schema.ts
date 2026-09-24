@@ -105,6 +105,9 @@ export const DEVICE_SCHEMA: BqField[] = [
   I('imp'), I('click'), F('spend'),
   S('events', 'JSON：平台原生轉換事件名 → 次數'),
   SYNCED_AT,
+  // 只有 M 有值：Redash 原始美金花費（spend 是依它的比例分配的帳戶幣別計費金額）。
+  // 2026-09-24 新增、放最後：既有表由 ensureNexusBq 用 ALTER TABLE ADD COLUMN 補上
+  F('spend_usd', 'M：MGID Redash 原始美金花費（含 data fee）；其他平台 NULL'),
 ];
 
 // customer 對照表：目前由 AE/AM 在系統外維護，這張先建空表當「介面」。之後不論改成 Sheet 外部表

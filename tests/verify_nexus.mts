@@ -2,11 +2,11 @@
 // 全程假資料，不連 API／BQ／DB。用法：npx tsx tests/verify_nexus.mts
 import assert from 'node:assert/strict';
 import {
-  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMDeviceRows, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, M_UNMAPPED_PREFIX, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
-  isSkipped, NexusNoRetryError, UNREACHABLE_TAG,
+  isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
@@ -15,6 +15,7 @@ import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSq
 import { reconSql, toReconRows, summarizeRecon, reconLevel, fmtMatch } from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
 import type { NexusReconRow, NexusJobRow } from '../src/core/store.js';
+import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
 
 const T = '2026-09-23T00:00:00.000Z';
 let n = 0;
@@ -123,13 +124,48 @@ await ok('M 事實／裝置列：欄位＝schema、幣別帶上、全 0 裝置�
   }], T);
   assert.deepEqual(Object.keys(rows[0]).sort(), keysOf(M_SCHEMA));
   assert.equal(rows[0].currency, 'twd');
-  const dev = toMDeviceRows({ id: '867481', name: 'M帳' }, [
-    { date: '2026-09-22', device: 'PC', imp: 5, click: 0, spend: 1, conv_interest: 0, conv_decision: 0, conv_buy: 1 },
-    { date: '2026-09-22', device: 'Tablet', imp: 0, click: 0, spend: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0 },
-  ], T);
-  assert.equal(dev.length, 1);
-  assert.equal(dev[0].campaign_id, null);
-  assert.deepEqual(JSON.parse(String(dev[0].events)), { conv_buy: 1 });
+});
+
+const rd = (o: Partial<RedashRow>): RedashRow => ({ date: '2026-09-23', clientId: '979850', clientName: '新素簡', campaignId: 'c1', campaignName: '',
+  device: 'desktop', imp: 0, adRequests: 0, click: 0, spendUsd: 0, spendTwd: 0, convBuy: 0, ...o });
+
+await ok('Redash 原始列：欄名對應、缺欄位（查詢被改）直接丟錯', () => {
+  const [r] = toRedashRows([{ 'Date Breakdown': '2026-09-23', 'Client ID': 979850, 'Clients Name': ' 新素簡 ', 'Campaign ID': 12434214, dimension_1: 'mobile',
+    'Impressions (Viewable)': 14966, 'Impressions (Total)': 263901, Clicks: 37, 'Spent, USD': 5.837, 'Spent, TWD': 185.84, 'Conversion (main goal)': 6 }]);
+  assert.deepEqual([r.clientId, r.clientName, r.campaignId, r.imp, r.adRequests, r.click, r.convBuy], ['979850', '新素簡', '12434214', 14966, 263901, 37, 6]);
+  assert.throws(() => toRedashRows([{ 'Date Breakdown': '2026-09-23' }]), /缺欄位/);
+});
+
+await ok('M 裝置（Redash）：campaign 對回帳戶、花費按美金比例分配且加總＝計費、spend_usd 原封存', () => {
+  const owners = new Map([['c1', { accountId: '860212', accountName: '新素簡', tz: 'Asia/Taipei', currency: 'twd' }]]);
+  const { rows, unmapped } = toMRedashDeviceRows({
+    byTz: { 'Asia/Taipei': [rd({ device: 'desktop', imp: 100, click: 3, spendUsd: 2, spendTwd: 63.67, convBuy: 1 }), rd({ device: 'mobile', imp: 50, click: 1, spendUsd: 1, spendTwd: 31.84 }), rd({ device: 'smarttv', imp: 1 })] },
+    owners, apiSpend: new Map([['860212|2026-09-23', 95]]), sd: '2026-09-22', ed: '2026-09-23', syncedAt: T,
+  });
+  assert.deepEqual(unmapped, []);
+  assert.deepEqual(Object.keys(rows[0]).sort(), keysOf(DEVICE_SCHEMA));
+  assert.deepEqual(rows.map((r) => [r.account_id, r.campaign_id, r.device]), [['860212', 'c1', 'PC'], ['860212', 'c1', 'Mobile'], ['860212', 'c1', 'Others']]);
+  assert.deepEqual(rows.map((r) => r.spend), [63.3333, 31.6667, 0]);
+  assert.equal(rows.reduce((a, r) => a + Number(r.spend), 0), 95);
+  assert.deepEqual(rows.map((r) => r.spend_usd), [2, 1, 0]);
+  assert.deepEqual(JSON.parse(String(rows[0].events)), { conv_buy: 1 });
+});
+
+await ok('M 裝置（Redash）：token 表沒有的帳戶記成 client:<Client ID> 不丟、用 Redash 台幣；帳戶只取自己時區那份', () => {
+  const owners = new Map([['la1', { accountId: '861000', accountName: '洛杉磯帳', tz: 'America/Los_Angeles', currency: 'usd' }]]);
+  const { rows, unmapped } = toMRedashDeviceRows({
+    byTz: {
+      'Asia/Taipei': [rd({ clientId: '991666', clientName: '悅GARDEN', campaignId: 'x9', imp: 10, spendUsd: 1, spendTwd: 31.84 }), rd({ campaignId: 'la1', imp: 999, spendUsd: 9 })],
+      'America/Los_Angeles': [rd({ campaignId: 'la1', imp: 7, spendUsd: 0.5, spendTwd: 15.9 }), rd({ clientId: '991666', campaignId: 'x9', imp: 555 })],
+    },
+    owners, apiSpend: new Map(), sd: '2026-09-23', ed: '2026-09-23', syncedAt: T,
+  });
+  assert.deepEqual(unmapped, [{ clientId: '991666', clientName: '悅GARDEN' }]);
+  const g = rows.find((r) => r.account_id === `${M_UNMAPPED_PREFIX}991666`)!;
+  assert.deepEqual([g.imp, g.spend, g.account_name], [10, 31.84, '悅GARDEN']);
+  const la = rows.find((r) => r.account_id === '861000')!;
+  assert.deepEqual([la.imp, la.spend], [7, 0.5]); // 取洛杉磯那份；API 沒金額＋美金帳戶 ⇒ 用美金
+  assert.equal(rows.length, 2);
 });
 
 await ok('P 事實／裝置列：JSON 的 GMT 日期字串還原成台北日、Desktop→PC', () => {
@@ -332,6 +368,36 @@ await ok('健檢：帳戶前 3 天天天有花費、T-1 突然沒有 → 黃燈�
   assert.match(r.items[0].text, /1 個帳戶.*D 帳B/);
 });
 
+await ok('取代腳本：只寫事實表（M 帳戶）不碰裝置表；只寫裝置表（M Redash 全平台）不碰事實表', () => {
+  const base = { factTable: 'p.d.f', factCols: ['date'], factStage: 's1', deviceTable: 'p.d.dev', deviceCols: ['date'], deviceStage: 's2',
+    platform: 'M' as const, sd: '2026-09-21', ed: '2026-09-22' };
+  const facts = buildReplaceSql({ ...base, accountId: '860212', tables: 'facts' });
+  assert.match(facts, /DELETE FROM `p\.d\.f`/);
+  assert.doesNotMatch(facts, /p\.d\.dev/);
+  const dev = buildReplaceSql({ ...base, accountId: null, tables: 'device' });
+  assert.doesNotMatch(dev, /p\.d\.f`/);
+  assert.match(dev, /DELETE FROM `p\.d\.dev` WHERE date BETWEEN DATE '2026-09-21' AND DATE '2026-09-22' AND platform = 'M';/);
+});
+
+await ok('M 裝置 job：回補切 7 天、只寫裝置表、不動覆蓋紀錄；M 帳戶 job 只寫事實表', async () => {
+  const jobs = planBackfill([{ platform: 'M', accountId: M_DEVICE_JOB, accountName: 'M 裝置' }, { platform: 'M', accountId: '860212', accountName: 'x' }], '2026-09-01', '2026-09-20');
+  assert.equal(jobs.filter((j) => j.accountId === M_DEVICE_JOB).length, 3);
+  assert.equal(jobs.filter((j) => j.accountId === '860212').length, 1);
+  const calls: any[] = [];
+  const deps: JobDeps = {
+    fetch: async (j) => j.accountId === M_DEVICE_JOB
+      ? { facts: [], device: [{ date: '2026-09-22', account_id: '860212' }], warnings: ['缺帳戶 X'] }
+      : { facts: [{ date: '2026-09-22', account_id: '860212', imp: 1, spend: 1 }], device: [], warnings: [] },
+    coveredRows: async () => 0,
+    writeSlice: async (o) => { calls.push(['write', o.accountId, o.tables]); },
+    replaceCoverage: async (_p, a) => { calls.push(['coverage', a]); },
+  };
+  const r = await runNexusJob({ platform: 'M', accountId: M_DEVICE_JOB, accountName: 'M 裝置', sd: '2026-09-21', ed: '2026-09-22' }, () => {}, deps);
+  assert.match(r.message, /裝置 1 列；⚠️ 缺帳戶 X/);
+  await runNexusJob({ platform: 'M', accountId: '860212', accountName: 'x', sd: '2026-09-21', ed: '2026-09-22' }, () => {}, deps);
+  assert.deepEqual(calls, [['write', null, 'device'], ['write', '860212', 'facts'], ['coverage', '860212']]);
+});
+
 await ok('排除清單：3 個 MediaGo 舊帳戶略過、其他帳戶照抓', () => {
   assert.equal(isSkipped({ platform: 'D', accountId: '1319' }), true);
   assert.equal(isSkipped({ platform: 'D', accountId: '24492' }), true);
@@ -474,6 +540,14 @@ await ok('狀態頁：今天還沒入列、還沒比對也能畫', () => {
   assert.match(html, /今天的批次還沒開跑/);
   assert.equal((html.match(/ring-empty/g) ?? []).length, 4 + 1); // 四個平台＋CSS 定義一次
   assert.match(html, /跑完後比對/);
+});
+
+await ok('健檢：Redash 有、token 表沒有的 M 帳戶 → 紅燈點名 Client ID', () => {
+  const a = healthBase();
+  a.recon = { checkedAt: '2026-09-24 04:32:00', rows: [rr('M', `${M_UNMAPPED_PREFIX}991666`, [0, 0, 0], [10, 1, 31.8])] };
+  a.recon.rows[0].accountName = '悅GARDEN';
+  const r = evaluateHealth(a);
+  assert.match(r.items.map((i) => i.text).join('|'), /1 個 MGID 帳戶.*token 表沒有.*悅GARDEN（Client ID 991666）/);
 });
 
 console.log(`\n全部 ${n} 項通過`);

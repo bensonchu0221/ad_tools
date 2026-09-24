@@ -10,11 +10,11 @@
 import type { FastifyInstance } from 'fastify';
 import { bqDryRun } from '../../core/bigquery.js';
 import {
-  dbAvailable, enqueueNexusJobs, claimNextNexusJob, markNexusJobPhase, markNexusJobDone, markNexusJobFailed,
+  dbAvailable, enqueueNexusJobs, claimNextNexusJob, markNexusJobPhase, markNexusJobDone, markNexusJobFailed, deferNexusJob,
   listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock, nexusBatchStats, nexusReconFor, nexusBatchJobs,
 } from '../../core/store.js';
 import {
-  BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError,
+  BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError, NexusDeferError,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
 import { runRecon, reconSql } from './recon.js';
@@ -88,6 +88,11 @@ export function registerNexus(app: FastifyInstance): void {
           done.push({ id: job.id, ok: true, message: r.message });
         } catch (e: any) {
           const msg = String(e?.message ?? e);
+          if (e instanceof NexusDeferError) {
+            await deferNexusJob(job.id, msg);
+            done.push({ id: job.id, ok: true, message: `延後：${msg}` });
+            continue;
+          }
           const gaveUp = await markNexusJobFailed(job.id, msg, { noRetry: e instanceof NexusNoRetryError });
           app.log.error({ jobId: job.id, platform: job.platform, account: job.accountId, gaveUp, error: msg }, 'nexus job failed');
           done.push({ id: job.id, ok: false, message: msg });

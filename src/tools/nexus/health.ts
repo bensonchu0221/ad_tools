@@ -10,6 +10,7 @@ import {
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG } from './run.js';
 import { summarizeRecon, fmtMatch, RECON } from './recon.js';
+import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
 export interface HealthItem { level: Exclude<Level, 'ok'>; text: string }
@@ -163,6 +164,15 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       });
     }
     if (parts.length) summary.push(`比對吻合 ${parts.join('／')}`);
+    // M：Redash（MGID 內部全帳戶）有投放、token 表卻沒有的帳戶 ⇒ 事實表整個漏抓，要去後台補 token
+    const orphans = inp.recon.rows.filter((r) => r.platform === 'M' && r.accountId.startsWith(M_UNMAPPED_PREFIX) && (r.device.imp || r.device.spend));
+    if (orphans.length) {
+      items.push({
+        level: 'alert',
+        text: `${orphans.length} 個 MGID 帳戶 ${t1} 有投放、但 token 表沒有（倉庫缺它的素材數字，請到後台取得 token 補進 token 管理頁）：${
+          orphans.map((r) => `${r.accountName}（Client ID ${r.accountId.slice(M_UNMAPPED_PREFIX.length)}）`).join('、')}`,
+      });
+    }
   }
 
   // ⑥ 回補進度（有在跑才報）

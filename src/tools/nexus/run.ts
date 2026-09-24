@@ -9,10 +9,10 @@ import { randomBytes } from 'node:crypto';
 import { bqEnsureTable, bqLoadRows, bqQuery, bqDeleteTable, bqUpsertView, sqlString, type BqField } from '../../core/bigquery.js';
 import {
   getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts,
-  nexusCoveredRows, replaceNexusCoverage,
+  nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs,
   type NexusJobInput, type NexusJobRow, type NexusCoverageEntry, type NexusPlatform,
 } from '../../core/store.js';
-import { fetchDAccount, fetchMAccount, fetchRAll, fetchPAll, type Row, type FetchResult } from './fetch.js';
+import { fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, type Row, type FetchResult } from './fetch.js';
 import {
   FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX,
   integratedViewSql,
@@ -24,6 +24,11 @@ export const BACKFILL_START = '2026-05-21';
 export const DAILY_DAYS = 2;
 /** 回補每個 job 的日期長度：D 的 per-ad 限流 1 req/s 最慢，切小才不會超過 Cloud Run 600 秒。 */
 export const BACKFILL_CHUNK_DAYS: Record<NexusPlatform, number> = { D: 14, R: 30, M: 30, P: 30 };
+/** M 裝置 job（Redash 全平台）的回補切段：Redash 一次查太多天會排很久，切 7 天。 */
+export const M_DEVICE_CHUNK_DAYS = 7;
+/** M 裝置 job 的帳戶欄：'*'＝全平台，只寫裝置表（事實表由各帳戶 job 寫）。 */
+export const M_DEVICE_JOB = '*';
+const isMDeviceJob = (j: { platform: NexusPlatform; accountId: string }) => j.platform === 'M' && j.accountId === M_DEVICE_JOB;
 
 // ────────────────────────────── 日期工具（純字串，無時區誤差） ──────────────────────────────
 
@@ -68,6 +73,8 @@ export const isSkipped = (t: { platform: NexusPlatform; accountId: string }) => 
 
 /** job 失敗但不該重試（重試也不會好）；worker 看到這個就直接標失敗。 */
 export class NexusNoRetryError extends Error {}
+/** 前置 job 還沒跑完，晚點再來（不算失敗、不消耗重試次數）。 */
+export class NexusDeferError extends Error {}
 /** 失敗訊息的前綴：健檢靠它把「拿不到、但本來就沒數字」的帳戶降成黃燈。 */
 export const UNREACHABLE_TAG = '[無法取得]';
 /** D 平台 API 拿不到這個帳戶（token 失效、或帳戶已移到 MediaGo）的錯誤訊息特徵。 */
@@ -85,6 +92,8 @@ export async function listTargets(): Promise<AccountRef[]> {
     ...d, ...m,
     { platform: 'R' as const, accountId: '*', accountName: 'R 全平台' },
     { platform: 'P' as const, accountId: '*', accountName: 'P 全平台' },
+    // 放最後：它要用到同一批次 M 各帳戶剛寫好的計費金額來分配花費
+    { platform: 'M' as const, accountId: M_DEVICE_JOB, accountName: 'M 裝置（Redash 全平台）' },
   ].filter((t) => !isSkipped(t));
 }
 
@@ -98,7 +107,7 @@ export function planDaily(targets: AccountRef[], today: string): NexusJobInput[]
 export function planBackfill(targets: AccountRef[], sd: string, ed: string): NexusJobInput[] {
   const out: NexusJobInput[] = [];
   for (const t of targets) {
-    for (const w of chunkRange(sd, ed, BACKFILL_CHUNK_DAYS[t.platform])) out.push({ ...t, ...w });
+    for (const w of chunkRange(sd, ed, isMDeviceJob(t) ? M_DEVICE_CHUNK_DAYS : BACKFILL_CHUNK_DAYS[t.platform])) out.push({ ...t, ...w });
   }
   return out;
 }
@@ -110,6 +119,8 @@ let bqReady = false;
 export async function ensureNexusBq(): Promise<string[]> {
   const created: string[] = [];
   for (const spec of TABLE_SPECS) if (await bqEnsureTable(spec)) created.push(spec.table);
+  // 建表後才加的欄位（bqEnsureTable 只建不改）：DDL 不計費、IF NOT EXISTS 冪等
+  await bqQuery(`ALTER TABLE \`${DEVICE_TABLE}\` ADD COLUMN IF NOT EXISTS spend_usd FLOAT64 OPTIONS(description='M：MGID Redash 原始美金花費（含 data fee）；其他平台 NULL')`);
   await bqUpsertView(INTEGRATED_VIEW, integratedViewSql(), 'nexus：四平台統一 view（含 customer 對照）');
   bqReady = true;
   return created;
@@ -126,22 +137,28 @@ export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId
   }
 }
 
-/** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表與裝置表的這段切片刪掉再寫回。 */
+/** 寫哪幾張表：M 的事實表（各帳戶 job）與裝置表（Redash 全平台 job）分開寫，其餘平台一起寫。 */
+export type SliceTables = 'both' | 'facts' | 'device';
+
+/** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表與／或裝置表的這段切片刪掉再寫回。 */
 export function buildReplaceSql(o: {
   factTable: string; factCols: string[]; factStage: string | null;
   deviceTable: string; deviceCols: string[]; deviceStage: string | null;
-  platform: NexusPlatform; accountId: string | null; sd: string; ed: string;
+  platform: NexusPlatform; accountId: string | null; sd: string; ed: string; tables?: SliceTables;
 }): string {
+  const tables = o.tables ?? 'both';
   const acct = o.accountId === null ? '' : ` AND account_id = ${sqlString(o.accountId)}`;
   const range = `date BETWEEN DATE ${sqlString(o.sd)} AND DATE ${sqlString(o.ed)}`;
   const cols = (c: string[]) => c.join(', ');
-  const lines = [
-    'BEGIN TRANSACTION;',
-    `DELETE FROM \`${o.factTable}\` WHERE ${range}${acct};`,
-  ];
-  if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
-  lines.push(`DELETE FROM \`${o.deviceTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
-  if (o.deviceStage) lines.push(`INSERT INTO \`${o.deviceTable}\` (${cols(o.deviceCols)}) SELECT ${cols(o.deviceCols)} FROM \`${o.deviceStage}\`;`);
+  const lines = ['BEGIN TRANSACTION;'];
+  if (tables !== 'device') {
+    lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range}${acct};`);
+    if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
+  }
+  if (tables !== 'facts') {
+    lines.push(`DELETE FROM \`${o.deviceTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
+    if (o.deviceStage) lines.push(`INSERT INTO \`${o.deviceTable}\` (${cols(o.deviceCols)}) SELECT ${cols(o.deviceCols)} FROM \`${o.deviceStage}\`;`);
+  }
   lines.push('COMMIT TRANSACTION;');
   return lines.join('\n');
 }
@@ -157,7 +174,7 @@ async function loadStage(schema: BqField[], rows: Row[], tag: string): Promise<s
 
 /** 把一個切片寫進 BQ（整段取代）。 */
 export async function writeSlice(o: {
-  platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[];
+  platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; tables?: SliceTables;
 }): Promise<void> {
   if (!bqReady) await ensureNexusBq();
   assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`);
@@ -172,7 +189,7 @@ export async function writeSlice(o: {
     await bqQuery(buildReplaceSql({
       factTable: FACT_TABLE[o.platform], factCols: FACT_SCHEMA[o.platform].map((f) => f.name), factStage,
       deviceTable: DEVICE_TABLE, deviceCols: DEVICE_SCHEMA.map((f) => f.name), deviceStage,
-      platform: o.platform, accountId: o.accountId, sd: o.sd, ed: o.ed,
+      platform: o.platform, accountId: o.accountId, sd: o.sd, ed: o.ed, tables: o.tables,
     }), { timeoutMs: 120_000 });
   } finally {
     for (const t of stages) await bqDeleteTable(t).catch(() => { /* 會自動過期，刪不掉也無妨 */ });
@@ -210,6 +227,13 @@ async function fetchForJob(job: NexusJobInput, syncedAt: string, onPhase: (p: st
       return fetchDAccount({ id: job.accountId, name: job.accountName, token }, job.sd, job.ed, syncedAt, onPhase);
     }
     case 'M': {
+      if (isMDeviceJob(job)) {
+        // 要等同一批次的 M 各帳戶 job 都跑完：花費分配要用它們剛寫好的計費金額
+        const batch = (job as Partial<NexusJobRow>).batch;
+        const pending = batch ? await nexusPendingJobs(batch, 'M', M_DEVICE_JOB) : 0;
+        if (pending) throw new NexusDeferError(`M 各帳戶還有 ${pending} 個 job 沒跑完，稍後再產生裝置表`);
+        return fetchMRedashDevice(job.sd, job.ed, syncedAt, onPhase);
+      }
       const token = await getMgidTokenById(job.accountId);
       if (!token) throw new Error(`MGID 帳號 ${job.accountId}（${job.accountName}）在 nexus.mgid_tokens 找不到 token`);
       return fetchMAccount({ apiClientId: job.accountId, token, clientName: job.accountName }, job.sd, job.ed, syncedAt, onPhase);
@@ -239,6 +263,9 @@ export async function runNexusJob(
 ): Promise<JobResult> {
   const syncedAt = new Date().toISOString();
   const accountId = job.accountId === '*' ? null : job.accountId;
+  const deviceOnly = isMDeviceJob(job);
+  // M：各帳戶 job 只寫事實表，裝置表整個交給 Redash 全平台 job（兩邊不會互刪）
+  const tables: SliceTables = deviceOnly ? 'device' : job.platform === 'M' ? 'facts' : 'both';
   const label = `${job.platform} ${job.accountName} ${job.sd}~${job.ed}`;
   let res: FetchResult;
   try {
@@ -255,16 +282,19 @@ export async function runNexusJob(
   }
 
   if (!res.facts.length && !res.device.length) {
+    // M 裝置 job 沒有自己的覆蓋紀錄：拿 M 事實表的覆蓋當基準（事實有數字、Redash 卻回 0 列＝Redash 出狀況）
     const prev = await deps.coveredRows(job.platform, accountId, job.sd, job.ed);
     if (prev > 0) throw new Error(`${label}：這次抓回 0 列，但倉庫裡這段原本有 ${prev} 列，疑似 API 異常，拒絕清空`);
     return { facts: 0, device: 0, skipped: true, message: `${label}：無投放` };
   }
 
   onPhase(`寫入 BQ（${res.facts.length} 列＋裝置 ${res.device.length} 列）`);
-  await deps.writeSlice({ platform: job.platform, accountId, sd: job.sd, ed: job.ed, facts: res.facts, device: res.device });
-  await deps.replaceCoverage(job.platform, accountId, job.sd, job.ed, coverageEntries(job.platform, res.facts));
+  await deps.writeSlice({ platform: job.platform, accountId, sd: job.sd, ed: job.ed, facts: res.facts, device: res.device, tables });
+  // 覆蓋紀錄只記事實表；裝置 job 不動它（accountId=null 會把 M 各帳戶的紀錄整段清掉）
+  if (!deviceOnly) await deps.replaceCoverage(job.platform, accountId, job.sd, job.ed, coverageEntries(job.platform, res.facts));
+  const warn = res.warnings.length ? `；⚠️ ${res.warnings.join('；')}` : '';
   return {
     facts: res.facts.length, device: res.device.length, skipped: false,
-    message: `${label}：${res.facts.length} 列、裝置 ${res.device.length} 列`,
+    message: `${label}：${deviceOnly ? '' : `${res.facts.length} 列、`}裝置 ${res.device.length} 列${warn}`,
   };
 }
