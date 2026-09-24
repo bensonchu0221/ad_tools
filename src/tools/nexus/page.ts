@@ -76,6 +76,14 @@ function dialText(jobs: NexusJobRow[]): { center: string; line: string; tone: st
   return { center, line: `全部完成，${last.slice(11, 16)}`, tone: 'success' };
 }
 
+/** 平台名：一條斜線＋三倍大的窄體字，整個字從斜線後面往右滑出（斜線同時是遮罩邊，第一個字左上角會被切掉一點）。
+ *  試過逐字從斜線出來：照閱讀順序出場的話後面的字一定要穿過前面的字，中途會疊成一坨，所以改整字滑出。 */
+function platformTitle(p: NexusPlatform): string {
+  return `<h3 class="pf-t" style="--p:${PLATFORMS.indexOf(p)}">
+      <svg class="sl" viewBox="0 0 34 112" aria-hidden="true"><line x1="0" y1="112" x2="34" y2="0" /></svg>
+      <span class="nm"><span class="nw">${PNAME[p]}</span></span></h3>`;
+}
+
 // ────────────────────────────── 比對明細 ──────────────────────────────
 
 function reconPanel(p: NexusPlatform, r: PlatformRecon, dt: string): string {
@@ -158,12 +166,13 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       matchBtn = `<button type="button" class="match match-${lv}" aria-haspopup="dialog" aria-controls="rp-${p}" data-p="${p}">
           <span>吻合</span><b>${fmtMatch(r.match)}</b><em>${r.diffs.length ? `${r.diffs.length} 帳戶有落差` : '看明細'}</em><i class="chev" aria-hidden="true"></i></button>`;
       // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面
-      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h" closedby="any"><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
+      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h" closedby="any"><div class="rp-tint" aria-hidden="true"></div><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
     }
 
     cards.push(`<article class="pf">
-      <header class="pf-h"><span class="src src-${p.toLowerCase()}">${p}</span><span class="pf-n">${PNAME[p]}</span>
-        <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台' : ''; })()}</span></header>
+      <header class="pf-h"><span class="src src-${p.toLowerCase()}">${p}</span>
+        <div class="pf-hd">${platformTitle(p)}
+          <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台' : ''; })()}</span></div></header>
       <div class="dial-box">${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
       <dl class="pf-num">
@@ -206,6 +215,7 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       ${items ? `<ul class="hitems">${items}</ul>` : ''}
     </section>
 
+    <script>try{if(sessionStorage.getItem('nexus-intro'))document.documentElement.classList.add('intro-seen')}catch(e){}</script>
     <div class="board glass">${cards.join('')}</div>
     ${panels.join('')}
     ${backfill}
@@ -286,9 +296,27 @@ const STYLE = `
   .board{display:grid;grid-template-columns:repeat(4,1fr);margin-top:22px}
   .pf{padding:22px 20px 20px;border-left:1px solid var(--hair);display:flex;flex-direction:column;min-width:0}
   .pf:first-child{border-left:none}
-  .pf-h{display:flex;align-items:center;gap:8px}
-  .pf-n{font-weight:600;font-size:14px}
-  .pf-c{margin-left:auto;font-size:12px;color:var(--mut)}
+  .pf-h{display:flex;align-items:flex-start;gap:6px}
+  .pf-h .src{margin-top:13px}
+  .pf-hd{min-width:0}
+  .pf-c{display:block;margin:2px 0 0 10px;font-size:12px;color:var(--mut)}
+
+  /* 平台名：窄體粗黑 42px（原本 14px 的三倍），前面一條橘紅斜線。
+     斜線＝.nm 的 clip-path 左緣（同一條對角線），所以字是「從斜線後面」出來；第一個字左上角被切掉一小塊 */
+  .pf-t{position:relative;margin:0;font:800 42px/1.12 'Big Shoulders Display',var(--disp);letter-spacing:.01em;color:var(--ink)}
+  .pf-t .sl{position:absolute;z-index:1;left:0;top:0;width:.34em;height:100%;overflow:visible;pointer-events:none} /* 斜線壓在字上面：字是從它後面出來 */
+  /* viewBox 34×112＝.34em×1.12em 同比例，線寬跟著字級等比縮放（42px 時約 2.2px） */
+  .pf-t .sl line{stroke:var(--accent);stroke-width:5.2;stroke-linecap:round}
+  .pf-t .nm{display:block;white-space:nowrap;padding:0 .04em 0 .2em;clip-path:polygon(.34em 0,100% 0,100% 100%,0 100%)}
+  .pf-t .nw{display:inline-block}
+  /* 開場：斜線先由下往上畫出，字再從斜線後面滑出（起點整個字都在斜線左側，被 clip 藏住）。
+     只在這個分頁第一次開頁時播，30 秒自動重整不會重播 */
+  html:not(.intro-seen) .pf-t .sl line{stroke-dasharray:118;stroke-dashoffset:118;animation:slash .35s ease-out forwards;
+    animation-delay:calc(var(--p) * 110ms + 100ms)}
+  html:not(.intro-seen) .pf-t .nw{animation:emerge 1s cubic-bezier(.16,1,.3,1) both;
+    animation-delay:calc(var(--p) * 110ms + 260ms)}
+  @keyframes slash{to{stroke-dashoffset:0}}
+  @keyframes emerge{from{transform:translateX(calc(-100% - .3em))}}
   .dial-box{position:relative;width:148px;height:148px;margin:18px auto 10px}
   .dial{width:100%;height:100%;display:block}
   .dial line{stroke-linecap:butt}
@@ -341,6 +369,16 @@ const STYLE = `
   @keyframes pop{from{opacity:0;transform:scale(.94) translateY(10px)}}
   @keyframes fade{from{opacity:0}}
   html:has(dialog.rp[open]){overflow:hidden}
+  /* 液態玻璃折射（.lg＝JS 確認是 Chromium 並產好位移圖才加）：backdrop-filter 換成 SVG 濾鏡——
+     邊緣一圈把背後畫面往內彎（位移圖），中間照樣磨砂（遮罩）。白色罩層改由 .rp-tint 承擔、四邊羽化，
+     讓邊緣那圈露出被彎曲的背景，中間仍然夠白、表格好讀 */
+  .rp-tint{display:none;position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+    background:linear-gradient(155deg,rgba(255,255,255,.74),rgba(255,255,255,.52));
+    -webkit-mask:linear-gradient(90deg,transparent,#000 26px,#000 calc(100% - 26px),transparent),linear-gradient(transparent,#000 26px,#000 calc(100% - 26px),transparent);
+    -webkit-mask-composite:source-in;mask-composite:intersect}
+  dialog.rp.lg{background:rgba(255,255,255,.1)}
+  dialog.rp.lg .rp-tint{display:block}
+  .rp-in{position:relative;z-index:1}
   .rp-in{flex:1;min-width:0;overflow:auto;padding:26px 28px 24px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
   .rp h3{font-size:16px;font-weight:600;margin:0}
@@ -415,6 +453,7 @@ const STYLE = `
     .pf:nth-child(n+2){border-top:1px solid var(--hair)}
     .pf{display:grid;grid-template-columns:104px 1fr;column-gap:16px;padding:16px}
     .pf-h{grid-column:1/-1}
+    .pf-t{font-size:36px}.pf-h .src{margin-top:11px}
     .dial-box{grid-row:2/5;width:104px;height:104px;margin:12px 0 0}
     .dial-c{gap:3px}
     .dial-c b{font-size:21px}.dial-c b.word{font-size:16px}.dial-c i,.dial-c small{font-size:11px}
@@ -426,7 +465,8 @@ const STYLE = `
     .rp-in{padding:20px 16px}
   }
   @media(prefers-reduced-motion:reduce){
-    .ring-running,.bf-bar i,.bf-bar i::after{animation:none}
+    .ring-running,.bf-bar i,.bf-bar i::after,html:not(.intro-seen) .pf-t .nw{animation:none}
+    html:not(.intro-seen) .pf-t .sl line{animation:none;stroke-dashoffset:0}
     dialog.rp[open],dialog.rp[open]::backdrop{animation:none}
   }
 `;
@@ -434,6 +474,54 @@ const STYLE = `
 // 明細視窗開合＋30 秒自動重整（重整後記得剛才開著哪個平台、有沒有展開全部 job）
 const SCRIPT = `
 (function(){
+  // ── 液態玻璃折射（落差明細浮窗）──
+  // backdrop-filter 吃 SVG 濾鏡只有 Chromium 會畫；Safari 會說支援、實際整塊不畫，所以不能用 @supports，
+  // 改看 userAgentData（只有 Chromium 有）。其他瀏覽器、或系統設了「減少透明度」就維持 CSS 磨砂。
+  var LG = !!(navigator.userAgentData && (navigator.userAgentData.brands||[]).some(function(b){ return b.brand==='Chromium'; }))
+    && !(window.matchMedia && matchMedia('(prefers-reduced-transparency: reduce)').matches);
+  var BEZEL=30, SHIFT=16, svgHost=null;
+  // 依浮窗實際尺寸產生兩張圖：
+  //  位移圖：R／G＝x／y 位移（128＝不動）。邊緣 BEZEL px 內往視窗中心取樣，越靠邊彎越多（(1-t)² 曲線）
+  //  遮罩：邊緣外側透明（露出折射）、往內漸變成不透明（磨砂）
+  function lgMaps(w,h,r){
+    var c=document.createElement('canvas'); c.width=w; c.height=h; var g=c.getContext('2d');
+    var dm=g.createImageData(w,h), mm=g.createImageData(w,h), D=dm.data, M=mm.data, hx=w/2, hy=h/2;
+    for(var j=0;j<h;j++) for(var i=0;i<w;i++){
+      var k=(j*w+i)*4, px=i+.5-hx, py=j+.5-hy, ax=Math.abs(px), ay=Math.abs(py);
+      var qx=ax-(hx-r), qy=ay-(hy-r), nx, ny, dist;
+      if(qx>0&&qy>0){ var l=Math.hypot(qx,qy)||1; dist=r-l; nx=qx/l; ny=qy/l; }
+      else if(qx>qy){ dist=hx-ax; nx=1; ny=0; } else { dist=hy-ay; nx=0; ny=1; }
+      if(px<0) nx=-nx; if(py<0) ny=-ny;                 // 往外的法向量
+      var t=Math.min(Math.max(dist/BEZEL,0),1), mag=(1-t)*(1-t);
+      D[k]=128-nx*mag*127; D[k+1]=128-ny*mag*127; D[k+2]=128; D[k+3]=255;
+      M[k]=M[k+1]=M[k+2]=255; M[k+3]=Math.min(Math.max((dist-BEZEL*.4)/(BEZEL*.6),0),1)*255;
+    }
+    g.putImageData(dm,0,0); var map=c.toDataURL();
+    g.putImageData(mm,0,0); return { map:map, mask:c.toDataURL() };
+  }
+  function lgApply(d){
+    if(!LG) return;
+    var w=d.offsetWidth, h=d.offsetHeight;                // offset* 不受開窗縮放動畫影響
+    if(!w||!h||d.dataset.lg===w+'x'+h) return;
+    d.dataset.lg=w+'x'+h;
+    var m=lgMaps(w,h,parseFloat(getComputedStyle(d).borderTopLeftRadius)||28), id='lg-'+d.id;
+    if(!svgHost){ svgHost=document.createElementNS('http://www.w3.org/2000/svg','svg');
+      svgHost.setAttribute('width','0'); svgHost.setAttribute('height','0'); svgHost.setAttribute('aria-hidden','true');
+      svgHost.style.position='absolute'; document.body.appendChild(svgHost); }
+    var old=document.getElementById(id); if(old) old.remove();
+    var img=function(href,res){ return '<feImage href="'+href+'" x="0" y="0" width="'+w+'" height="'+h+'" preserveAspectRatio="none" result="'+res+'"/>'; };
+    svgHost.insertAdjacentHTML('beforeend','<filter id="'+id+'" color-interpolation-filters="sRGB">'
+      + '<feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="soft"/>' + img(m.map,'map')
+      + '<feDisplacementMap in="soft" in2="map" scale="'+(SHIFT*2)+'" xChannelSelector="R" yChannelSelector="G" result="refr"/>'
+      + '<feGaussianBlur in="SourceGraphic" stdDeviation="22" edgeMode="duplicate" result="frost"/>' + img(m.mask,'mask')
+      + '<feComposite in="frost" in2="mask" operator="in" result="core"/>'
+      + '<feComposite in="core" in2="refr" operator="over" result="mix"/>'
+      + '<feColorMatrix in="mix" type="saturate" values="1.8"/></filter>');
+    d.style.backdropFilter='url(#'+id+')'; d.classList.add('lg');
+  }
+  var rs; window.addEventListener('resize',function(){ clearTimeout(rs); rs=setTimeout(function(){
+    [].slice.call(document.querySelectorAll('dialog.rp[open]')).forEach(lgApply); },150); });
+
   var KEY='nexus-open', store={get:function(){try{return JSON.parse(sessionStorage.getItem(KEY)||'{}')}catch(e){return {}}},
     set:function(v){try{sessionStorage.setItem(KEY,JSON.stringify(v))}catch(e){}}};
   function remember(p){ var s=store.get(); s.p=p; store.set(s); }
@@ -443,13 +531,14 @@ const SCRIPT = `
     d.querySelector('.rp-x').addEventListener('click',function(){ d.close(); });
     d.addEventListener('close',function(){ remember(''); });
   });
-  function open(p){ var d=document.getElementById('rp-'+p); if(d && !d.open){ d.showModal(); remember(p); } }
+  function open(p){ var d=document.getElementById('rp-'+p); if(d && !d.open){ d.showModal(); lgApply(d); remember(p); } }
   [].slice.call(document.querySelectorAll('button.match')).forEach(function(b){
     b.addEventListener('click',function(){ open(b.dataset.p); });
   });
   var det=document.querySelector('.all-jobs');
   det.addEventListener('toggle',function(){ var s=store.get(); s.all=det.open; store.set(s); });
   var s=store.get(); if(s.p) open(s.p); if(s.all) det.open=true;
+  try{ sessionStorage.setItem('nexus-intro','1'); }catch(e){}
   // 倒數環跑完就重整（視窗開著時 CSS 會把倒數暫停）；點環立即重整
   document.querySelector('.tk-fg').addEventListener('animationend',function(){ location.reload(); });
   document.querySelector('.tick').addEventListener('click',function(){ location.reload(); });
