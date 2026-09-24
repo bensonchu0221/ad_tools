@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { bqEnsureTable, bqLoadRows, bqQuery, bqDeleteTable, bqUpsertView, sqlString, type BqField } from '../../core/bigquery.js';
 import {
   getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts,
-  nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs,
+  nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs, withNexusBqWriteLock,
   type NexusJobInput, type NexusJobRow, type NexusCoverageEntry, type NexusPlatform,
 } from '../../core/store.js';
 import { fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, type Row, type FetchResult } from './fetch.js';
@@ -172,6 +172,31 @@ async function loadStage(schema: BqField[], rows: Row[], tag: string): Promise<s
   return table;
 }
 
+/** BQ 因為同一張表有別的交易／DML 在改而取消這個交易（官方：conflicting transactions are cancelled，不會排隊）。 */
+export function isBqConflict(message: string): boolean {
+  return /concurrent update|could not serialize/i.test(message);
+}
+
+/**
+ * 交易被取消就等一下重送（寫入鎖之外的保險：手動腳本、鎖逾時等鎖不到的極端情況）。
+ * 被取消的交易整個回滾、暫存表還在，重送是安全的。其他錯誤直接往外丟。
+ */
+export async function retryOnBqConflict<T>(
+  work: () => Promise<T>,
+  opts: { attempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T> {
+  const attempts = opts.attempts ?? 4;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let i = 1; ; i++) {
+    try {
+      return await work();
+    } catch (e: any) {
+      if (i >= attempts || !isBqConflict(String(e?.message ?? e))) throw e;
+      await sleep(3000 * i + Math.floor(Math.random() * 2000)); // 3、6、9 秒＋亂數，錯開同時重送
+    }
+  }
+}
+
 /** 把一個切片寫進 BQ（整段取代）。 */
 export async function writeSlice(o: {
   platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; tables?: SliceTables;
@@ -186,11 +211,13 @@ export async function writeSlice(o: {
     if (factStage) stages.push(factStage);
     const deviceStage = await loadStage(DEVICE_SCHEMA, o.device, `${tag}_d`);
     if (deviceStage) stages.push(deviceStage);
-    await bqQuery(buildReplaceSql({
+    const sql = buildReplaceSql({
       factTable: FACT_TABLE[o.platform], factCols: FACT_SCHEMA[o.platform].map((f) => f.name), factStage,
       deviceTable: DEVICE_TABLE, deviceCols: DEVICE_SCHEMA.map((f) => f.name), deviceStage,
       platform: o.platform, accountId: o.accountId, sd: o.sd, ed: o.ed, tables: o.tables,
-    }), { timeoutMs: 120_000 });
+    });
+    // 四個平台各自一條線同時跑，但都要改共用的裝置表 ⇒ 只有這一步排隊（抓 API、載暫存表照樣平行）
+    await withNexusBqWriteLock(() => retryOnBqConflict(() => bqQuery(sql, { timeoutMs: 120_000 })));
   } finally {
     for (const t of stages) await bqDeleteTable(t).catch(() => { /* 會自動過期，刪不掉也無妨 */ });
   }

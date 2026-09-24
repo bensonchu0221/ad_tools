@@ -2,7 +2,7 @@
 // 四平台（D/R/M/P）全帳戶「素材 × 日」每日寫進 BQ `popinpoc1.reporting.nexus_*`，給 Looker 與各報表工具共用。
 //   POST /cron?key=           每日入列（Cloud Scheduler，台北 05:00）：T-2~T-1
 //   POST /backfill/cron?key=&sd=&ed=  回補入列（手動打一次；預設 2026-05-21 ~ T-3）
-//   POST /worker/cron?key=    worker（Cloud Scheduler 每分鐘）：時間預算內連續認領 job
+//   POST /worker/cron?key=    worker（Cloud Scheduler 每分鐘）：D/R/M/P 四條線同時跑，各自在時間預算內連續認領該平台的 job
 //   POST /setup/cron?key=     建表＋view（冪等；worker 第一次寫入也會自動做）
 //   POST /health/cron?key=[&dry=1]  每日健檢（Cloud Scheduler，台北 07:00）→ Google Chat；dry=1 只算不發
 //   POST /recon/cron?key=[&dt=][&dry=1]  手動重跑正確性比對（預設 T-1）；dry=1 只回 BQ 預估掃描量、不執行
@@ -19,6 +19,10 @@ import {
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
 import { runRecon, reconSql } from './recon.js';
 import { statusPage } from './page.js';
+import type { NexusPlatform } from '../../core/store.js';
+
+/** worker 的四條線（一平台一條） */
+const NEXUS_LANES: NexusPlatform[] = ['D', 'R', 'M', 'P'];
 
 export const BASE_PATH = '/tools/nexus';
 
@@ -77,38 +81,44 @@ export function registerNexus(app: FastifyInstance): void {
   app.post(`${BASE_PATH}/worker/cron`, async (req, reply) => {
     if (!keyOk(req)) return reply.code(404).send('not found');
     const started = Date.now();
-    const done: { id: number; ok: boolean; message: string }[] = [];
-    const ran = await withNexusWorkerLock(async () => {
+    const done: { id: number; platform: NexusPlatform; ok: boolean; message: string }[] = [];
+
+    // 一個平台一條線：各自一把鎖，四條同時跑（不同 API、不同事實表）。只有寫 BQ 那一步在 writeSlice 裡排隊。
+    // 拿不到鎖＝那條線上一分鐘的 worker 還在跑，這次跳過那條。
+    const lane = (platform: NexusPlatform) => withNexusWorkerLock(platform, async () => {
       while (Date.now() - started < WORKER_BUDGET_MS) {
-        const job = await claimNextNexusJob();
+        const job = await claimNextNexusJob(platform);
         if (!job) break;
         try {
           const r = await runNexusJob(job, (p) => { void markNexusJobPhase(job.id, p).catch(() => {}); });
           await markNexusJobDone(job.id, r.message);
-          done.push({ id: job.id, ok: true, message: r.message });
+          done.push({ id: job.id, platform, ok: true, message: r.message });
         } catch (e: any) {
           const msg = String(e?.message ?? e);
           if (e instanceof NexusDeferError) {
             await deferNexusJob(job.id, msg);
-            done.push({ id: job.id, ok: true, message: `延後：${msg}` });
+            done.push({ id: job.id, platform, ok: true, message: `延後：${msg}` });
             continue;
           }
           const gaveUp = await markNexusJobFailed(job.id, msg, { noRetry: e instanceof NexusNoRetryError });
           app.log.error({ jobId: job.id, platform: job.platform, account: job.accountId, gaveUp, error: msg }, 'nexus job failed');
-          done.push({ id: job.id, ok: false, message: msg });
+          done.push({ id: job.id, platform, ok: false, message: msg });
         }
       }
-      // 批次剛跑完就接著比對（比對失敗不影響 worker 本身，下一分鐘會再試）
+      return true;
+    });
+    const lanes = await Promise.all(NEXUS_LANES.map(async (p) => [p, (await lane(p)) === null ? 'busy' : 'ran'] as const));
+
+    // 批次剛跑完就接著比對（自己一把鎖，免得兩個 worker 同時比對；比對失敗不影響 worker，下一分鐘會再試）
+    await withNexusWorkerLock('recon', async () => {
       try {
         const n = await reconIfDue(twToday());
         if (n !== null) app.log.info({ accounts: n }, 'nexus recon done');
       } catch (e: any) {
         app.log.error({ error: String(e?.message ?? e) }, 'nexus recon failed');
       }
-      return true;
     });
-    if (ran === null) return reply.send({ ok: true, busy: true });
-    reply.send({ ok: true, ran: done.length, ms: Date.now() - started, done });
+    reply.send({ ok: true, lanes: Object.fromEntries(lanes), ran: done.length, ms: Date.now() - started, done });
   });
 
   app.post(`${BASE_PATH}/health/cron`, async (req, reply) => {

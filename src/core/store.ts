@@ -29,28 +29,44 @@ let syncing: Promise<void> | null = null;
 
 // ---------- 連線 ----------
 
-function getPool(): mysql.Pool | null {
-  if (pool) return pool;
+function poolOptions(connectionLimit: number): mysql.PoolOptions | null {
   const { DB_SOCKET, DB_HOST, DB_USER, DB_PASSWORD } = process.env;
   const database = process.env.DB_NAME ?? 'ad_tools';
   if (!DB_USER || (!DB_SOCKET && !DB_HOST)) return null; // 未設定 → 降級（手動上傳模式仍可用）
+  return DB_SOCKET
+    ? { socketPath: DB_SOCKET, user: DB_USER, password: DB_PASSWORD, database, connectionLimit }
+    : {
+        host: DB_HOST,
+        port: Number(process.env.DB_PORT ?? 3306),
+        user: DB_USER,
+        password: DB_PASSWORD,
+        database,
+        connectionLimit,
+        // Cloud SQL(MySQL 8.4) 走 TCP 需 SSL，否則 caching_sha2_password 會拒絕。
+        // 例外：本機經 cloud-sql-proxy（通道已加密，MySQL 層不支援再開 TLS）設 DB_SSL=off
+        ...(process.env.DB_SSL === 'off' ? {} : { ssl: { rejectUnauthorized: false } }),
+      };
+}
 
-  pool = mysql.createPool(
-    DB_SOCKET
-      ? { socketPath: DB_SOCKET, user: DB_USER, password: DB_PASSWORD, database, connectionLimit: 5 }
-      : {
-          host: DB_HOST,
-          port: Number(process.env.DB_PORT ?? 3306),
-          user: DB_USER,
-          password: DB_PASSWORD,
-          database,
-          connectionLimit: 5,
-          // Cloud SQL(MySQL 8.4) 走 TCP 需 SSL，否則 caching_sha2_password 會拒絕。
-          // 例外：本機經 cloud-sql-proxy（通道已加密，MySQL 層不支援再開 TLS）設 DB_SSL=off
-          ...(process.env.DB_SSL === 'off' ? {} : { ssl: { rejectUnauthorized: false } }),
-        }
-  );
+function getPool(): mysql.Pool | null {
+  if (pool) return pool;
+  const o = poolOptions(5);
+  if (!o) return null;
+  pool = mysql.createPool(o);
   return pool;
+}
+
+let lockPool: mysql.Pool | null = null;
+/**
+ * 專給 nexus 具名鎖（GET_LOCK）用的連線池。鎖要整段佔住一條連線，nexus 四條平台線＋比對＋BQ 寫入排隊
+ * 最多同時佔 9 條；放在主池（5 條）會把頁面與 job 本身的查詢餓死。連線用到才建，平常只有 0~1 條。
+ */
+function getLockPool(): mysql.Pool {
+  if (lockPool) return lockPool;
+  const o = poolOptions(10);
+  if (!o) throw new Error('DB 未設定');
+  lockPool = mysql.createPool(o);
+  return lockPool;
 }
 
 function getOldPool(): mysql.Pool | null {
@@ -2186,6 +2202,8 @@ export interface NexusJobRow extends NexusJobInput {
 }
 
 const NEXUS_LOCK = 'ad_tools:nexus:worker';
+/** 寫 BQ 的鎖：四個平台共用 nexus_device_daily，BQ 同一張表兩個交易重疊時後到的會被直接取消（不排隊），所以一次只寫一個。 */
+const NEXUS_BQ_WRITE_LOCK = 'ad_tools:nexus:bq-write';
 const NEXUS_TIMEOUT_MIN = 15;
 /** 失敗自動重排的上限（含第一次）；超過就留在 failed 給人看。 */
 export const NEXUS_MAX_ATTEMPTS = 3;
@@ -2283,22 +2301,22 @@ const NEXUS_JOB_COLS = `id, batch, kind, platform, account_id, account_name,
   DATE_FORMAT(CONVERT_TZ(finished_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS finished_at`;
 
 /**
- * 認領下一筆（每日優先於回補，同類先進先出）。呼叫端須持有 withNexusWorkerLock，這裡就不必再防並發。
- * 順手把心跳停太久的 running 收掉：還有重試額度就放回佇列，沒有就標失敗。
+ * 認領某平台的下一筆（每日優先於回補，同類先進先出）。呼叫端須持有該平台的 withNexusWorkerLock，這裡就不必再防並發。
+ * 順手把該平台心跳停太久的 running 收掉：還有重試額度就放回佇列，沒有就標失敗。
  */
-export async function claimNextNexusJob(): Promise<NexusJobRow | null> {
+export async function claimNextNexusJob(platform: NexusPlatform): Promise<NexusJobRow | null> {
   const p = await nexusPool();
   await p.query(
     `UPDATE nexus_jobs
         SET status = IF(attempt_count < ${NEXUS_MAX_ATTEMPTS}, 'queued', 'failed'),
             phase = '執行逾時', message = '心跳停止超過 ${NEXUS_TIMEOUT_MIN} 分鐘（容器被中斷？）',
             finished_at = IF(attempt_count < ${NEXUS_MAX_ATTEMPTS}, NULL, NOW())
-      WHERE status = 'running'
-        AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL ${NEXUS_TIMEOUT_MIN} MINUTE`
+      WHERE status = 'running' AND platform = ?
+        AND COALESCE(heartbeat_at, started_at) < NOW() - INTERVAL ${NEXUS_TIMEOUT_MIN} MINUTE`, [platform]
   );
   const [rows] = await p.query(
-    `SELECT id FROM nexus_jobs WHERE status = 'queued' AND (retry_after IS NULL OR retry_after <= NOW())
-      ORDER BY kind = 'daily' DESC, id ASC LIMIT 1`
+    `SELECT id FROM nexus_jobs WHERE status = 'queued' AND platform = ? AND (retry_after IS NULL OR retry_after <= NOW())
+      ORDER BY kind = 'daily' DESC, id ASC LIMIT 1`, [platform]
   );
   const id = (rows as any[])[0]?.id;
   if (!id) return null;
@@ -2374,20 +2392,35 @@ export async function nexusJobCounts(): Promise<{ kind: string; status: string; 
   return (rows as any[]).map((r) => ({ kind: r.kind, status: r.status, n: Number(r.n) }));
 }
 
-/** 整個 worker 迴圈持有的全域鎖；拿不到＝另一個 worker 正在跑，這次直接收工。 */
-export async function withNexusWorkerLock<T>(work: () => Promise<T>): Promise<T | null> {
-  const p = await nexusPool();
-  const conn = await p.getConnection();
+/** 持有具名鎖執行 work。waitSec=0：拿不到立刻回 null；>0：最多等這麼久，等不到回 null。 */
+async function withNamedLock<T>(name: string, waitSec: number, work: () => Promise<T>): Promise<T | null> {
+  const conn = await getLockPool().getConnection();
   let locked = false;
   try {
-    const [rows] = await conn.query(`SELECT GET_LOCK(?, 0) AS acquired`, [NEXUS_LOCK]);
+    const [rows] = await conn.query(`SELECT GET_LOCK(?, ?) AS acquired`, [name, waitSec]);
     locked = Number((rows as any[])[0]?.acquired ?? 0) === 1;
     if (!locked) return null;
     return await work();
   } finally {
-    if (locked) await conn.query(`SELECT RELEASE_LOCK(?)`, [NEXUS_LOCK]);
+    if (locked) await conn.query(`SELECT RELEASE_LOCK(?)`, [name]).catch(() => { /* 連線斷了鎖也會跟著釋放 */ });
     conn.release();
   }
+}
+
+/**
+ * worker 的「線」鎖：每個平台一把（lane='D'|'R'|'M'|'P'），四個平台可以同時跑、同一平台同時只有一條；
+ * lane='recon' 給批次跑完後的比對用。拿不到＝那條線別的 worker 正在跑，這次跳過。
+ */
+export async function withNexusWorkerLock<T>(lane: NexusPlatform | 'recon', work: () => Promise<T>): Promise<T | null> {
+  return withNamedLock(`${NEXUS_LOCK}:${lane}`, 0, work);
+}
+
+/** 寫 BQ 的那一步（DELETE＋INSERT 交易）一次只准一個；排隊最多等 waitSec 秒，等不到丟錯（job 走一般失敗重試）。 */
+export async function withNexusBqWriteLock<T>(work: () => Promise<T>, waitSec = 180): Promise<T> {
+  let ran = false, out: T | undefined;
+  await withNamedLock(NEXUS_BQ_WRITE_LOCK, waitSec, async () => { out = await work(); ran = true; });
+  if (!ran) throw new Error(`等 BQ 寫入鎖超過 ${waitSec} 秒`);
+  return out as T;
 }
 
 /** 某平台（某帳戶，或 accountId=null 表示全部帳戶）在區間內「曾寫進 BQ 的列數」合計。 */

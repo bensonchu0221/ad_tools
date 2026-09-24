@@ -6,7 +6,7 @@ import {
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
-  isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB,
+  isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
@@ -576,6 +576,32 @@ await ok('健檢：Redash 有、token 表沒有的 M 帳戶 → 紅燈點名 Cli
   a.recon.rows[0].accountName = '悅GARDEN';
   const r = evaluateHealth(a);
   assert.match(r.items.map((i) => i.text).join('|'), /1 個 MGID 帳戶.*token 表沒有.*悅GARDEN（Client ID 991666）/);
+});
+
+await ok('BQ 交易被取消：認得衝突訊息，其他錯誤不算', () => {
+  assert.ok(isBqConflict('BigQuery: Transaction is aborted due to concurrent update against table popinpoc1:reporting.nexus_device_daily.'));
+  assert.ok(isBqConflict('Could not serialize access to table popinpoc1:reporting.nexus_device_daily due to concurrent update'));
+  assert.ok(!isBqConflict('BigQuery: Syntax error: Unexpected keyword'));
+  assert.ok(!isBqConflict('BigQuery: 等待 job 完成逾時'));
+});
+
+await ok('BQ 衝突重試：衝突就等一下重送、成功就停；非衝突錯誤不重試；次數用完照丟', async () => {
+  const waits: number[] = [];
+  const sleep = async (ms: number) => { waits.push(ms); };
+  let calls = 0;
+  const r = await retryOnBqConflict(async () => { if (++calls < 3) throw new Error('Transaction is aborted due to concurrent update'); return 'ok'; }, { sleep });
+  assert.equal(r, 'ok');
+  assert.equal(calls, 3);
+  assert.equal(waits.length, 2);
+  assert.ok(waits[0] >= 3000 && waits[0] < 5000 && waits[1] >= 6000 && waits[1] < 8000, `退避 ${waits}`);
+
+  calls = 0;
+  await assert.rejects(retryOnBqConflict(async () => { calls++; throw new Error('Syntax error'); }, { sleep }), /Syntax error/);
+  assert.equal(calls, 1);
+
+  calls = 0;
+  await assert.rejects(retryOnBqConflict(async () => { calls++; throw new Error('concurrent update'); }, { sleep, attempts: 4 }), /concurrent update/);
+  assert.equal(calls, 4);
 });
 
 console.log(`\n全部 ${n} 項通過`);
