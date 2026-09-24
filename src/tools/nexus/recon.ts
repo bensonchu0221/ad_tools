@@ -129,6 +129,16 @@ export const reconLevel = (match: number | null): 'ok' | 'warn' | 'alert' | 'non
   match === null ? 'none' : match >= RECON.ok ? 'ok' : match >= RECON.warn ? 'warn' : 'alert';
 
 /** 吻合率顯示：99.98% 這種要看得出差別，所以依距離 100% 決定小數位。 */
+/**
+ * 某天要不要（重新）比對：寫過那天的 job（每日批次、回補、手動）全都跑完了，且最後一筆成功的完成時間晚於上次比對。
+ * 不能只看每日批次：2026-09-24 回補用新程式把 09-23 重寫了，比對卻停在重寫前的結果，頁面掛著 D 13 帳戶的假落差。
+ * 時間都是台北時間 'YYYY-MM-DD HH:mm:ss' 字串，可直接比大小。
+ */
+export function reconDue(o: { pending: number; lastFinished: string | null; checkedAt: string | null }): boolean {
+  if (o.pending > 0 || !o.lastFinished) return false;
+  return !o.checkedAt || o.checkedAt < o.lastFinished;
+}
+
 export function fmtMatch(match: number | null): string {
   if (match === null) return '—';
   const pct = match * 100;

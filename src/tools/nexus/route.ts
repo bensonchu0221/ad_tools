@@ -11,13 +11,13 @@ import type { FastifyInstance } from 'fastify';
 import { bqDryRun } from '../../core/bigquery.js';
 import {
   dbAvailable, enqueueNexusJobs, claimNextNexusJob, markNexusJobPhase, markNexusJobDone, markNexusJobFailed, deferNexusJob,
-  listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock, nexusBatchStats, nexusReconFor, nexusBatchJobs,
+  listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock, nexusReconFor, nexusBatchJobs, nexusJobsCovering,
 } from '../../core/store.js';
 import {
   BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError, NexusDeferError,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
-import { runRecon, reconSql } from './recon.js';
+import { runRecon, reconSql, reconDue } from './recon.js';
 import { statusPage } from './page.js';
 import type { NexusPlatform } from '../../core/store.js';
 
@@ -34,15 +34,14 @@ const keyOk = (req: any) => !!process.env.DIAG_KEY && (req.query as any)?.key ==
 const PAGE_URL = 'https://ad-tools-439393162392.asia-east1.run.app/tools/nexus';
 
 /**
- * 今天的每日批次全部跑完、且 T-1 還沒比對過（或比對之後又有 job 跑完，例如失敗重試成功）⇒ 跑一次比對。
- * worker 每分鐘都會叫，所以條件不成立時必須是零 BQ 查詢。回傳比對了幾個帳戶，沒跑回 null。
+ * T-1 的資料有 job 寫過、那些 job 全跑完，且最後一筆成功晚於上次比對 ⇒ 跑一次比對（reconDue）。
+ * 涵蓋每日批次、失敗重試成功、回補與手動重寫同一天。
+ * worker 每分鐘都會叫，所以條件不成立時必須是零 BQ 查詢（只查 Cloud SQL）。回傳比對了幾個帳戶，沒跑回 null。
  */
 async function reconIfDue(today: string): Promise<number | null> {
-  const b = await nexusBatchStats(`daily:${today}`);
-  if (!b.total || b.queued + b.running > 0) return null;
   const dt = addDays(today, -1);
-  const { checkedAt } = await nexusReconFor(dt);
-  if (checkedAt && (!b.lastFinished || checkedAt >= b.lastFinished)) return null;
+  const [cov, { checkedAt }] = await Promise.all([nexusJobsCovering(dt), nexusReconFor(dt)]);
+  if (!reconDue({ ...cov, checkedAt })) return null;
   return runRecon(dt);
 }
 

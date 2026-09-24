@@ -2504,6 +2504,18 @@ export async function nexusBatchStats(batch: string): Promise<NexusBatchStats> {
   };
 }
 
+/** 所有涵蓋某天（sd ≤ dt ≤ ed）的 job：還有幾筆在排隊／執行，以及最後一筆成功的完成時間（台北）。比對時機用。 */
+export async function nexusJobsCovering(dt: string): Promise<{ pending: number; lastFinished: string | null }> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT SUM(status IN ('queued','running')) AS pending,
+            DATE_FORMAT(CONVERT_TZ(MAX(IF(status='success', finished_at, NULL)),'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS last_finished
+       FROM nexus_jobs WHERE sd <= ? AND ed >= ?`, [dt, dt]
+  );
+  const r = (rows as any[])[0] ?? {};
+  return { pending: Number(r.pending ?? 0), lastFinished: r.last_finished ?? null };
+}
+
 /** 最近 N 小時內放棄重試（最終 failed）的 job。 */
 export async function nexusRecentFailures(hours: number, limit = 20): Promise<NexusJobRow[]> {
   const p = await nexusPool();

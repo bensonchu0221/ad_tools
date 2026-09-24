@@ -12,7 +12,7 @@ import {
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
 import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
-import { reconSql, toReconRows, summarizeRecon, reconLevel, fmtMatch } from '../src/tools/nexus/recon.js';
+import { reconSql, toReconRows, summarizeRecon, reconLevel, fmtMatch, reconDue } from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
 import type { NexusReconRow, NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
@@ -576,6 +576,21 @@ await ok('健檢：Redash 有、token 表沒有的 M 帳戶 → 紅燈點名 Cli
   a.recon.rows[0].accountName = '悅GARDEN';
   const r = evaluateHealth(a);
   assert.match(r.items.map((i) => i.text).join('|'), /1 個 MGID 帳戶.*token 表沒有.*悅GARDEN（Client ID 991666）/);
+});
+
+await ok('比對時機：涵蓋那天的 job 全跑完且有新完成的才比；回補重寫後也要重比（2026-09-24 D 13 帳戶假落差）', () => {
+  // 還沒有任何 job 寫過那天 → 不比
+  assert.equal(reconDue({ pending: 0, lastFinished: null, checkedAt: null }), false);
+  // 每日批次還在跑 → 不比
+  assert.equal(reconDue({ pending: 12, lastFinished: '2026-09-24 04:20:00', checkedAt: null }), false);
+  // 跑完、還沒比過 → 比
+  assert.equal(reconDue({ pending: 0, lastFinished: '2026-09-24 05:18:00', checkedAt: null }), true);
+  // 比過之後沒有新的寫入 → 不比
+  assert.equal(reconDue({ pending: 0, lastFinished: '2026-09-24 05:18:00', checkedAt: '2026-09-24 05:19:00' }), false);
+  // 當天比過（11:36），之後回補把同一天重寫（17:15 完成）→ 要重比（舊版只看每日批次，永遠不會重比）
+  assert.equal(reconDue({ pending: 0, lastFinished: '2026-09-24 17:15:10', checkedAt: '2026-09-24 11:36:16' }), true);
+  // 回補還在跑 → 等它跑完再比，不要每分鐘比一次
+  assert.equal(reconDue({ pending: 30, lastFinished: '2026-09-24 17:15:10', checkedAt: '2026-09-24 11:36:16' }), false);
 });
 
 await ok('BQ 交易被取消：認得衝突訊息，其他錯誤不算', () => {
