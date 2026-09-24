@@ -2,7 +2,7 @@
 // 全程假資料，不連 API／BQ／DB。用法：npx tsx tests/verify_nexus.mts
 import assert from 'node:assert/strict';
 import {
-  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, M_UNMAPPED_PREFIX, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -124,6 +124,28 @@ await ok('M 事實／裝置列：欄位＝schema、幣別帶上、全 0 裝置�
   }], T);
   assert.deepEqual(Object.keys(rows[0]).sort(), keysOf(M_SCHEMA));
   assert.equal(rows[0].currency, 'twd');
+});
+
+await ok('M teaser-stat 校正：曝光／點擊／花費／轉換以 teaser-stat 為準（＝MGID 後台），ad_requests 保留；多出的日子補列', () => {
+  const base = { date: '2026-09-23', campaignId: 'c1', campaignName: 'C', teaserId: 't1', teaserTitle: 'T', teaserUrl: '', teaserImage: '',
+    adRequests: 202757, imp: 9952, click: 12, spend: 84, cpc: 7, cpm: 0, ctr: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0,
+    conv_rate_interest: 0, conv_rate_decision: 0, conv_rate_buy: 0, conv_cost_interest: 0, conv_cost_decision: 0, conv_cost_buy: 0 };
+  const blank = { ...base, teaserId: '', imp: 5 }; // campaign 級補列（沒有 teaser）不動
+  const stats = new Map([['t1', {
+    '2026-09-23': { shows: 9961, clicks: 12, spent: 84, interest: 1, decision: 0, buy: 2 },
+    '2026-09-22': { shows: 19388, clicks: 31, spent: 217, interest: 0, decision: 0, buy: 0 },
+  }]]);
+  const r = mergeTeaserStat([base, blank], stats);
+  assert.equal(r.patched, 1);
+  assert.equal(r.added, 1);
+  assert.deepEqual([r.rows[0].imp, r.rows[0].adRequests, r.rows[0].conv_interest, r.rows[0].conv_buy], [9961, 202757, 1, 2]);
+  assert.equal(r.rows[1].imp, 5);
+  assert.deepEqual([r.rows[2].date, r.rows[2].imp, r.rows[2].campaignId, r.rows[2].adRequests], ['2026-09-22', 19388, 'c1', 0]);
+  // statistics-reports 整支沒回傳的零點擊 teaser：用 meta 補列（9/23 沃醫學_喬雅露 teaser 27736324 實例）
+  const z = mergeTeaserStat([base], new Map([['t9', { '2026-09-23': { shows: 1, clicks: 0, spent: 0 } }]]),
+    new Map([['t9', { campaignId: 'c1', campaignName: 'C', title: '零點擊素材', url: 'u', image: 'i' }]]));
+  assert.equal(z.added, 1);
+  assert.deepEqual([z.rows[1].teaserId, z.rows[1].imp, z.rows[1].teaserTitle, z.rows[1].date], ['t9', 1, '零點擊素材', '2026-09-23']);
 });
 
 const rd = (o: Partial<RedashRow>): RedashRow => ({ date: '2026-09-23', clientId: '979850', clientName: '新素簡', campaignId: 'c1', campaignName: '',

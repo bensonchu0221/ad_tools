@@ -256,7 +256,7 @@ export async function fetchCampaignNameMap(client: MgidClient): Promise<Record<s
  *   byCampaign = campaignId→teaserId[]（零點擊補列時，要用它列出某 campaign 的所有 teaser 去打 teaser-stat）
  * teaser 物件本來就帶 campaignId，兩份 map 一次撈齊、零額外 API。
  */
-async function fetchTeaserIndex(client: MgidClient): Promise<{
+export async function fetchTeaserIndex(client: MgidClient): Promise<{
   meta: Record<string, { title: string; url: string; image: string }>;
   byCampaign: Record<string, string[]>;
 }> {
@@ -275,7 +275,7 @@ async function fetchTeaserIndex(client: MgidClient): Promise<{
 /** 取單支 teaser 在 [sd,ed] 的每日統計（teaser-stat）。回 {日期:{shows,clicks,spent,cpc,ctr,interest,decision,buy,...}}；
  * 無資料時 API 回空陣列 []，統一成 {}。**此端點不排除零點擊 teaser**（實證 poc/probe_mgid_teaserstat.mts），
  * 是唯一能把「零點擊 campaign」的曝光還原到 teaser 層的來源。 */
-async function fetchTeaserStat(
+export async function fetchTeaserStat(
   client: MgidClient, teaserId: string, sd: string, ed: string
 ): Promise<Record<string, any>> {
   const j = await get(

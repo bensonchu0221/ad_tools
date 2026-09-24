@@ -6,7 +6,7 @@ import {
 } from '../../core/popin.js';
 import { fetchReport } from '../../core/rixbee.js';
 import {
-  fetchMgidReport, fetchCampaignNameMap, getClientCurrency, getClientTimezone, type MgidClient, type MgidReportRow,
+  fetchMgidReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex, getClientCurrency, getClientTimezone, type MgidClient, type MgidReportRow,
 } from '../../core/mgid.js';
 import { fetchRedashDeviceDaily, type RedashRow } from '../../core/mgidRedash.js';
 import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../core/store.js';
@@ -256,13 +256,81 @@ export function toMRows(account: { id: string; name: string }, currency: string,
   }));
 }
 
-/** 抓單一 MGID 帳號的事實表（沿用 core/mgid：帳戶時區、零點擊 campaign 補救都已內建）。
+/**
+ * MGID 有兩套數字（2026-09-24 實測＋AM 對後台確認）：
+ *  - statistics-reports（core/mgid fetchMgidReport 用的）：曝光比後台少 0.05~0.13%，每支有量的 teaser 都少幾次
+ *  - teaser-stat／campaigns-stat／Redash：三者一致、**等於 MGID 後台**（固力伸 9/23 後台 16,686＝campaigns-stat，
+ *    statistics-reports 只有 16,674）
+ * ⇒ 倉庫以 teaser-stat 為準：每支 teaser 每天的曝光／點擊／花費／三段轉換都用 teaser-stat 蓋掉；
+ *    ad_requests 與 teaser 資訊 teaser-stat 沒有，沿用 statistics-reports。
+ *    teaser-stat 有量、statistics-reports 卻沒那天的列 ⇒ 補一列，不丟。這包含 statistics-reports **整支不回傳的
+ *    生涯零點擊 teaser**（所屬 campaign 有點擊，所以 campaign 級零點擊補救也沒涵蓋；實測 9/23 沃醫學_喬雅露
+ *    teaser 27736324 只有 teaser-stat／Redash 看得到 1 次曝光）。
+ * 純函式。stats：teaserId → 日期 → teaser-stat 當日物件；meta：沒有任何原始列的 teaser 補列時用的 campaign／素材資訊。
+ */
+export interface MTeaserMeta { campaignId: string; campaignName: string; title: string; url: string; image: string }
+export function mergeTeaserStat(
+  rows: MgidReportRow[], stats: Map<string, Record<string, any>>, meta: Map<string, MTeaserMeta> = new Map()
+): { rows: MgidReportRow[]; patched: number; added: number } {
+  let patched = 0, added = 0;
+  const seen = new Set<string>();
+  const out = rows.map((r) => {
+    const d = r.teaserId ? stats.get(r.teaserId)?.[r.date] : undefined;
+    seen.add(`${r.teaserId}|${r.date}`);
+    if (!d) return r;
+    patched++;
+    return {
+      ...r, imp: Number(d.shows) || 0, click: Number(d.clicks) || 0, spend: Number(d.spent) || 0,
+      conv_interest: Number(d.interest) || 0, conv_decision: Number(d.decision) || 0, conv_buy: Number(d.buy) || 0,
+    };
+  });
+  for (const [tid, days] of stats) {
+    const m = meta.get(tid);
+    const tmpl: MgidReportRow | undefined = rows.find((r) => r.teaserId === tid) ?? (m && {
+      date: '', campaignId: m.campaignId, campaignName: m.campaignName, teaserId: tid, teaserTitle: m.title, teaserUrl: m.url, teaserImage: m.image,
+      adRequests: 0, imp: 0, click: 0, spend: 0, cpc: 0, cpm: 0, ctr: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0,
+      conv_rate_interest: 0, conv_rate_decision: 0, conv_rate_buy: 0, conv_cost_interest: 0, conv_cost_decision: 0, conv_cost_buy: 0,
+    });
+    if (!tmpl) continue;
+    for (const [date, d] of Object.entries(days)) {
+      if (seen.has(`${tid}|${date}`) || !((Number(d?.shows) || 0) || (Number(d?.clicks) || 0) || (Number(d?.spent) || 0))) continue;
+      added++;
+      out.push({
+        ...tmpl, date, adRequests: 0, imp: Number(d.shows) || 0, click: Number(d.clicks) || 0, spend: Number(d.spent) || 0,
+        cpc: 0, cpm: 0, ctr: 0, conv_interest: Number(d.interest) || 0, conv_decision: Number(d.decision) || 0, conv_buy: Number(d.buy) || 0,
+      });
+    }
+  }
+  return { rows: out, patched, added };
+}
+
+/** 抓單一 MGID 帳號的事實表（沿用 core/mgid：帳戶時區、零點擊 campaign 補救都已內建），數字再以 teaser-stat 校正。
  * 裝置表不在這裡抓：MGID API 的裝置報表會整支排除零點擊 campaign，改由全平台 Redash job 產生（fetchMRedashDevice）。 */
 export async function fetchMAccount(
   client: MgidClient, sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void
 ): Promise<FetchResult> {
   onPhase(`M ${client.clientName}：teaser 報表`);
-  const rows = await fetchMgidReport(client, sd, ed);
+  const raw = await fetchMgidReport(client, sd, ed);
+  // 要查的 teaser＝原始列出現過的＋「有數字的 campaign」底下全部 teaser（statistics-reports 不回傳生涯零點擊 teaser）
+  const meta = new Map<string, MTeaserMeta>();
+  if (raw.length) {
+    const idx = await fetchTeaserIndex(client);
+    const campName = new Map(raw.map((r) => [r.campaignId, r.campaignName]));
+    for (const cid of campName.keys()) {
+      for (const tid of idx.byCampaign[cid] ?? []) {
+        const t = idx.meta[tid];
+        meta.set(tid, { campaignId: cid, campaignName: campName.get(cid) ?? '', title: t?.title ?? '', url: t?.url ?? '', image: t?.image ?? '' });
+      }
+    }
+  }
+  const tids = [...new Set([...raw.map((r) => r.teaserId).filter(Boolean), ...meta.keys()])];
+  const stats = new Map<string, Record<string, any>>();
+  for (const [i, tid] of tids.entries()) {
+    onPhase(`M ${client.clientName}：teaser-stat 校正 ${i + 1}/${tids.length}`);
+    stats.set(tid, await fetchTeaserStat(client, tid, sd, ed));
+    await new Promise((r) => setTimeout(r, 150)); // 廣告主 API 併發 6+ 會 429，序列＋節流
+  }
+  const { rows } = mergeTeaserStat(raw, stats, meta);
   const currency = rows.length ? await getClientCurrency(client) : '';
   const acc = { id: client.apiClientId, name: client.clientName };
   return { facts: toMRows(acc, currency, rows, syncedAt), device: [], warnings: [] };
