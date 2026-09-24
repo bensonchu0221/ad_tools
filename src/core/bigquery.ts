@@ -68,6 +68,15 @@ export async function bqQuery(sql: string, opts: { timeoutMs?: number } = {}): P
   return toObjects(body.schema?.fields, body.rows);
 }
 
+/** dry-run：不執行、不計費，只回傳這句 SQL 會掃描（＝計費）多少 bytes。上線前估成本用。 */
+export async function bqDryRun(sql: string): Promise<number> {
+  const res = await getBq().jobs.query({
+    projectId: BQ_PROJECT,
+    requestBody: { query: sql, useLegacySql: false, location: BQ_LOCATION, dryRun: true },
+  });
+  return Number((res.data as any).totalBytesProcessed ?? 0);
+}
+
 /** SQL 字串字面值轉義（單引號與反斜線）。我們只會塞白名單字串，這是第二道防線。 */
 export function sqlString(v: string): string {
   return `'${String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;

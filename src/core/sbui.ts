@@ -136,7 +136,8 @@ const SB_CSS = `
     h1{font-size:30px}
     .topbar{gap:14px;padding:13px 16px}
     .mk-t{display:none}
-    .toolnav{gap:14px}
+    .toolnav{gap:14px;min-width:0;overflow-x:auto;scrollbar-width:none} /* 工具多了手機放不下：橫向滑動，不撐破整頁 */
+    .toolnav::-webkit-scrollbar{display:none}
     .toolnav a{font-size:11.5px}
   }
 `;

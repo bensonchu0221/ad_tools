@@ -12,6 +12,9 @@ import {
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
 import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
+import { reconSql, toReconRows, summarizeRecon, reconLevel, fmtMatch } from '../src/tools/nexus/recon.js';
+import { statusPage } from '../src/tools/nexus/page.js';
+import type { NexusReconRow, NexusJobRow } from '../src/core/store.js';
 
 const T = '2026-09-23T00:00:00.000Z';
 let n = 0;
@@ -68,6 +71,23 @@ await ok('D 裝置：pc_/mobile_ 拆兩列、base 欄不進 events、全 0 的�
   assert.deepEqual(Object.keys(rows[0]).sort(), keysOf(DEVICE_SCHEMA));
   assert.equal(rows[0].device, 'PC');
   assert.deepEqual(JSON.parse(String(rows[0].events)), { cv: 1, cv_add_to_cart: 3 });
+});
+
+await ok('D 裝置列：總數 − PC − Mobile 寫成 Others（平板等不能丟），tablet/xbox 轉換收進 Others', () => {
+  // 數字取自 2026-09-23 帳戶 24961 實測：總數 302528，pc 273406，mobile 0
+  const rows = toDDeviceRows({ id: '24961', name: '沃醫學' }, [{
+    date: '20260923', campaign_id: 'c1', imp: 302528, click: 95, charge: 665,
+    pc_imp: 273406, pc_click: 78, pc_charge: 546, mobile_imp: 0, mobile_click: 0, mobile_charge: 0,
+    tablet_cv: 2, xbox_cv: 1, tablet_cv_purchase: 1,
+  }], T);
+  assert.deepEqual(rows.map((r) => r.device), ['PC', 'Others']);
+  const o = rows[1];
+  assert.deepEqual([o.imp, o.click, o.spend], [29122, 17, 119]);
+  assert.deepEqual(JSON.parse(String(o.events)), { cv: 3, cv_purchase: 1 });
+  const sum = (k: string) => rows.reduce((a, r) => a + Number(r[k]), 0);
+  assert.deepEqual([sum('imp'), sum('click'), sum('spend')], [302528, 95, 665]);
+  // 總數剛好等於 PC＋Mobile ⇒ 不產生 Others
+  assert.equal(toDDeviceRows({ id: '1', name: 'x' }, [{ date: '20260923', campaign_id: 'c', imp: 10, click: 1, charge: 2, pc_imp: 10, pc_click: 1, pc_charge: 2 }], T).length, 1);
 });
 
 await ok('R 事實列：欄位＝schema、id 轉字串、缺 user_id 丟錯', () => {
@@ -360,6 +380,100 @@ await ok('getCampaigns：平台回錯誤要丟出來，不能當成 0 個 campai
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ────────────────────────────── 正確性比對 ──────────────────────────────
+
+const rr = (platform: any, accountId: string, f: [number, number, number], d: [number, number, number]): NexusReconRow => ({
+  platform, accountId, accountName: `帳${accountId}`,
+  fact: { imp: f[0], click: f[1], spend: f[2] }, device: { imp: d[0], click: d[1], spend: d[2] },
+});
+
+await ok('比對 SQL：四張事實表＋裝置表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
+  const sql = reconSql('2026-09-23');
+  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 5);
+  assert.match(sql, /SUM\(charge\)/);
+  assert.match(sql, /SUM\(payment_revenue\)/);
+  assert.match(sql, /SUM\(impressions\), SUM\(clicks\)|SUM\(impressions\) AS imp, SUM\(clicks\) AS click/);
+  assert.match(sql, /FULL OUTER JOIN v USING \(platform, account_id\)/);
+  assert.doesNotMatch(sql, /SELECT \*/);
+});
+
+await ok('比對列轉換：BQ 字串轉數字、金額去浮點尾數、缺值當 0', () => {
+  const [r] = toReconRows([{ platform: 'D', account_id: '1', account_name: 'A', f_imp: '10', f_click: '2', f_spend: '3.000000001', v_imp: null, v_click: '2', v_spend: '3' }]);
+  assert.deepEqual(r, { platform: 'D', accountId: '1', accountName: 'A', fact: { imp: 10, click: 2, spend: 3 }, device: { imp: 0, click: 2, spend: 3 } });
+});
+
+await ok('吻合率：逐帳戶取絕對差，A 多 B 少不會互相抵銷；取三指標最差', () => {
+  const rows = [rr('D', 'a', [1000, 10, 100], [900, 10, 100]), rr('D', 'b', [900, 10, 100], [1000, 10, 100]), rr('R', 'x', [5, 0, 0], [5, 0, 0])];
+  const s = summarizeRecon('D', rows);
+  assert.equal(s.byMetric.click, 1);
+  assert.equal(s.byMetric.imp, 1 - 200 / 2000);
+  assert.equal(s.match, 0.9);
+  assert.equal(reconLevel(s.match), 'alert');
+  assert.equal(s.diffs.length, 2);
+  assert.equal(s.accounts, 2);
+  // 沒數字的平台 → null，不算紅燈
+  assert.equal(summarizeRecon('M', rows).match, null);
+  assert.equal(reconLevel(null), 'none');
+});
+
+await ok('吻合率：差距在 0.5% 內的帳戶不列明細；落差大的排前面', () => {
+  const rows = [rr('M', 's', [100000, 100, 10], [99990, 100, 10]), rr('M', 'big', [1000, 10, 100], [500, 10, 100]), rr('M', 'mid', [1000, 10, 100], [900, 10, 100])];
+  const s = summarizeRecon('M', rows);
+  assert.deepEqual(s.diffs.map((d) => d.row.accountId), ['big', 'mid']);
+});
+
+await ok('吻合率顯示：100%、兩位小數、一位小數、—', () => {
+  assert.equal(fmtMatch(1), '100%');
+  assert.equal(fmtMatch(0.99984), '99.98%');
+  assert.equal(fmtMatch(0.9712), '97.1%');
+  assert.equal(fmtMatch(null), '—');
+});
+
+await ok('健檢：批次跑完卻沒比對 → 黃燈；吻合率低 → 紅燈並點名帳戶；全吻合只進摘要', () => {
+  const a = healthBase(); a.recon = { checkedAt: null, rows: [] };
+  assert.match(evaluateHealth(a).items[0].text, /比對還沒跑/);
+  a.batch = { ...a.batch, queued: 3 }; // 還沒跑完就不催比對
+  assert.ok(!evaluateHealth(a).items.some((i) => /比對還沒跑/.test(i.text)));
+
+  const b = healthBase();
+  b.recon = { checkedAt: '2026-09-24 04:32:00', rows: [rr('D', 'A', [1000, 10, 100], [800, 10, 100]), rr('R', '9', [50000, 5, 5000], [50000, 5, 5000])] };
+  const r = evaluateHealth(b);
+  assert.equal(r.level, 'alert');
+  assert.match(r.items.map((i) => i.text).join('|'), /D（Discovery）.*只吻合 80\.0%.*最大：帳A/);
+  assert.match(r.summary.join('|'), /比對吻合 D 80\.0%／R 100%/);
+});
+
+const bjob = (id: number, platform: any, status: NexusJobRow['status'], extra: Partial<NexusJobRow> = {}): NexusJobRow => ({
+  id, batch: 'daily:2026-09-24', kind: 'daily', platform, accountId: String(id), accountName: `<帳${id}>`, sd: '2026-09-22', ed: '2026-09-23',
+  status, phase: status === 'running' ? '寫入 BQ' : null, attemptCount: 1, message: status === 'failed' ? '爆了' : 'ok',
+  queuedAt: '2026-09-24 04:00:00', startedAt: '2026-09-24 04:00:00', finishedAt: status === 'success' ? '2026-09-24 04:18:00' : null, ...extra,
+});
+
+await ok('狀態頁：刻度一帳一格、R/P 畫整圈、吻合按鈕與明細、帳戶名跳脫', () => {
+  const input = healthBase();
+  input.recon = { checkedAt: '2026-09-24 04:32:00', rows: [rr('D', '1', [1000, 10, 100], [800, 10, 100])] };
+  const batchJobs = [bjob(1, "D", "success"), bjob(2, "D", "failed"), bjob(3, "D", "running"), bjob(4, "M", "success"), bjob(5, "M", "success"), bjob(6, "R", "success"), bjob(7, "P", "running")];
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs, jobs: batchJobs });
+  assert.equal((html.match(/<line class="t-/g) ?? []).length, 5); // D 3 格 + M 2 格
+  assert.match(html, /class="ring-success"/);
+  assert.match(html, /class="ring-running"/);
+  assert.match(html, /1 個帳戶失敗/);
+  assert.match(html, /aria-controls="rp-D"/);
+  assert.match(html, /id="rp-D" hidden/);
+  assert.ok(!html.includes('<帳'), '帳戶名要跳脫');
+  assert.ok(!html.includes('近 14 天'), '寫入量表已移除');
+});
+
+await ok('狀態頁：今天還沒入列、還沒比對也能畫', () => {
+  const input = healthBase();
+  input.batch = { total: 0, queued: 0, running: 0, success: 0, failed: 0, lastFinished: null };
+  input.recon = { checkedAt: null, rows: [] };
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs: [], jobs: [] });
+  assert.match(html, /今天的批次還沒開跑/);
+  assert.equal((html.match(/ring-empty/g) ?? []).length, 4 + 1); // 四個平台＋CSS 定義一次
+  assert.match(html, /跑完後比對/);
 });
 
 console.log(`\n全部 ${n} 項通過`);

@@ -2232,6 +2232,19 @@ async function nexusPool(): Promise<mysql.Pool> {
       INDEX idx_dt (platform, dt)
     ) DEFAULT CHARSET=utf8mb4
   `);
+  // 正確性比對結果（tools/nexus/recon.ts）：每天每帳戶一列；platform='*' 那列是「這天比對過了」的標記
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS nexus_recon (
+      dt DATE NOT NULL,
+      platform CHAR(1) NOT NULL,
+      account_id VARCHAR(64) NOT NULL,
+      account_name VARCHAR(255) NOT NULL DEFAULT '',
+      f_imp BIGINT NOT NULL DEFAULT 0, f_click BIGINT NOT NULL DEFAULT 0, f_spend DECIMAL(18,4) NOT NULL DEFAULT 0,
+      d_imp BIGINT NOT NULL DEFAULT 0, d_click BIGINT NOT NULL DEFAULT 0, d_spend DECIMAL(18,4) NOT NULL DEFAULT 0,
+      checked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (dt, platform, account_id)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
   nexusSchemaReady = true;
   return p;
 }
@@ -2474,4 +2487,68 @@ export async function nexusCoverageRows(sd: string, ed: string): Promise<{
     platform: r.platform, accountId: String(r.account_id), accountName: r.account_name, dt: r.dt,
     rows: Number(r.fact_rows), imp: Number(r.imp), spend: Number(r.spend),
   }));
+}
+
+/** 某批次的每個 job（狀態頁的刻度圈用：一個帳戶一格）。 */
+export async function nexusBatchJobs(batch: string): Promise<NexusJobRow[]> {
+  const p = await nexusPool();
+  const [rows] = await p.query(`SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs WHERE batch = ? ORDER BY id`, [batch]);
+  return (rows as any[]).map(mapNexusJob);
+}
+
+// ---------- tool#9 nexus 正確性比對結果 ----------
+
+export interface NexusReconTotals { imp: number; click: number; spend: number }
+export interface NexusReconRow {
+  platform: NexusPlatform; accountId: string; accountName: string;
+  /** 事實表（素材層）加總 */
+  fact: NexusReconTotals;
+  /** 裝置表加總 */
+  device: NexusReconTotals;
+}
+
+/** 整天取代：先刪這天再寫入，外加一列 platform='*' 標記「這天比對過了」（當天四平台都沒數字也照樣標）。 */
+export async function replaceNexusRecon(dt: string, rows: NexusReconRow[]): Promise<void> {
+  const p = await nexusPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(`DELETE FROM nexus_recon WHERE dt = ?`, [dt]);
+    const all = [...rows, { platform: '*', accountId: '*', accountName: '', fact: { imp: 0, click: 0, spend: 0 }, device: { imp: 0, click: 0, spend: 0 } }];
+    for (let i = 0; i < all.length; i += 500) {
+      const chunk = all.slice(i, i + 500);
+      await conn.query(
+        `INSERT INTO nexus_recon (dt, platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend)
+         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?)').join(',')}`,
+        chunk.flatMap((r) => [dt, r.platform, r.accountId, r.accountName.slice(0, 255),
+          r.fact.imp, r.fact.click, r.fact.spend, r.device.imp, r.device.click, r.device.spend])
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+/** 某天的比對結果；還沒比對過 checkedAt 為 null。checkedAt 是台北時間 YYYY-MM-DD HH:MM:SS。 */
+export async function nexusReconFor(dt: string): Promise<{ checkedAt: string | null; rows: NexusReconRow[] }> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend,
+            DATE_FORMAT(CONVERT_TZ(checked_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS checked_at
+       FROM nexus_recon WHERE dt = ?`, [dt]
+  );
+  const list = rows as any[];
+  const mark = list.find((r) => r.platform === '*');
+  return {
+    checkedAt: mark?.checked_at ?? null,
+    rows: list.filter((r) => r.platform !== '*').map((r) => ({
+      platform: r.platform, accountId: String(r.account_id), accountName: r.account_name,
+      fact: { imp: Number(r.f_imp), click: Number(r.f_click), spend: Number(r.f_spend) },
+      device: { imp: Number(r.d_imp), click: Number(r.d_click), spend: Number(r.d_spend) },
+    })),
+  };
 }

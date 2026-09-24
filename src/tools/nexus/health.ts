@@ -5,10 +5,11 @@
 // **每天都發一則**（正常時一行綠燈）：健檢自己壞掉時「沒收到訊息」本身就是警訊；只在異常才發的話，
 // 壞掉跟一切正常看起來一模一樣。
 import {
-  nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows,
-  type NexusBatchStats, type NexusJobRow, type NexusPlatform,
+  nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows, nexusReconFor,
+  type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG } from './run.js';
+import { summarizeRecon, fmtMatch, RECON } from './recon.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
 export interface HealthItem { level: Exclude<Level, 'ok'>; text: string }
@@ -20,6 +21,8 @@ export interface HealthInput {
   failures: NexusJobRow[]; // 近 24 小時放棄重試的 job（含回補）
   backfill: { queued: number; running: number; success: number; failed: number };
   coverage: { platform: NexusPlatform; accountId: string; accountName: string; dt: string; rows: number; imp: number; spend: number }[];
+  /** T-1 的正確性比對（recon.ts）；checkedAt=null＝還沒比對 */
+  recon?: { checkedAt: string | null; rows: NexusReconRow[] };
 }
 
 /** 門檻（寫成常數方便之後調）。 */
@@ -142,7 +145,27 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     });
   }
 
-  // ⑤ 回補進度（有在跑才報）
+  // ⑤ 正確性比對：素材層加總 vs 裝置層加總（recon.ts）。批次跑完了卻沒比對結果也要講
+  const batchDone = b.total > 0 && b.queued + b.running === 0;
+  if (inp.recon && inp.recon.checkedAt === null) {
+    if (batchDone) items.push({ level: 'warn', text: `${t1} 的正確性比對還沒跑（每日批次跑完後 worker 會自動比對）` });
+  } else if (inp.recon) {
+    const parts: string[] = [];
+    for (const p of PLATFORMS) {
+      const s = summarizeRecon(p, inp.recon.rows);
+      if (s.match === null) continue;
+      parts.push(`${p} ${fmtMatch(s.match)}`);
+      if (s.match >= RECON.ok) continue;
+      const top = s.diffs.slice(0, 3).map((d) => d.row.accountName || d.row.accountId).join('、');
+      items.push({
+        level: s.match < RECON.warn ? 'alert' : 'warn',
+        text: `${PNAME[p]} ${t1} 素材層與裝置層加總只吻合 ${fmtMatch(s.match)}（${s.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}）`,
+      });
+    }
+    if (parts.length) summary.push(`比對吻合 ${parts.join('／')}`);
+  }
+
+  // ⑥ 回補進度（有在跑才報）
   const bf = inp.backfill;
   if (bf.queued + bf.running > 0) summary.push(`回補進行中：剩 ${fmt(bf.queued + bf.running)} 個 job、已完成 ${fmt(bf.success)}`);
 
@@ -152,13 +175,14 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
 
 /** 從 Cloud SQL 收集健檢要的資料。 */
 export async function gatherHealth(today = twToday()): Promise<HealthInput> {
-  const [batch, failures, backfill, coverage] = await Promise.all([
+  const [batch, failures, backfill, coverage, recon] = await Promise.all([
     nexusBatchStats(`daily:${today}`),
     nexusRecentFailures(24, 200),
     nexusBackfillStats(),
     nexusCoverageRows(addDays(today, -8), addDays(today, -1)),
+    nexusReconFor(addDays(today, -1)),
   ]);
-  return { today, batch, failures, backfill, coverage };
+  return { today, batch, failures, backfill, coverage, recon };
 }
 
 /** Google Chat 訊息（純文字＋Chat 支援的 *粗體*）。 */

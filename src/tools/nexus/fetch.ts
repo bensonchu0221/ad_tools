@@ -85,32 +85,49 @@ export function toDRows(
   });
 }
 
-// D 裝置：campaign 層 platform_cv=1 回 pc_/mobile_ 前綴寬列；只有這兩個前綴有 base 指標（沿用 Report Hub 口徑）。
+// D 裝置：campaign 層 platform_cv=1 回「不分裝置的總數（imp/click/charge）」＋ pc_/mobile_/tablet_/xbox_ 前綴寬列。
+// 只有 pc_、mobile_ 有曝光／點擊／花費；平板等其他裝置平台只給轉換事件、不給 base 指標。
+// ⚠️ 倉庫原則（使用者 2026-09-24）：資料中心不捨棄任何資料。以前只收 pc/mobile，平板等流量整塊消失
+// （實測 2026-09-23 帳戶 24961 少了 9.6% 曝光）⇒ 總數 − PC − Mobile 寫成 Others，裝置表加總＝平台總數。
 const D_DEVICE_PREFIX = [{ prefix: 'pc', device: 'PC' }, { prefix: 'mobile', device: 'Mobile' }];
+const D_OTHER_PREFIX = ['tablet', 'xbox'];
 const D_DEVICE_BASE = new Set(['imp', 'click', 'charge', 'ctr', 'cpc', 'cpm', 'cvr']);
 
-/** D 裝置寬列 → 一列一裝置；轉換事件（pc_cv、pc_cv_add_to_cart…）收進 events JSON。純函式。 */
+/** 某前綴的轉換事件（pc_cv、pc_cv_add_to_cart…，去掉前綴、略過 base 指標與 0）累加進 events。 */
+function addDEvents(events: Record<string, number>, r: any, prefix: string): void {
+  for (const [k, v] of Object.entries(r)) {
+    if (!k.startsWith(`${prefix}_`)) continue;
+    const ev = k.slice(prefix.length + 1);
+    if (D_DEVICE_BASE.has(ev)) continue;
+    const n = Number(v);
+    if (Number.isFinite(n) && n !== 0) events[ev] = (events[ev] ?? 0) + n;
+  }
+}
+
+/** D 裝置寬列 → 一列一裝置（PC／Mobile／Others）；轉換事件收進 events JSON。純函式。 */
 export function toDDeviceRows(account: { id: string; name: string }, raw: any[], syncedAt: string): Row[] {
   const out: Row[] = [];
   for (const r of raw) {
     const date = requireDate(r.date, 'D');
+    const base = { date, platform: 'D', account_id: account.id, account_name: account.name, campaign_id: str(r.campaign_id) };
+    let imp = 0, click = 0, spend = 0;
     for (const { prefix, device } of D_DEVICE_PREFIX) {
       const events: Record<string, number> = {};
-      for (const [k, v] of Object.entries(r)) {
-        if (!k.startsWith(`${prefix}_`)) continue;
-        const ev = k.slice(prefix.length + 1);
-        if (D_DEVICE_BASE.has(ev)) continue;
-        const n = Number(v);
-        if (Number.isFinite(n) && n !== 0) events[ev] = n;
-      }
-      const imp = int(r[`${prefix}_imp`]), click = int(r[`${prefix}_click`]), spend = money(r[`${prefix}_charge`]);
-      if (!imp && !click && !spend && !Object.keys(events).length) continue;
-      out.push({
-        date, platform: 'D', account_id: account.id, account_name: account.name,
-        campaign_id: str(r.campaign_id), device, imp, click, spend,
-        events: JSON.stringify(events), synced_at: syncedAt,
-      });
+      addDEvents(events, r, prefix);
+      const d = { imp: int(r[`${prefix}_imp`]), click: int(r[`${prefix}_click`]), spend: money(r[`${prefix}_charge`]) };
+      imp += d.imp; click += d.click; spend += d.spend;
+      if (!d.imp && !d.click && !d.spend && !Object.keys(events).length) continue;
+      out.push({ ...base, device, ...d, events: JSON.stringify(events), synced_at: syncedAt });
     }
+    // Others＝平台總數 − PC − Mobile（平板等）。總數比兩者合計還小不應發生，真發生就寫 0、讓正確性比對亮燈，不硬湊
+    const events: Record<string, number> = {};
+    for (const prefix of D_OTHER_PREFIX) addDEvents(events, r, prefix);
+    const o = {
+      imp: Math.max(0, int(r.imp) - imp), click: Math.max(0, int(r.click) - click),
+      spend: Math.max(0, money(money(r.charge) - spend)),
+    };
+    if (!o.imp && !o.click && !o.spend && !Object.keys(events).length) continue;
+    out.push({ ...base, device: 'Others', ...o, events: JSON.stringify(events), synced_at: syncedAt });
   }
   return out;
 }
