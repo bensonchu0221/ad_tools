@@ -14,5 +14,5 @@ export const FONT_FACES = `
 @font-face{font-family:'Chakra Petch';font-style:normal;font-weight:600;font-display:swap;src:url('/fonts/chakra-petch-600.woff2') format('woff2')}
 @font-face{font-family:'Chakra Petch';font-style:normal;font-weight:700;font-display:swap;src:url('/fonts/chakra-petch-700.woff2') format('woff2')}
 @font-face{font-family:'Share Tech Mono';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/share-tech-mono-400.woff2') format('woff2')}
-@font-face{font-family:'Big Shoulders Display';font-style:normal;font-weight:800;font-display:swap;src:url('/fonts/big-shoulders-display-800.woff2') format('woff2')}
+@font-face{font-family:'Saira Semi Condensed';font-style:normal;font-weight:700;font-display:swap;src:url('/fonts/saira-semi-condensed-700.woff2') format('woff2')}
 `;

@@ -555,7 +555,14 @@ await ok('狀態頁：刻度一帳一格、R/P 畫整圈、吻合按鈕與明細
   assert.match(html, /<div class="rp-tint"[^>]*><\/div><div class="rp-in"/); // 折射模式的羽化白罩
   assert.match(html, /<b class="word">完成<\/b><small>2 \/ 2<\/small>/); // M 全部完成：大字「完成」、小字數字
   assert.match(html, /<b>1<\/b><i>\/ 3<\/i>/); // D 還沒完成：大字完成數
-  assert.match(html, /<b class="word">執行中<\/b><small>0 \/ 1<\/small>/); // P 單一 job
+  // R／P 全平台一個 job：小字是 T-1 有數字的帳戶數，不是 job 數（以前寫 1 / 1 被看成只有一個帳戶）
+  assert.match(html, /<b class="word">執行中<\/b><small>1 帳戶<\/small>/); // P（healthBase 的 T-1 有 1 個 P 帳戶）
+  assert.match(html, /<b class="word">完成<\/b><small>1 帳戶<\/small>/); // R
+  assert.ok(!/<small>1 \/ 1<\/small>/.test(html), 'R/P 不再顯示 job 數');
+  assert.match(html, /class="pf pf-m"/); // 斜線顏色跟平台色塊走 --pc
+  // 開場動畫：只有程式觸發的重整（留 nexus-auto 記號）才跳過
+  assert.match(html, /sessionStorage\.getItem\('nexus-auto'\)/);
+  assert.ok(!html.includes('nexus-intro'), '舊的「每分頁只播一次」規則已拿掉');
   assert.ok(!html.includes('<帳'), '帳戶名要跳脫');
   assert.ok(!html.includes('近 14 天'), '寫入量表已移除');
 });

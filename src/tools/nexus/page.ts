@@ -8,6 +8,7 @@
 import { sbPage } from '../../core/sbui.js';
 import type { NexusJobRow, NexusPlatform } from '../../core/store.js';
 import { addDays } from './run.js';
+import { P_UNATTRIBUTED } from './fetch.js';
 import type { HealthInput, HealthReport } from './health.js';
 import { summarizeRecon, reconLevel, fmtMatch, RECON, type PlatformRecon } from './recon.js';
 
@@ -56,8 +57,9 @@ function dial(jobs: NexusJobRow[]): string {
 }
 
 /** 圈中央的讀數＋圈下方的一句狀態。
- *  全部完成 ⇒ 大字「完成」、下方小字 n / n（R／P 一個 job 也一樣）；還沒完成的 D／M 大字是完成數。 */
-function dialText(jobs: NexusJobRow[]): { center: string; line: string; tone: string } {
+ *  D／M（一帳一 job）：全部完成 ⇒ 大字「完成」、小字 n / n；還沒完成大字是完成數。
+ *  R／P（全平台一個 job）：小字是 T-1 有數字的帳戶數（accountsWithData）。以前寫 1 / 1（job 數），被看成只有一個帳戶。 */
+function dialText(jobs: NexusJobRow[], accountsWithData: number): { center: string; line: string; tone: string } {
   const c = { success: 0, failed: 0, running: 0, queued: 0 } as Record<St, number>;
   for (const j of jobs) c[j.status]++;
   if (!jobs.length) return { center: '<b>—</b>', line: '今天還沒入列', tone: 'mut' };
@@ -66,7 +68,8 @@ function dialText(jobs: NexusJobRow[]): { center: string; line: string; tone: st
     const j = jobs[0];
     const line = j.status === 'running' ? (j.phase ?? '執行中') : j.status === 'failed' ? `失敗：${j.message ?? ''}` :
       j.status === 'success' ? `全平台一次抓完，${(j.finishedAt ?? '').slice(11, 16)}` : '排隊中';
-    return { center: `<b class="word">${ST_LABEL[j.status]}</b>${frac}`, line, tone: j.status };
+    const sub = accountsWithData ? `${num(accountsWithData)} 帳戶` : '全平台';
+    return { center: `<b class="word">${ST_LABEL[j.status]}</b><small>${sub}</small>`, line, tone: j.status };
   }
   const center = c.success === jobs.length ? `<b class="word">完成</b>${frac}`
     : `<span><b>${num(c.success)}</b><i>/ ${num(jobs.length)}</i></span>`;
@@ -153,9 +156,13 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
   const panels: string[] = [];
   for (const p of PLATFORMS) {
     const pj = batchJobs.filter((j) => j.platform === p);
-    const t = dialText(pj);
     let imp = 0, spend = 0;
-    for (const c of input.coverage) if (c.platform === p && c.dt === t1) { imp += c.imp; spend += c.spend; }
+    const acctWithData = new Set<string>();
+    for (const c of input.coverage) if (c.platform === p && c.dt === t1) {
+      imp += c.imp; spend += c.spend;
+      if (c.accountId !== P_UNATTRIBUTED) acctWithData.add(c.accountId); // P 沒帶 advertiser 的事件是虛擬帳戶，不算
+    }
+    const t = dialText(pj, acctWithData.size);
 
     let matchBtn: string;
     if (!reconRows) {
@@ -169,10 +176,10 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h" closedby="any"><div class="rp-tint" aria-hidden="true"></div><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
     }
 
-    cards.push(`<article class="pf">
+    cards.push(`<article class="pf pf-${p.toLowerCase()}">
       <header class="pf-h"><span class="src src-${p.toLowerCase()}">${p}</span>
         <div class="pf-hd">${platformTitle(p)}
-          <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台' : ''; })()}</span></div></header>
+          <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台一次抓' : ''; })()}</span></div></header>
       <div class="dial-box">${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
       <dl class="pf-num">
@@ -215,7 +222,7 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       ${items ? `<ul class="hitems">${items}</ul>` : ''}
     </section>
 
-    <script>try{if(sessionStorage.getItem('nexus-intro'))document.documentElement.classList.add('intro-seen')}catch(e){}</script>
+    <script>try{if(sessionStorage.getItem('nexus-auto')){sessionStorage.removeItem('nexus-auto');document.documentElement.classList.add('intro-seen')}}catch(e){}</script>
     <div class="board glass">${cards.join('')}</div>
     ${panels.join('')}
     ${backfill}
@@ -296,21 +303,26 @@ const STYLE = `
   .board{display:grid;grid-template-columns:repeat(4,1fr);margin-top:22px}
   .pf{padding:22px 20px 20px;border-left:1px solid var(--hair);display:flex;flex-direction:column;min-width:0}
   .pf:first-child{border-left:none}
-  .pf-h{display:flex;align-items:flex-start;gap:6px}
-  .pf-h .src{margin-top:13px}
+  .pf-h{--tf:clamp(26px,calc((100cqi - 26px) / 4.6),42px);display:flex;align-items:flex-start;gap:6px}
+  .pf-h .src{margin-top:calc(var(--tf) * .31)} /* 跟平台名的字腰對齊（42px 時 13px） */
   .pf-hd{min-width:0}
   .pf-c{display:block;margin:2px 0 0 10px;font-size:12px;color:var(--mut)}
 
-  /* 平台名：窄體粗黑 42px（原本 14px 的三倍），前面一條橘紅斜線。
-     斜線＝.nm 的 clip-path 左緣（同一條對角線），所以字是「從斜線後面」出來；第一個字左上角被切掉一小塊 */
-  .pf-t{position:relative;margin:0;font:800 42px/1.12 'Big Shoulders Display',var(--disp);letter-spacing:.01em;color:var(--ink)}
+  /* 平台名：Saira Semi Condensed 42px（原本 14px 的三倍），前面一條斜線、顏色跟平台色塊一樣。
+     斜線＝.nm 的 clip-path 左緣（同一條對角線），所以字是「從斜線後面」出來；第一個字左上角被切掉一小塊。
+     字級跟著格子寬度縮（container query）：4 欄在 900~1100px 視窗時格子變窄，固定 42px 會把字尾切掉。
+     4.6em＝最長的 Discovery（約 4.26em）＋斜線前導 .2em＋餘裕；26px＝平台色塊＋間距（cqi 已是扣掉內距的內容寬） */
+  .pf{container-type:inline-size}
+  .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E}
+  .pf-t{position:relative;margin:0;font:700 var(--tf)/1.12 'Saira Semi Condensed',var(--disp);
+    letter-spacing:.005em;color:var(--ink)}
   .pf-t .sl{position:absolute;z-index:1;left:0;top:0;width:.34em;height:100%;overflow:visible;pointer-events:none} /* 斜線壓在字上面：字是從它後面出來 */
   /* viewBox 34×112＝.34em×1.12em 同比例，線寬跟著字級等比縮放（42px 時約 2.2px） */
-  .pf-t .sl line{stroke:var(--accent);stroke-width:5.2;stroke-linecap:round}
+  .pf-t .sl line{stroke:var(--pc,var(--accent));stroke-width:5.2;stroke-linecap:round}
   .pf-t .nm{display:block;white-space:nowrap;padding:0 .04em 0 .2em;clip-path:polygon(.34em 0,100% 0,100% 100%,0 100%)}
   .pf-t .nw{display:inline-block}
   /* 開場：斜線先由下往上畫出，字再從斜線後面滑出（起點整個字都在斜線左側，被 clip 藏住）。
-     只在這個分頁第一次開頁時播，30 秒自動重整不會重播 */
+     使用者自己打開或按重新整理都會播；30 秒自動重整、點倒數環立即更新不播（html.intro-seen） */
   html:not(.intro-seen) .pf-t .sl line{stroke-dasharray:118;stroke-dashoffset:118;animation:slash .35s ease-out forwards;
     animation-delay:calc(var(--p) * 110ms + 100ms)}
   html:not(.intro-seen) .pf-t .nw{animation:emerge 1s cubic-bezier(.16,1,.3,1) both;
@@ -453,7 +465,6 @@ const STYLE = `
     .pf:nth-child(n+2){border-top:1px solid var(--hair)}
     .pf{display:grid;grid-template-columns:104px 1fr;column-gap:16px;padding:16px}
     .pf-h{grid-column:1/-1}
-    .pf-t{font-size:36px}.pf-h .src{margin-top:11px}
     .dial-box{grid-row:2/5;width:104px;height:104px;margin:12px 0 0}
     .dial-c{gap:3px}
     .dial-c b{font-size:21px}.dial-c b.word{font-size:16px}.dial-c i,.dial-c small{font-size:11px}
@@ -538,9 +549,10 @@ const SCRIPT = `
   var det=document.querySelector('.all-jobs');
   det.addEventListener('toggle',function(){ var s=store.get(); s.all=det.open; store.set(s); });
   var s=store.get(); if(s.p) open(s.p); if(s.all) det.open=true;
-  try{ sessionStorage.setItem('nexus-intro','1'); }catch(e){}
   // 倒數環跑完就重整（視窗開著時 CSS 會把倒數暫停）；點環立即重整
-  document.querySelector('.tk-fg').addEventListener('animationend',function(){ location.reload(); });
-  document.querySelector('.tick').addEventListener('click',function(){ location.reload(); });
+  // 程式觸發的重整先留記號：下一頁看到記號就跳過平台名開場動畫（只有使用者自己打開／按重新整理才播）
+  function refresh(){ try{ sessionStorage.setItem('nexus-auto','1'); }catch(e){} location.reload(); }
+  document.querySelector('.tk-fg').addEventListener('animationend',refresh);
+  document.querySelector('.tick').addEventListener('click',refresh);
 })();
 `;
