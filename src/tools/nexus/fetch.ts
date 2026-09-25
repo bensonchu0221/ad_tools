@@ -39,11 +39,13 @@ function requireDate(v: unknown, platform: Platform): string {
 // ────────────────────────────── D ──────────────────────────────
 
 /**
- * 剪掉「這段日期內不可能有資料」的 campaign（老帳號動輒數百個，全打 bulk 會慢到跑不完）。
- * 三條規則沿用週報（src/tools/weeklyreport/report.ts）：
- *  ① end_date + 3 個月早於區間起日 ② created_at 晚於區間迄日（100% 安全）
- *  ③ updated_at 早於區間起日 30 天（投放中系統會更新它）。status 欄位不可用（停用的也可能投放過）。
- * 日期解析不出來一律保留（寧可多打不可漏）。
+ * 剪掉「這段日期內不可能有資料」的 campaign，只剩兩條 100% 安全的規則：
+ *  ① end_date + 3 個月早於區間起日 ② created_at 晚於區間迄日。日期解析不出來一律保留（寧可多打不可漏）。
+ * ⚠️ 原本還有③「updated_at 早於區間起日 30 天就剪」，前提是「投放中系統會更新 updated_at」——**不成立**：
+ *   2026-09-25 實測 status=1、每天有花費的 campaign，updated_at 停在一個多月前（只有改設定才會動）。
+ *   全 244 帳戶掃 9/23~9/24：③ 漏掉 3 帳戶 4 支 campaign（29262／23505／32325），每日批次靜悄悄寫成「無投放」
+ *   或整段取代時把它們刪掉；素材層、裝置層一起漏，正確性比對也抓不到。
+ *   拿掉③的代價：每日 D bulk 請求 57 → 約 600 次（10 支 campaign 一次、每 IP 每秒 1 次，約多 9 分鐘），可接受。
  */
 export function pruneDCampaigns(campaigns: any[], sd: string, ed: string): any[] {
   const startTs = new Date(`${sd}T00:00:00+08:00`).getTime();
@@ -57,8 +59,6 @@ export function pruneDCampaigns(campaigns: any[], sd: string, ed: string): any[]
     }
     const created = parseLooseDate(c.created_at);
     if (created !== null && created > endTs) return false;
-    const updated = parseLooseDate(c.updated_at);
-    if (updated !== null && updated < startTs - 30 * 86400000) return false;
     return true;
   });
 }

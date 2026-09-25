@@ -6,7 +6,7 @@ import {
   getCampaigns,
   getAdLists,
   getDateReports,
-  getAdReportIndex,
+  getAdReportBulk,
   getCampaignDeviceReports,
 } from '../../core/popin.js';
 import { getDAccountTokenById, getMgidTokenById, listMgidAccounts } from '../../core/store.js';
@@ -475,11 +475,12 @@ async function fetchDData(
   const accessToken = await getAccessToken(token);
   const campaigns = await getCampaigns(accessToken);
 
-  // 跳過走期內不可能有資料的 campaign（老帳號動輒數百個，全抓要數分鐘）。三條規則：
-  // 1) end_date + N 個月早於走期開始（照舊概念，門檻表單可選）——但很多 campaign 設 2099 不限期，靠不住
+  // 跳過走期內不可能有資料的 campaign，只剩兩條安全規則：
+  // 1) end_date + N 個月早於走期開始（門檻表單可選）——很多 campaign 設 2099 不限期，只剪得掉有設結束日的
   // 2) created_at 晚於走期結束（建立前不可能投放，100% 安全）
-  // 3) updated_at 早於走期開始 30 天（實證：投放中系統會更新 updated_at；status 欄位不可用——
-  //    當下停用的 campaign 走期內可能投放過，實測 34 個有資料者中 25 個 status=0）
+  // ⚠️ 原本還有 3)「updated_at 早於走期開始 30 天就剪」，前提「投放中系統會更新 updated_at」不成立
+  //   （2026-09-25 實測 status=1、天天有花費的 campaign，updated_at 停在一個多月前）→ 長跑 campaign 整支漏抓，已拿掉。
+  //   status 欄位也不能拿來剪（當下停用的 campaign 走期內可能投放過，實測 34 個有資料者中 25 個 status=0）。
   const startTs = new Date(`${input.startDate}T00:00:00`).getTime();
   const endRangeTs = new Date(`${input.endDate}T23:59:59`).getTime();
   const camMap = new Map<string, any>();
@@ -492,26 +493,38 @@ async function fetchDData(
     }
     const createdTs = parseLooseDate(cam.created_at);
     if (createdTs !== null && createdTs > endRangeTs) continue;
-    const updatedTs = parseLooseDate(cam.updated_at);
-    if (updatedTs !== null && updatedTs < startTs - 30 * 86400000) continue;
     camMap.set(String(cam.mongo_id), cam);
   }
 
-  onPhase?.(`抓 D 廣告清單中…（${camMap.size}/${campaigns.length} 個 campaign 在走期內）`);
-  const ads = await getAdLists(accessToken, [...camMap.keys()], { batchSize: 8 });
+  // bulk 預掃：拿掉 3) 之後老帳號可能剩數百個 campaign，先用 §3.6 bulk 端點（10 支 campaign 一次）
+  // 找出「走期內有資料的 campaign／廣告」，廣告清單（每支 campaign 一次）與貴的 per-ad date_reporting
+  // （1 req/s、唯一含 cv_* 細分）都只打這批（實測老帳號每週有資料的廣告 345→46）。
+  // bulk 缺 cv_* 只能當索引；任一組失敗 → 退回全打（寧可慢不可漏，cv_* 仍由 per-ad 取得，數字不變）。
+  let scanned: { adIds: Set<string>; campaignIds: string[] } | null = null;
+  try {
+    onPhase?.(`D 預掃中…（${camMap.size}/${campaigns.length} 個 campaign 在走期內）`);
+    const bulk = await getAdReportBulk(accessToken, [...camMap.keys()], ymd(input.startDate), ymd(input.endDate));
+    const adIds = new Set<string>(), camIds = new Set<string>();
+    for (const r of bulk) {
+      if (r?.ad_id != null) adIds.add(String(r.ad_id));
+      if (r?.campaign_id != null) camIds.add(String(r.campaign_id));
+    }
+    scanned = { adIds, campaignIds: [...camIds].filter((id) => camMap.has(id)) };
+  } catch {
+    onPhase?.('D 預掃失敗，改為全量抓取');
+  }
+
+  const listCampaigns = scanned ? scanned.campaignIds : [...camMap.keys()];
+  onPhase?.(`抓 D 廣告清單中…（${listCampaigns.length} 個 campaign）`);
+  const ads = listCampaigns.length ? await getAdLists(accessToken, listCampaigns, { batchSize: 8 }) : [];
   const adMap = new Map<string, any>();
   for (const ad of ads) adMap.set(String(ad.mongo_id), ad);
 
-  // bulk 預掃剪枝：老帳號每週實際有資料的廣告極少（實測 345→46）。先用 §3.6 bulk 端點
-  // 列出「有資料的 ad_id」，貴的 per-ad date_reporting（1 req/s、唯一含 cv_* 細分）只打這批。
-  // bulk 缺 cv_* 只能當索引；任一組失敗 → 退回全打（寧可慢不可漏，cv_* 仍由 per-ad 取得，數字不變）。
   let items = ads.map((ad: any) => ({ campaignId: String(ad.campaign), adId: String(ad.mongo_id) }));
-  try {
-    const dataAdIds = await getAdReportIndex(accessToken, [...camMap.keys()], ymd(input.startDate), ymd(input.endDate));
-    items = items.filter((it) => dataAdIds.has(it.adId));
+  if (scanned) {
+    const { adIds } = scanned;
+    items = items.filter((it) => adIds.has(it.adId));
     onPhase?.(`D 預掃完成：${items.length}/${ads.length} 支廣告走期內有資料`);
-  } catch {
-    onPhase?.('D 預掃失敗，改為全量抓取');
   }
 
   // 分塊抓報表並回報進度：4A 帳號可能有數百支廣告，整段要數分鐘，

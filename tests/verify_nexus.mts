@@ -29,7 +29,7 @@ await ok('ymdDash 吃三種日期格式', () => {
   assert.equal(ymdDash('garbage'), '');
 });
 
-await ok('D campaign 剪枝：created 晚於迄日、updated 早於起日 30 天、end_date+3 月過期都剪；解析不出保留', () => {
+await ok('D campaign 剪枝：created 晚於迄日、end_date+3 月過期才剪；updated_at 再舊都保留；解析不出保留', () => {
   const kept = pruneDCampaigns([
     { mongo_id: 'new', created_at: '2026-09-25 10:00:00', updated_at: '2026-09-25' },
     { mongo_id: 'stale', created_at: '2025-01-01', updated_at: '2026-07-01 00:00:00' },
@@ -37,7 +37,8 @@ await ok('D campaign 剪枝：created 晚於迄日、updated 早於起日 30 天
     { mongo_id: 'live', created_at: '2026-01-01', updated_at: '2026-09-22', end_date: '2099-12-31' },
     { mongo_id: 'weird', created_at: 'n/a', updated_at: '', end_date: null },
   ], '2026-09-21', '2026-09-22');
-  assert.deepEqual(kept.map((c) => c.mongo_id), ['live', 'weird']);
+  // 'stale'（updated_at 很舊、沒設結束日）要保留：D 投放中不會更新 updated_at（2026-09-25 實測漏抓 3 帳戶），規則③已拿掉
+  assert.deepEqual(kept.map((c) => c.mongo_id), ['stale', 'live', 'weird']);
 });
 
 await ok('D 事實列：cv 細分與廣告設定接回、欄位＝schema、金額去浮點尾數', () => {
