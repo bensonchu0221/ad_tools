@@ -173,15 +173,15 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       const lv = reconLevel(r.match);
       matchBtn = `<button type="button" class="match match-${lv}" aria-haspopup="dialog" aria-controls="rp-${p}" data-p="${p}">
           <span>吻合</span><b>${fmtMatch(r.match)}</b><em>${r.diffs.length ? `${r.diffs.length} 帳戶有落差` : '看明細'}</em><i class="chev" aria-hidden="true"></i></button>`;
-      // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面
-      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h" closedby="any"><div class="rp-tint" aria-hidden="true"></div><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
+      // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面。開關動畫要從按鈕長出／縮回，所以關閉全交給 JS（不用 closedby）
+      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
     }
 
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
       <header class="pf-h"><span class="src src-${p.toLowerCase()}">${p}</span>
         <div class="pf-hd">${platformTitle(p)}
           <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台一次抓' : ''; })()}</span></div></header>
-      <div class="dial-box">${dial(pj)}<div class="dial-c">${t.center}</div></div>
+      <div class="dial-box"${reconRows ? ` data-p="${p}" title="看吻合明細"` : ''}>${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
       <dl class="pf-num">
         <div><dt>${t1.slice(5)} 曝光</dt><dd>${imp ? num(imp) : '—'}</dd></div>
@@ -333,6 +333,9 @@ const STYLE = `
   @keyframes emerge{from{transform:translateX(calc(-100% - .3em))}}
   .dial-box{position:relative;width:148px;height:148px;margin:18px auto 10px}
   .dial{width:100%;height:100%;display:block}
+  .dial-box[data-p]{cursor:pointer;transition:transform .25s cubic-bezier(.2,.9,.3,1.3)}
+  .dial-box[data-p]:hover{transform:scale(1.04)}
+  .dial-box[data-p]:active{transform:scale(.97)}
   .dial line{stroke-linecap:butt}
   .t-success{stroke:var(--ink)} .t-failed{stroke:var(--err)} .t-running{stroke:var(--accent)} .t-queued{stroke:var(--queued)}
   /* 整圈（R／P）用虛線畫出跟刻度圈一樣的紋理，四張卡視覺重量一致 */
@@ -378,20 +381,16 @@ const STYLE = `
     border-radius:28px;overflow:hidden;background:linear-gradient(155deg,rgba(255,255,255,.74),rgba(255,255,255,.5));
     -webkit-backdrop-filter:blur(34px) saturate(190%);backdrop-filter:blur(34px) saturate(190%)}
   dialog.rp::backdrop{background:rgba(20,22,26,.16)}
-  dialog.rp[open]{display:flex;animation:pop .22s cubic-bezier(.2,.9,.3,1.2)}
+  dialog.rp[open]{display:flex}
   dialog.rp[open]::backdrop{animation:fade .2s ease-out}
-  @keyframes pop{from{opacity:0;transform:scale(.94) translateY(10px)}}
   @keyframes fade{from{opacity:0}}
   html:has(dialog.rp[open]){overflow:hidden}
-  /* 液態玻璃折射（.lg＝JS 確認是 Chromium 並產好位移圖才加）：backdrop-filter 換成 SVG 濾鏡——
-     邊緣一圈把背後畫面往內彎（位移圖），中間照樣磨砂（遮罩）。白色罩層改由 .rp-tint 承擔、四邊羽化，
-     讓邊緣那圈露出被彎曲的背景，中間仍然夠白、表格好讀 */
-  .rp-tint{display:none;position:absolute;inset:0;pointer-events:none;border-radius:inherit;
-    background:linear-gradient(155deg,rgba(255,255,255,.74),rgba(255,255,255,.52));
-    -webkit-mask:linear-gradient(90deg,transparent,#000 26px,#000 calc(100% - 26px),transparent),linear-gradient(transparent,#000 26px,#000 calc(100% - 26px),transparent);
-    -webkit-mask-composite:source-in;mask-composite:intersect}
-  dialog.rp.lg{background:rgba(255,255,255,.1)}
-  dialog.rp.lg .rp-tint{display:block}
+  /* 液態玻璃（.lg＝JS 確認是 Chromium 並產好濾鏡才加；仿 iOS 控制中心）：
+     整片玻璃效果都在 backdrop-filter 的 SVG 濾鏡裡——邊緣一圈透鏡折射（含色散）、中間磨砂＋白罩（表格要好讀）、
+     邊緣高光。CSS 這邊只剩外部陰影，原本 .glass 的內側亮線／漸層邊框會跟濾鏡的高光打架，拿掉 */
+  dialog.rp.lg{background:transparent;
+    box-shadow:0 0 0 .5px rgba(20,22,26,.1),0 2px 6px rgba(20,22,26,.06),0 34px 70px -24px rgba(20,22,26,.42)}
+  dialog.rp.lg::before{display:none}
   .rp-in{position:relative;z-index:1}
   .rp-in{flex:1;min-width:0;overflow:auto;padding:26px 28px 24px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
@@ -480,73 +479,153 @@ const STYLE = `
   @media(prefers-reduced-motion:reduce){
     .ring-running,.bf-bar i,.bf-bar i::after,html:not(.intro-seen) .pf-t .nw{animation:none}
     html:not(.intro-seen) .pf-t .sl line{animation:none;stroke-dashoffset:0}
-    dialog.rp[open],dialog.rp[open]::backdrop{animation:none}
+    dialog.rp[open]::backdrop{animation:none}
+    .dial-box[data-p]{transition:none}
   }
 `;
 
 // 明細視窗開合＋30 秒自動重整（重整後記得剛才開著哪個平台、有沒有展開全部 job）
 const SCRIPT = `
 (function(){
-  // ── 液態玻璃折射（落差明細浮窗）──
+  // ── 液態玻璃（落差明細浮窗，仿 iOS 控制中心）──
   // backdrop-filter 吃 SVG 濾鏡只有 Chromium 會畫；Safari 會說支援、實際整塊不畫，所以不能用 @supports，
   // 改看 userAgentData（只有 Chromium 有）。其他瀏覽器、或系統設了「減少透明度」就維持 CSS 磨砂。
   var LG = !!(navigator.userAgentData && (navigator.userAgentData.brands||[]).some(function(b){ return b.brand==='Chromium'; }))
     && !(window.matchMedia && matchMedia('(prefers-reduced-transparency: reduce)').matches);
-  var BEZEL=30, SHIFT=16, svgHost=null;
-  // 依浮窗實際尺寸產生兩張圖：
-  //  位移圖：R／G＝x／y 位移（128＝不動）。邊緣 BEZEL px 內往視窗中心取樣，越靠邊彎越多（(1-t)² 曲線）
-  //  遮罩：邊緣外側透明（露出折射）、往內漸變成不透明（磨砂）
+  var REDUCE = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+  // 玻璃參數：BEZEL＝邊緣曲面寬（px）、SHIFT＝物理折射量的比例尺（px）、IOR＝折射率、DISP＝色散（紅少彎、藍多彎的比例）
+  var BEZEL=34, SHIFT=30, IOR=1.5, DISP=.035, svgHost=null, svgNS='http://www.w3.org/2000/svg';
+  // 邊緣曲面的位移量（px，查表：離邊 d px 的地方往內取樣多遠）：
+  //  ①曲面輪廓用 convex squircle h(x)=⁴√(1-(1-x)⁴)（Apple 的連續曲率圓角，平面接曲面沒有折角），
+  //    垂直入射的光在曲面上依 Snell 定律（空氣 1 → 玻璃 IOR）偏折，走到玻璃底面的水平位移就是背景被「拉」的距離
+  //  ②但照物理算，最外緣那段位移變化比距離還快，取樣點會往回折＝背景上下顛倒（字被翻過來，很難看）。
+  //    所以由內往外限制「位移每往外 1px 最多多 1-MINS px」：取樣位置一定單調，只剩壓縮／放大、不會翻面
+  var MINS=.22, LUT=(function(){
+    var N=Math.round(BEZEL*8), out=new Float32Array(N+1), i;
+    for(i=0;i<=N;i++){
+      var x=i/N, u=1-x, u4=u*u*u*u;
+      var h=Math.pow(1-u4,.25), slope=x>=1?0:u*u*u*Math.pow(Math.max(1-u4,1e-9),-.75);
+      var t1=Math.atan(slope), t2=Math.asin(Math.sin(t1)/IOR);
+      out[i]=SHIFT*(h+.35)*Math.tan(t1-t2);            // .35＝玻璃底面到背景的距離（相對曲面高）
+    }
+    out[N]=0;
+    for(i=N-1;i>=0;i--) out[i]=Math.min(out[i],out[i+1]+(1-MINS)*BEZEL/N);
+    return function(d){ return d>=BEZEL?0:out[Math.round(Math.max(d,0)/BEZEL*N)]; };
+  })(), MAXD=0;
+  for(var q=0;q<=BEZEL;q+=.25) MAXD=Math.max(MAXD,LUT(q));
+  function smooth(a,b,v){ var t=Math.min(Math.max((v-a)/(b-a),0),1); return t*t*(3-2*t); }
+  // 圓角矩形的內距離（離邊多遠）＋往外的法向量；px/py 是相對中心的座標
+  function sdf(px,py,hx,hy,r){
+    var ax=Math.abs(px), ay=Math.abs(py), qx=ax-(hx-r), qy=ay-(hy-r), nx, ny, d;
+    if(qx>0&&qy>0){ var l=Math.hypot(qx,qy)||1; d=r-l; nx=qx/l; ny=qy/l; }
+    else if(qx>qy){ d=hx-ax; nx=1; ny=0; } else { d=hy-ay; nx=0; ny=1; }
+    return { d:d, nx:px<0?-nx:nx, ny:py<0?-ny:ny };
+  }
+  // 依浮窗實際尺寸產生三張圖：
+  //  map：位移圖，R／G＝x／y 位移（128＝不動），往內取樣
+  //  mask：磨砂範圍（曲面那圈透明、露出折射；往內變不透明）
+  //  lite：白罩＋邊緣高光（依 DPR 畫，高光細線才不糊）。白罩中間濃、曲面那圈很淡；
+  //        高光＝最外緣 1px 亮線＋往內幾 px 的柔光，亮度看法線跟光源（左上）的夾角，左上、右下最亮（iOS 的邊緣反光）
   function lgMaps(w,h,r){
-    var c=document.createElement('canvas'); c.width=w; c.height=h; var g=c.getContext('2d');
+    var c=document.createElement('canvas'), g, i, j, k, s;
+    c.width=w; c.height=h; g=c.getContext('2d');
     var dm=g.createImageData(w,h), mm=g.createImageData(w,h), D=dm.data, M=mm.data, hx=w/2, hy=h/2;
-    for(var j=0;j<h;j++) for(var i=0;i<w;i++){
-      var k=(j*w+i)*4, px=i+.5-hx, py=j+.5-hy, ax=Math.abs(px), ay=Math.abs(py);
-      var qx=ax-(hx-r), qy=ay-(hy-r), nx, ny, dist;
-      if(qx>0&&qy>0){ var l=Math.hypot(qx,qy)||1; dist=r-l; nx=qx/l; ny=qy/l; }
-      else if(qx>qy){ dist=hx-ax; nx=1; ny=0; } else { dist=hy-ay; nx=0; ny=1; }
-      if(px<0) nx=-nx; if(py<0) ny=-ny;                 // 往外的法向量
-      var t=Math.min(Math.max(dist/BEZEL,0),1), mag=(1-t)*(1-t);
-      D[k]=128-nx*mag*127; D[k+1]=128-ny*mag*127; D[k+2]=128; D[k+3]=255;
-      M[k]=M[k+1]=M[k+2]=255; M[k+3]=Math.min(Math.max((dist-BEZEL*.4)/(BEZEL*.6),0),1)*255;
+    for(j=0;j<h;j++) for(i=0;i<w;i++){
+      k=(j*w+i)*4; s=sdf(i+.5-hx,j+.5-hy,hx,hy,r);
+      var m=LUT(s.d)/MAXD;                               // 位移圖存 -1~1，實際 px 由 scale 還原
+      D[k]=128-s.nx*m*127; D[k+1]=128-s.ny*m*127; D[k+2]=128; D[k+3]=255;
+      M[k]=M[k+1]=M[k+2]=255; M[k+3]=smooth(BEZEL*.3,BEZEL*1.05,s.d)*255;
     }
     g.putImageData(dm,0,0); var map=c.toDataURL();
-    g.putImageData(mm,0,0); return { map:map, mask:c.toDataURL() };
+    g.putImageData(mm,0,0); var mask=c.toDataURL();
+    var dpr=Math.min(window.devicePixelRatio||1,2), W=Math.round(w*dpr), H=Math.round(h*dpr);
+    c.width=W; c.height=H; g=c.getContext('2d');
+    var lm=g.createImageData(W,H), L=lm.data, lx=-Math.SQRT1_2, ly=-Math.SQRT1_2;
+    for(j=0;j<H;j++) for(i=0;i<W;i++){
+      k=(j*W+i)*4; s=sdf((i+.5)/dpr-hx,(j+.5)/dpr-hy,hx,hy,r);
+      var diag=(i/W+j/H)/2, a;
+      if(s.d>BEZEL*1.1){ a=.67-.14*diag; }                           // 曲面以內只剩白罩（省掉下面的指數運算）
+      else {
+        var tint=.07+(.6-.14*diag)*smooth(BEZEL*.3,BEZEL*1.05,s.d);   // 白罩：左上稍濃、右下稍淡
+        var face=Math.abs(s.nx*lx+s.ny*ly), dir=.28+.72*face*face;     // 法線越對著光源（或背對）越亮
+        var rim=Math.exp(-s.d*s.d/.81)*.95+Math.exp(-s.d/5)*.22;       // 外緣細亮線＋往內柔光
+        a=1-(1-tint)*(1-Math.min(rim*dir,1));
+      }
+      L[k]=L[k+1]=L[k+2]=255; L[k+3]=a*255;
+    }
+    g.putImageData(lm,0,0);
+    return { map:map, mask:mask, lite:c.toDataURL() };
   }
   function lgApply(d){
     if(!LG) return;
-    var w=d.offsetWidth, h=d.offsetHeight;                // offset* 不受開窗縮放動畫影響
+    var w=d.offsetWidth, h=d.offsetHeight;                // offset* 不受開窗動畫的 transform 影響
     if(!w||!h||d.dataset.lg===w+'x'+h) return;
     d.dataset.lg=w+'x'+h;
     var m=lgMaps(w,h,parseFloat(getComputedStyle(d).borderTopLeftRadius)||28), id='lg-'+d.id;
-    if(!svgHost){ svgHost=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    if(!svgHost){ svgHost=document.createElementNS(svgNS,'svg');
       svgHost.setAttribute('width','0'); svgHost.setAttribute('height','0'); svgHost.setAttribute('aria-hidden','true');
       svgHost.style.position='absolute'; document.body.appendChild(svgHost); }
     var old=document.getElementById(id); if(old) old.remove();
     var img=function(href,res){ return '<feImage href="'+href+'" x="0" y="0" width="'+w+'" height="'+h+'" preserveAspectRatio="none" result="'+res+'"/>'; };
+    // 色散：紅／綠／藍各用一張位移、位移量差一點，再把三個通道加回來；邊緣會帶一點點彩邊
+    var ch=function(scale,row,res){ return '<feDisplacementMap in="soft" in2="map" scale="'+scale.toFixed(2)+'" xChannelSelector="R" yChannelSelector="G"/>'
+      + '<feColorMatrix type="matrix" values="'+row+' 0 0 0 1 0" result="'+res+'"/>'; };
     svgHost.insertAdjacentHTML('beforeend','<filter id="'+id+'" color-interpolation-filters="sRGB">'
-      + '<feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="soft"/>' + img(m.map,'map')
-      + '<feDisplacementMap in="soft" in2="map" scale="'+(SHIFT*2)+'" xChannelSelector="R" yChannelSelector="G" result="refr"/>'
-      + '<feGaussianBlur in="SourceGraphic" stdDeviation="22" edgeMode="duplicate" result="frost"/>' + img(m.mask,'mask')
+      + '<feGaussianBlur in="SourceGraphic" stdDeviation="1" result="soft"/>' + img(m.map,'map')
+      + ch(MAXD*2*(1-DISP),'1 0 0 0 0 0 0 0 0 0 0 0 0 0 0','cr')
+      + ch(MAXD*2,'0 0 0 0 0 0 1 0 0 0 0 0 0 0 0','cg')
+      + ch(MAXD*2*(1+DISP),'0 0 0 0 0 0 0 0 0 0 0 0 1 0 0','cb')
+      + '<feComposite in="cr" in2="cg" operator="arithmetic" k2="1" k3="1" result="crg"/>'
+      + '<feComposite in="crg" in2="cb" operator="arithmetic" k2="1" k3="1" result="refr"/>'
+      + '<feGaussianBlur in="SourceGraphic" stdDeviation="20" edgeMode="duplicate" result="frost"/>' + img(m.mask,'mask')
       + '<feComposite in="frost" in2="mask" operator="in" result="core"/>'
       + '<feComposite in="core" in2="refr" operator="over" result="mix"/>'
-      + '<feColorMatrix in="mix" type="saturate" values="1.8"/></filter>');
+      + '<feColorMatrix in="mix" type="saturate" values="1.7" result="sat"/>' + img(m.lite,'lite')
+      + '<feComposite in="lite" in2="sat" operator="over"/></filter>');
     d.style.backdropFilter='url(#'+id+')'; d.classList.add('lg');
   }
   var rs; window.addEventListener('resize',function(){ clearTimeout(rs); rs=setTimeout(function(){
     [].slice.call(document.querySelectorAll('dialog.rp[open]')).forEach(lgApply); },150); });
 
+  // ── 開關動畫：從被點的按鈕／刻度圈長出來，關的時候縮回去（iOS 控制中心的展開感）──
+  // 浮窗先照最終位置打開，再用 transform 從來源元素的位置／大小彈到定位（FLIP）；內容稍晚淡入，免得縮小時字擠成一團
+  function flip(d,src){
+    var a=src.getBoundingClientRect(), b=d.getBoundingClientRect();
+    return 'translate('+((a.left+a.width/2)-(b.left+b.width/2))+'px,'+((a.top+a.height/2)-(b.top+b.height/2))+'px) scale('
+      +Math.max(a.width/b.width,.05)+','+Math.max(a.height/b.height,.05)+')';
+  }
+  function grow(d,src){
+    if(REDUCE||!src||!d.animate) return;
+    d.animate([{transform:flip(d,src),opacity:.4},{transform:'none',opacity:1}],{duration:520,easing:'cubic-bezier(.2,1.25,.35,1)'});
+    d.querySelector('.rp-in').animate([{opacity:0,transform:'translateY(6px)'},{opacity:1,transform:'none'}],{duration:280,delay:160,easing:'ease-out',fill:'backwards'});
+  }
+  function shut(d){
+    if(d.dataset.closing) return;
+    var src=d._src && d._src.isConnected ? d._src : null;
+    if(REDUCE||!src||!d.animate){ d.close(); return; }
+    d.dataset.closing='1';
+    d.querySelector('.rp-in').animate([{opacity:1},{opacity:0}],{duration:120,fill:'forwards'});
+    var an=d.animate([{transform:'none',opacity:1},{transform:flip(d,src),opacity:0}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'});
+    an.onfinish=function(){ d.close(); d.getAnimations().forEach(function(x){ x.cancel(); });
+      d.querySelector('.rp-in').getAnimations().forEach(function(x){ x.cancel(); }); delete d.dataset.closing; };
+  }
+
   var KEY='nexus-open', store={get:function(){try{return JSON.parse(sessionStorage.getItem(KEY)||'{}')}catch(e){return {}}},
     set:function(v){try{sessionStorage.setItem(KEY,JSON.stringify(v))}catch(e){}}};
   function remember(p){ var s=store.get(); s.p=p; store.set(s); }
   [].slice.call(document.querySelectorAll('dialog.rp')).forEach(function(d){
-    // 點到 dialog 本身（內容 .rp-in 以外的外圍＝::backdrop）就關；closedby="any" 不支援的瀏覽器靠這段
-    d.addEventListener('click',function(e){ if(e.target===d) d.close(); });
-    d.querySelector('.rp-x').addEventListener('click',function(){ d.close(); });
+    // 點到 dialog 本身（內容 .rp-in 以外的外圍＝::backdrop）、按 X、按 Esc 都走 shut（先縮回按鈕再關）
+    d.addEventListener('click',function(e){ if(e.target===d) shut(d); });
+    d.querySelector('.rp-x').addEventListener('click',function(){ shut(d); });
+    d.addEventListener('cancel',function(e){ e.preventDefault(); shut(d); });
     d.addEventListener('close',function(){ remember(''); });
   });
-  function open(p){ var d=document.getElementById('rp-'+p); if(d && !d.open){ d.showModal(); lgApply(d); remember(p); } }
-  [].slice.call(document.querySelectorAll('button.match')).forEach(function(b){
-    b.addEventListener('click',function(){ open(b.dataset.p); });
+  // src＝被點的元素（動畫起點）；重整後自動打開回原本那個就不播動畫。關閉時縮回同平台的吻合按鈕
+  function open(p,src){ var d=document.getElementById('rp-'+p); if(d && !d.open){
+    d._src=src||document.querySelector('button.match[data-p="'+p+'"]');
+    d.showModal(); lgApply(d); grow(d,src); remember(p); } }
+  [].slice.call(document.querySelectorAll('button.match,.dial-box[data-p]')).forEach(function(b){
+    b.addEventListener('click',function(){ open(b.dataset.p,b); });
   });
   var det=document.querySelector('.all-jobs');
   det.addEventListener('toggle',function(){ var s=store.get(); s.all=det.open; store.set(s); });
