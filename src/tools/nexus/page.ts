@@ -384,13 +384,17 @@ const STYLE = `
   dialog.rp[open]{display:flex}
   dialog.rp[open]::backdrop{animation:fade .2s ease-out}
   @keyframes fade{from{opacity:0}}
-  html:has(dialog.rp[open]){overflow:hidden}
-  /* 液態玻璃（.lg＝JS 確認是 Chromium 並產好濾鏡才加；仿 iOS 控制中心）：
-     整片玻璃效果都在 backdrop-filter 的 SVG 濾鏡裡——邊緣一圈透鏡折射（含色散）、中間磨砂＋白罩（表格要好讀）、
-     邊緣高光。CSS 這邊只剩外部陰影，原本 .glass 的內側亮線／漸層邊框會跟濾鏡的高光打架，拿掉 */
-  dialog.rp.lg{background:transparent;
+  /* 浮窗開著時原頁面照樣能捲（滾輪在浮窗外＝捲原頁、在浮窗內＝捲明細，.rp-in 的 overscroll-behavior 擋住連動）：
+     浮窗固定在畫面中央，背景從玻璃後面流過，才看得到折射跟著動 */
+  /* 液態玻璃（.lg＝JS 確認是 Chromium 並產好圖才加；仿 iOS 控制中心）：浮窗本身不掛濾鏡，玻璃由 JS 插的三層組成——
+     .lg-refr 邊緣透鏡折射（SVG 濾鏡）、.lg-frost 中間磨砂（遮罩挖空邊緣）、.lg-lite 白罩＋邊緣高光。
+     CSS 這邊只剩外部陰影，原本 .glass 的內側亮線／漸層邊框會跟高光打架，拿掉 */
+  dialog.rp.lg{background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;
     box-shadow:0 0 0 .5px rgba(20,22,26,.1),0 2px 6px rgba(20,22,26,.06),0 34px 70px -24px rgba(20,22,26,.42)}
   dialog.rp.lg::before{display:none}
+  .lg-layer{position:absolute;inset:0;pointer-events:none;border-radius:inherit}
+  .lg-frost{-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);-webkit-mask-size:100% 100%;mask-size:100% 100%}
+  .lg-lite{background:0 0/100% 100% no-repeat}
   .rp-in{position:relative;z-index:1}
   .rp-in{flex:1;min-width:0;overflow:auto;padding:26px 28px 24px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
@@ -493,8 +497,9 @@ const SCRIPT = `
   var LG = !!(navigator.userAgentData && (navigator.userAgentData.brands||[]).some(function(b){ return b.brand==='Chromium'; }))
     && !(window.matchMedia && matchMedia('(prefers-reduced-transparency: reduce)').matches);
   var REDUCE = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
-  // 玻璃參數：BEZEL＝邊緣曲面寬（px）、SHIFT＝物理折射量的比例尺（px）、IOR＝折射率、DISP＝色散（紅少彎、藍多彎的比例）
-  var BEZEL=34, SHIFT=30, IOR=1.5, DISP=.035, svgHost=null, svgNS='http://www.w3.org/2000/svg';
+  // 玻璃參數：BEZEL＝邊緣曲面寬（px）、SHIFT＝物理折射量的比例尺（px）、IOR＝折射率。
+  // 色散（RGB 各彎不同量）試過：捲動時一幀多 8ms，60Hz 螢幕會掉幀，拿掉
+  var BEZEL=34, SHIFT=30, IOR=1.5, svgHost=null, svgNS='http://www.w3.org/2000/svg';
   // 邊緣曲面的位移量（px，查表：離邊 d px 的地方往內取樣多遠）：
   //  ①曲面輪廓用 convex squircle h(x)=⁴√(1-(1-x)⁴)（Apple 的連續曲率圓角，平面接曲面沒有折角），
   //    垂直入射的光在曲面上依 Snell 定律（空氣 1 → 玻璃 IOR）偏折，走到玻璃底面的水平位移就是背景被「拉」的距離
@@ -523,7 +528,7 @@ const SCRIPT = `
   }
   // 依浮窗實際尺寸產生三張圖：
   //  map：位移圖，R／G＝x／y 位移（128＝不動），往內取樣
-  //  mask：磨砂範圍（曲面那圈透明、露出折射；往內變不透明）
+  //  mask：磨砂圖層的遮罩（曲面那圈透明、露出底下的折射；往內變不透明）
   //  lite：白罩＋邊緣高光（依 DPR 畫，高光細線才不糊）。白罩中間濃、曲面那圈很淡；
   //        高光＝最外緣 1px 亮線＋往內幾 px 的柔光，亮度看法線跟光源（左上）的夾角，左上、右下最亮（iOS 的邊緣反光）
   function lgMaps(w,h,r){
@@ -556,6 +561,12 @@ const SCRIPT = `
     g.putImageData(lm,0,0);
     return { map:map, mask:mask, lite:c.toDataURL() };
   }
+  // 玻璃拆成三個兄弟圖層（浮窗本身不掛 backdrop-filter）——浮窗開著時原頁面照樣能捲，濾鏡每一幀都要重算，要夠快：
+  //  .lg-refr：SVG 濾鏡只做邊緣折射（整片跑一張位移圖，便宜）＋CSS saturate
+  //  .lg-frost：CSS blur 磨砂（GPU 做，幾乎免費），用 mask 圖把曲面那圈挖空、露出底下的折射
+  //  .lg-lite：白罩＋高光，靜態圖片
+  //  全塞進同一個 SVG 濾鏡的版本（磨砂＋遮罩＋高光圖都在濾鏡裡）在 980×569 浮窗捲動時一幀 26ms；拆開後約 8.5ms（120Hz 滿幀）。
+  //  兄弟圖層才行：浮窗自己掛 backdrop-filter／opacity 會變成 backdrop root，裡面的圖層就看不到原頁面了（所以動畫不能動浮窗的 opacity）
   function lgApply(d){
     if(!LG) return;
     var w=d.offsetWidth, h=d.offsetHeight;                // offset* 不受開窗動畫的 transform 影響
@@ -566,26 +577,22 @@ const SCRIPT = `
       svgHost.setAttribute('width','0'); svgHost.setAttribute('height','0'); svgHost.setAttribute('aria-hidden','true');
       svgHost.style.position='absolute'; document.body.appendChild(svgHost); }
     var old=document.getElementById(id); if(old) old.remove();
-    var img=function(href,res){ return '<feImage href="'+href+'" x="0" y="0" width="'+w+'" height="'+h+'" preserveAspectRatio="none" result="'+res+'"/>'; };
-    // 色散：紅／綠／藍各用一張位移、位移量差一點，再把三個通道加回來；邊緣會帶一點點彩邊
-    var ch=function(scale,row,res){ return '<feDisplacementMap in="soft" in2="map" scale="'+scale.toFixed(2)+'" xChannelSelector="R" yChannelSelector="G"/>'
-      + '<feColorMatrix type="matrix" values="'+row+' 0 0 0 1 0" result="'+res+'"/>'; };
     svgHost.insertAdjacentHTML('beforeend','<filter id="'+id+'" color-interpolation-filters="sRGB">'
-      + '<feGaussianBlur in="SourceGraphic" stdDeviation="1" result="soft"/>' + img(m.map,'map')
-      + ch(MAXD*2*(1-DISP),'1 0 0 0 0 0 0 0 0 0 0 0 0 0 0','cr')
-      + ch(MAXD*2,'0 0 0 0 0 0 1 0 0 0 0 0 0 0 0','cg')
-      + ch(MAXD*2*(1+DISP),'0 0 0 0 0 0 0 0 0 0 0 0 1 0 0','cb')
-      + '<feComposite in="cr" in2="cg" operator="arithmetic" k2="1" k3="1" result="crg"/>'
-      + '<feComposite in="crg" in2="cb" operator="arithmetic" k2="1" k3="1" result="refr"/>'
-      + '<feGaussianBlur in="SourceGraphic" stdDeviation="20" edgeMode="duplicate" result="frost"/>' + img(m.mask,'mask')
-      + '<feComposite in="frost" in2="mask" operator="in" result="core"/>'
-      + '<feComposite in="core" in2="refr" operator="over" result="mix"/>'
-      + '<feColorMatrix in="mix" type="saturate" values="1.7" result="sat"/>' + img(m.lite,'lite')
-      + '<feComposite in="lite" in2="sat" operator="over"/></filter>');
-    d.style.backdropFilter='url(#'+id+')'; d.classList.add('lg');
+      + '<feGaussianBlur in="SourceGraphic" stdDeviation="1" result="soft"/>'
+      + '<feImage href="'+m.map+'" x="0" y="0" width="'+w+'" height="'+h+'" preserveAspectRatio="none" result="map"/>'
+      + '<feDisplacementMap in="soft" in2="map" scale="'+(MAXD*2).toFixed(2)+'" xChannelSelector="R" yChannelSelector="G"/></filter>');
+    var layer=function(cls){ var e=d.querySelector('.'+cls);
+      if(!e){ e=document.createElement('div'); e.className='lg-layer '+cls; e.setAttribute('aria-hidden','true'); d.insertBefore(e,d.querySelector('.rp-in')); }
+      return e; };
+    var refr=layer('lg-refr'), frost=layer('lg-frost'), lite=layer('lg-lite');
+    refr.style.backdropFilter='none'; refr.offsetWidth;   // 同 id 換新濾鏡時 Chrome 不會自己重抓，先清掉再掛
+    refr.style.backdropFilter='url(#'+id+') saturate(1.7)';
+    frost.style.webkitMaskImage=frost.style.maskImage='url('+m.mask+')';
+    lite.style.backgroundImage='url('+m.lite+')';
+    d.classList.add('lg');
   }
-  var rs; window.addEventListener('resize',function(){ clearTimeout(rs); rs=setTimeout(function(){
-    [].slice.call(document.querySelectorAll('dialog.rp[open]')).forEach(lgApply); },150); });
+  // 浮窗尺寸一變（視窗縮放、內容長高）就重產圖；lgApply 自己會跳過尺寸沒變的
+  var ro=window.ResizeObserver && new ResizeObserver(function(es){ es.forEach(function(e){ if(e.target.open) lgApply(e.target); }); });
 
   // ── 開關動畫：從被點的按鈕／刻度圈長出來，關的時候縮回去（iOS 控制中心的展開感）──
   // 浮窗先照最終位置打開，再用 transform 從來源元素的位置／大小彈到定位（FLIP）；內容稍晚淡入，免得縮小時字擠成一團
@@ -594,20 +601,31 @@ const SCRIPT = `
     return 'translate('+((a.left+a.width/2)-(b.left+b.width/2))+'px,'+((a.top+a.height/2)-(b.top+b.height/2))+'px) scale('
       +Math.max(a.width/b.width,.05)+','+Math.max(a.height/b.height,.05)+')';
   }
+  // 淡入淡出一律動子元素（玻璃圖層＋內容）的 opacity，不動浮窗本身——浮窗 opacity<1 會變 backdrop root，玻璃瞬間變空白
+  function fade(d,from,to,opt){ [].slice.call(d.children).forEach(function(c){ c.animate([{opacity:from},{opacity:to}],opt); }); }
+  function done(d){ d.close(); [d].concat([].slice.call(d.children)).forEach(function(e){ e.getAnimations().forEach(function(x){ x.cancel(); }); });
+    delete d.dataset.closing; }
   function grow(d,src){
     if(REDUCE||!src||!d.animate) return;
-    d.animate([{transform:flip(d,src),opacity:.4},{transform:'none',opacity:1}],{duration:520,easing:'cubic-bezier(.2,1.25,.35,1)'});
+    d.animate([{transform:flip(d,src)},{transform:'none'}],{duration:520,easing:'cubic-bezier(.2,1.25,.35,1)'});
+    [].slice.call(d.querySelectorAll('.lg-layer')).forEach(function(c){ c.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}); });
     d.querySelector('.rp-in').animate([{opacity:0,transform:'translateY(6px)'},{opacity:1,transform:'none'}],{duration:280,delay:160,easing:'ease-out',fill:'backwards'});
   }
   function shut(d){
     if(d.dataset.closing) return;
     var src=d._src && d._src.isConnected ? d._src : null;
-    if(REDUCE||!src||!d.animate){ d.close(); return; }
+    if(src){ var sr=src.getBoundingClientRect();              // 原頁面捲走了、按鈕不在畫面上：就地縮小淡出，不要飛出畫面
+      if(sr.bottom<0||sr.top>innerHeight) src=null; }
+    if(REDUCE||!d.animate){ d.close(); return; }
     d.dataset.closing='1';
+    if(!src){
+      fade(d,1,0,{duration:200,easing:'ease-in',fill:'forwards'});
+      d.animate([{transform:'none'},{transform:'scale(.92)'}],{duration:200,easing:'ease-in',fill:'forwards'}).onfinish=function(){ done(d); };
+      return;
+    }
     d.querySelector('.rp-in').animate([{opacity:1},{opacity:0}],{duration:120,fill:'forwards'});
-    var an=d.animate([{transform:'none',opacity:1},{transform:flip(d,src),opacity:0}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'});
-    an.onfinish=function(){ d.close(); d.getAnimations().forEach(function(x){ x.cancel(); });
-      d.querySelector('.rp-in').getAnimations().forEach(function(x){ x.cancel(); }); delete d.dataset.closing; };
+    [].slice.call(d.querySelectorAll('.lg-layer')).forEach(function(c){ c.animate([{opacity:1},{opacity:0}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'}); });
+    d.animate([{transform:'none'},{transform:flip(d,src)}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'}).onfinish=function(){ done(d); };
   }
 
   var KEY='nexus-open', store={get:function(){try{return JSON.parse(sessionStorage.getItem(KEY)||'{}')}catch(e){return {}}},
@@ -623,7 +641,7 @@ const SCRIPT = `
   // src＝被點的元素（動畫起點）；重整後自動打開回原本那個就不播動畫。關閉時縮回同平台的吻合按鈕
   function open(p,src){ var d=document.getElementById('rp-'+p); if(d && !d.open){
     d._src=src||document.querySelector('button.match[data-p="'+p+'"]');
-    d.showModal(); lgApply(d); grow(d,src); remember(p); } }
+    d.showModal(); lgApply(d); if(ro&&LG) ro.observe(d); grow(d,src); remember(p); } }
   [].slice.call(document.querySelectorAll('button.match,.dial-box[data-p]')).forEach(function(b){
     b.addEventListener('click',function(){ open(b.dataset.p,b); });
   });
