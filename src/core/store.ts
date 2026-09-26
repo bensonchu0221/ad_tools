@@ -2199,6 +2199,8 @@ export interface NexusJobRow extends NexusJobInput {
   status: 'queued' | 'running' | 'success' | 'failed';
   phase: string | null; attemptCount: number; message: string | null;
   queuedAt: string | null; startedAt: string | null; finishedAt: string | null;
+  /** 失敗的 job 已被之後成功的 job（同平台同帳戶，可多筆拼起來）涵蓋整段區間 ⇒ 資料已補回，狀態頁／健檢不再當成待處理。 */
+  superseded?: boolean;
 }
 
 const NEXUS_LOCK = 'ad_tools:nexus:worker';
@@ -2284,6 +2286,39 @@ export async function enqueueNexusJobs(
     created += Number((res as any).affectedRows ?? 0);
   }
   return { total: jobs.length, created };
+}
+
+/**
+ * 標出「已補回」的失敗 job：同平台同帳戶、完成時間晚於它的成功 job 把 sd~ed 每一天都涵蓋到。
+ * 例：每日 09-23~24 失敗，之後回補 09-10~23＋09-24~24 成功 ⇒ 已補回。
+ * 失敗 job 不會寫 BQ，所以只要之後有成功寫過同一天，那天的資料就是新的、不受那次失敗影響。
+ */
+export function markSupersededNexusJobs(jobs: NexusJobRow[], successes: NexusJobRow[]): NexusJobRow[] {
+  const nextDay = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+  return jobs.map((f) => {
+    if (f.status !== 'failed' || !f.finishedAt) return f;
+    const later = successes.filter((s) => s.status === 'success' && s.platform === f.platform && s.accountId === f.accountId
+      && !!s.finishedAt && s.finishedAt > f.finishedAt!);
+    if (!later.length) return f;
+    for (let d = f.sd; d <= f.ed; d = nextDay(d)) {
+      if (!later.some((s) => s.sd <= d && d <= s.ed)) return f;
+    }
+    return { ...f, superseded: true };
+  });
+}
+
+/** 對一批 job 裡的失敗 job 查之後的成功 job，套上 superseded。沒有失敗就不查 DB。 */
+async function withNexusSuperseded(p: mysql.Pool, jobs: NexusJobRow[]): Promise<NexusJobRow[]> {
+  const failed = jobs.filter((j) => j.status === 'failed' && j.finishedAt);
+  if (!failed.length) return jobs;
+  const pairs = [...new Map(failed.map((f) => [`${f.platform}|${f.accountId}`, [f.platform, f.accountId]])).values()];
+  const [rows] = await p.query(
+    `SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs
+      WHERE status = 'success' AND (platform, account_id) IN (${pairs.map(() => '(?, ?)').join(', ')})
+        AND ed >= ? AND sd <= ?`,
+    [...pairs.flat(), failed.map((f) => f.sd).sort()[0], failed.map((f) => f.ed).sort().pop()]
+  );
+  return markSupersededNexusJobs(jobs, (rows as any[]).map(mapNexusJob));
 }
 
 function mapNexusJob(r: any): NexusJobRow {
@@ -2383,7 +2418,7 @@ export async function listNexusJobs(limit = 200): Promise<NexusJobRow[]> {
     `SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs
       ORDER BY FIELD(status,'running','failed','queued','success'), id DESC LIMIT ?`, [limit]
   );
-  return (rows as any[]).map(mapNexusJob);
+  return withNexusSuperseded(p, (rows as any[]).map(mapNexusJob));
 }
 
 export async function nexusJobCounts(): Promise<{ kind: string; status: string; n: number }[]> {
@@ -2524,7 +2559,7 @@ export async function nexusRecentFailures(hours: number, limit = 20): Promise<Ne
       WHERE status = 'failed' AND finished_at >= NOW() - INTERVAL ? HOUR
       ORDER BY id DESC LIMIT ?`, [hours, limit]
   );
-  return (rows as any[]).map(mapNexusJob);
+  return withNexusSuperseded(p, (rows as any[]).map(mapNexusJob));
 }
 
 /** 回補批次整體狀態（健檢順帶報進度）。 */
@@ -2558,7 +2593,7 @@ export async function nexusCoverageRows(sd: string, ed: string): Promise<{
 export async function nexusBatchJobs(batch: string): Promise<NexusJobRow[]> {
   const p = await nexusPool();
   const [rows] = await p.query(`SELECT ${NEXUS_JOB_COLS} FROM nexus_jobs WHERE batch = ? ORDER BY id`, [batch]);
-  return (rows as any[]).map(mapNexusJob);
+  return withNexusSuperseded(p, (rows as any[]).map(mapNexusJob));
 }
 
 // ---------- tool#9 nexus 正確性比對結果 ----------

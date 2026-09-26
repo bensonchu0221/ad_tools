@@ -155,7 +155,8 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
   const cards: string[] = [];
   const panels: string[] = [];
   for (const p of PLATFORMS) {
-    const pj = batchJobs.filter((j) => j.platform === p);
+    // 失敗但之後已被別的 job 補回的，刻度圈當完成畫（資料已經在了，不是待處理的紅燈）
+    const pj = batchJobs.filter((j) => j.platform === p).map((j) => (j.superseded ? { ...j, status: 'success' as const } : j));
     let imp = 0, spend = 0;
     const acctWithData = new Set<string>();
     for (const c of input.coverage) if (c.platform === p && c.dt === t1) {
@@ -194,11 +195,12 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
   const jobRow = (j: NexusJobRow) => `<tr>
     <td class="muted">${j.id}</td><td>${j.kind === 'daily' ? '每日' : '回補'}</td><td><span class="src src-${j.platform.toLowerCase()}">${j.platform}</span></td>
     <td>${esc(j.accountName)}</td><td class="muted">${j.sd.slice(5)}~${j.ed.slice(5)}</td>
-    <td><span class="st ${({ success: 'st-done', failed: 'st-fail', running: 'st-run', queued: 'st-queued' } as const)[j.status]}">${ST_LABEL[j.status]}${j.attemptCount > 1 ? ` ×${j.attemptCount}` : ''}</span></td>
+    <td><span class="st ${j.superseded ? 'st-done' : ({ success: 'st-done', failed: 'st-fail', running: 'st-run', queued: 'st-queued' } as const)[j.status]}"${j.superseded ? ' title="這次失敗了，但之後已有成功的 job 重抓同一段區間"' : ''}>${j.superseded ? '失敗・已補回' : ST_LABEL[j.status]}${j.attemptCount > 1 ? ` ×${j.attemptCount}` : ''}</span></td>
     <td class="msg-cell">${esc(j.status === 'running' ? j.phase : j.message)}</td>
     <td class="muted">${esc((j.finishedAt ?? j.startedAt ?? j.queuedAt ?? '').slice(5, 16))}</td></tr>`;
   const thead = `<thead><tr><th>#</th><th>類型</th><th>平台</th><th>帳戶</th><th>區間</th><th>狀態</th><th>訊息</th><th>時間</th></tr></thead>`;
-  const hot = jobs.filter((j) => j.status === 'failed' || j.status === 'running');
+  // 已補回的失敗 job 不算要處理的，只留在下面「最近 100 筆」
+  const hot = jobs.filter((j) => (j.status === 'failed' && !j.superseded) || j.status === 'running');
 
   const bf = input.backfill;
   const bfLeft = bf.queued + bf.running;

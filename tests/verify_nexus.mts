@@ -14,7 +14,7 @@ import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus
 import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
 import { reconSql, toReconRows, summarizeRecon, reconLevel, fmtMatch, reconDue } from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
-import type { NexusReconRow, NexusJobRow } from '../src/core/store.js';
+import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
 
 const T = '2026-09-23T00:00:00.000Z';
@@ -606,6 +606,34 @@ await ok('BQ 交易被取消：認得衝突訊息，其他錯誤不算', () => {
   assert.ok(isBqConflict('Could not serialize access to table popinpoc1:reporting.nexus_device_daily due to concurrent update'));
   assert.ok(!isBqConflict('BigQuery: Syntax error: Unexpected keyword'));
   assert.ok(!isBqConflict('BigQuery: 等待 job 完成逾時'));
+});
+
+await ok('失敗 job 已補回：之後成功的 job 拼起來涵蓋整段才算；狀態頁不列、刻度不紅、健檢不報', () => {
+  // 09-25 每日 09-23~24 失敗（剪枝漏抓事件），之後回補 09-10~23＋09-24~24 成功
+  const f = bjob(5466, 'D', 'failed', { accountId: '29262', accountName: '佳聖', sd: '2026-09-23', ed: '2026-09-24', attemptCount: 3, finishedAt: '2026-09-25 04:23:03', message: '拒絕清空' });
+  const s1 = bjob(6226, 'D', 'success', { accountId: '29262', sd: '2026-09-10', ed: '2026-09-23', finishedAt: '2026-09-25 09:59:13' });
+  const s2 = bjob(6227, 'D', 'success', { accountId: '29262', sd: '2026-09-24', ed: '2026-09-24', finishedAt: '2026-09-25 09:59:34' });
+  const other = bjob(1, 'D', 'success', { accountId: '99999', sd: '2026-09-23', ed: '2026-09-24', finishedAt: '2026-09-25 10:00:00' });
+  const early = bjob(2, 'D', 'success', { accountId: '29262', sd: '2026-09-24', ed: '2026-09-24', finishedAt: '2026-09-25 04:00:00' });
+  assert.equal(markSupersededNexusJobs([f], [s1, s2])[0].superseded, true);
+  assert.ok(!markSupersededNexusJobs([f], [s1])[0].superseded, '09-24 沒被涵蓋');
+  assert.ok(!markSupersededNexusJobs([f], [s1, other])[0].superseded, '別的帳戶不算');
+  assert.ok(!markSupersededNexusJobs([f], [s1, early])[0].superseded, '失敗之前完成的不算');
+  assert.ok(!markSupersededNexusJobs([{ ...f, platform: 'M' }], [s1, s2])[0].superseded, '別的平台不算');
+
+  const done = markSupersededNexusJobs([f], [s1, s2])[0];
+  const open = bjob(8408, 'M', 'failed', { accountName: 'Serene', finishedAt: '2026-09-26 04:27:00', message: 'WAS_SOME_ERROR' });
+  const input = healthBase();
+  input.failures = [done, open];
+  const h = evaluateHealth(input);
+  const txt = h.items.map((i) => i.text).join('|');
+  assert.match(txt, /1 個帳戶、共 1 個 job 重試 3 次仍失敗[\s\S]*Serene/);
+  assert.ok(!txt.includes('佳聖'), '已補回的不報');
+  const html = statusPage({ input, health: h, batchJobs: [done, bjob(3, 'D', 'success')], jobs: [done, open] });
+  const hot = html.slice(html.indexOf('失敗與執行中的 job'), html.indexOf('最近 100 筆'));
+  assert.ok(hot.includes('Serene') && !hot.includes('佳聖'), '已補回的不列在待處理');
+  assert.match(html, /失敗・已補回 ×3/);
+  assert.ok(!/class="t-failed"/.test(html), '刻度圈當完成畫');
 });
 
 await ok('BQ 衝突重試：衝突就等一下重送、成功就停；非衝突錯誤不重試；次數用完照丟', async () => {

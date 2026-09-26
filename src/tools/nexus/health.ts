@@ -72,8 +72,10 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
 
   // ② 放棄重試的 job。「D 平台拿不到、倉庫也從無數字」的帳戶單獨歸一行黃燈（多半是停用的舊帳戶），
   //    其餘照紅燈——有數字的帳戶斷了才是真的會漏資料
-  const unreachable = inp.failures.filter((f) => String(f.message ?? '').startsWith(UNREACHABLE_TAG));
-  const failures = inp.failures.filter((f) => !String(f.message ?? '').startsWith(UNREACHABLE_TAG));
+  //    之後已被別的 job 補回整段區間的（superseded）不算
+  const open = inp.failures.filter((f) => !f.superseded);
+  const unreachable = open.filter((f) => String(f.message ?? '').startsWith(UNREACHABLE_TAG));
+  const failures = open.filter((f) => !String(f.message ?? '').startsWith(UNREACHABLE_TAG));
   if (unreachable.length) {
     const names = [...new Map(unreachable.map((f) => [`${f.platform}|${f.accountId}`, `${f.platform} ${f.accountName}（${f.accountId}）`])).values()];
     items.push({
