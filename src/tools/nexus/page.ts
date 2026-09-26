@@ -92,7 +92,6 @@ function platformTitle(p: NexusPlatform): string {
 function reconPanel(p: NexusPlatform, r: PlatformRecon, dt: string): string {
   const m = r.byMetric;
   const head = `<div class="rp-head">
-      <button type="button" class="rp-x" aria-label="關閉"></button>
       <h3 id="rp-${p}-h">${PNAME[p]}：${dt} 素材層與裝置層加總</h3>
       <p class="rp-note">兩邊都是同一次抓取、平台不同的報表查法（素材層＝倉庫事實表；裝置層＝campaign／帳戶層的裝置報表），
         正常應該一致。吻合率低於 ${fmtMatch(RECON.ok)} 會出現在上面的健檢。下表列出任一指標差超過 ${pct(RECON.accountDiff)} 的帳戶。</p>
@@ -174,7 +173,8 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       matchBtn = `<button type="button" class="match match-${lv}" aria-haspopup="dialog" aria-controls="rp-${p}" data-p="${p}">
           <span>吻合</span><b>${fmtMatch(r.match)}</b><em>${r.diffs.length ? `${r.diffs.length} 帳戶有落差` : '看明細'}</em><i class="chev" aria-hidden="true"></i></button>`;
       // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面。開關動畫要從按鈕長出／縮回，所以關閉全交給 JS（不用 closedby）
-      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
+      // 叉叉掛在浮窗上、不放進 .rp-in：內容捲動時它固定在右上角
+      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><button type="button" class="rp-x" aria-label="關閉"></button><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
     }
 
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
@@ -399,8 +399,10 @@ const STYLE = `
   .rp-in{flex:1;min-width:0;overflow:auto;padding:26px 28px 24px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
   .rp h3{font-size:16px;font-weight:600;margin:0}
-  .rp-x{position:absolute;top:-6px;right:-8px;width:34px;height:34px;border-radius:50%;cursor:pointer;
-    background:rgba(255,255,255,.55);border:1px solid rgba(255,255,255,.85);box-shadow:inset 0 1px 0 #fff,0 0 0 .5px var(--hair)}
+  /* 叉叉固定在浮窗右上角（對齊標題列），捲上來的內容從底下經過時被它自己的小磨砂糊掉 */
+  .rp-x{position:absolute;z-index:2;top:20px;right:20px;width:34px;height:34px;border-radius:50%;cursor:pointer;
+    background:rgba(255,255,255,.6);border:1px solid rgba(255,255,255,.85);box-shadow:inset 0 1px 0 #fff,0 0 0 .5px var(--hair),0 4px 10px -4px rgba(20,22,26,.18);
+    -webkit-backdrop-filter:blur(10px) saturate(160%);backdrop-filter:blur(10px) saturate(160%)}
   .rp-x::before,.rp-x::after{content:"";position:absolute;left:50%;top:50%;width:13px;height:1.6px;border-radius:1px;background:var(--ink)}
   .rp-x::before{transform:translate(-50%,-50%) rotate(45deg)} .rp-x::after{transform:translate(-50%,-50%) rotate(-45deg)}
   .rp-x:hover{background:rgba(255,255,255,.9)}
@@ -411,6 +413,13 @@ const STYLE = `
   .rp-metrics dd{margin:0;font-family:var(--disp);font-weight:600;font-size:18px;font-variant-numeric:tabular-nums}
   .rp-empty{font-size:13px;color:var(--mut);margin:14px 0 0}
   .rp-scroll,.tscroll{overflow-x:auto}
+  /* 浮窗裡不要原生捲軸（灰色粗條壓在玻璃上很突兀）：藏掉，改用 .rp-bar 仿 iOS 的細指示條——
+     捲動時才浮出、停手淡掉。表格橫捲也藏，觸控板／手機照樣能滑 */
+  dialog.rp .rp-in,dialog.rp .rp-scroll{scrollbar-width:none}
+  dialog.rp .rp-in::-webkit-scrollbar,dialog.rp .rp-scroll::-webkit-scrollbar{display:none}
+  .rp-bar{position:absolute;z-index:2;top:0;right:5px;width:5px;border-radius:3px;pointer-events:none;
+    background:rgba(20,22,26,.34);box-shadow:0 0 0 .5px rgba(255,255,255,.5);opacity:0;transition:opacity .45s ease}
+  .rp-bar.on{opacity:1;transition-duration:.12s}
   .tscroll{border-radius:inherit}
   .rp-table{margin-top:12px}
   .rp-table th{white-space:nowrap} /* 手機寬度不夠就讓表格橫向捲，不要表頭一字一行 */
@@ -479,6 +488,7 @@ const STYLE = `
     .match{grid-column:1/-1}
     dialog.rp{border-radius:22px;max-height:86vh}
     .rp-in{padding:20px 16px}
+    .rp-x{top:12px;right:12px}
   }
   @media(prefers-reduced-motion:reduce){
     .ring-running,.bf-bar i,.bf-bar i::after,html:not(.intro-seen) .pf-t .nw{animation:none}
@@ -609,7 +619,7 @@ const SCRIPT = `
     if(REDUCE||!src||!d.animate) return;
     d.animate([{transform:flip(d,src)},{transform:'none'}],{duration:520,easing:'cubic-bezier(.2,1.25,.35,1)'});
     [].slice.call(d.querySelectorAll('.lg-layer')).forEach(function(c){ c.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}); });
-    d.querySelector('.rp-in').animate([{opacity:0,transform:'translateY(6px)'},{opacity:1,transform:'none'}],{duration:280,delay:160,easing:'ease-out',fill:'backwards'});
+    [].slice.call(d.querySelectorAll('.rp-in,.rp-x')).forEach(function(c){ c.animate([{opacity:0,transform:'translateY(6px)'},{opacity:1,transform:'none'}],{duration:280,delay:160,easing:'ease-out',fill:'backwards'}); });
   }
   function shut(d){
     if(d.dataset.closing) return;
@@ -623,7 +633,7 @@ const SCRIPT = `
       d.animate([{transform:'none'},{transform:'scale(.92)'}],{duration:200,easing:'ease-in',fill:'forwards'}).onfinish=function(){ done(d); };
       return;
     }
-    d.querySelector('.rp-in').animate([{opacity:1},{opacity:0}],{duration:120,fill:'forwards'});
+    [].slice.call(d.querySelectorAll('.rp-in,.rp-x,.rp-bar')).forEach(function(c){ c.animate([{opacity:1},{opacity:0}],{duration:120,fill:'forwards'}); });
     [].slice.call(d.querySelectorAll('.lg-layer')).forEach(function(c){ c.animate([{opacity:1},{opacity:0}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'}); });
     d.animate([{transform:'none'},{transform:flip(d,src)}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'}).onfinish=function(){ done(d); };
   }
@@ -631,7 +641,21 @@ const SCRIPT = `
   var KEY='nexus-open', store={get:function(){try{return JSON.parse(sessionStorage.getItem(KEY)||'{}')}catch(e){return {}}},
     set:function(v){try{sessionStorage.setItem(KEY,JSON.stringify(v))}catch(e){}}};
   function remember(p){ var s=store.get(); s.p=p; store.set(s); }
+  // iOS 式捲動指示條：長度＝可視比例、位置跟 scrollTop；捲動時亮、停手 900ms 淡掉。內容不夠捲就不出現
+  function scrollBar(d){
+    var inn=d.querySelector('.rp-in'), b=document.createElement('div'), t, PAD=20;   // PAD 避開上下圓角
+    b.className='rp-bar'; b.setAttribute('aria-hidden','true'); d.appendChild(b);
+    d._bar=function(show){
+      var ch=inn.clientHeight, sh=inn.scrollHeight;
+      if(sh<=ch+1){ b.classList.remove('on'); return; }
+      var track=ch-PAD*2, h=Math.max(track*ch/sh,32), y=PAD+(track-h)*inn.scrollTop/(sh-ch);
+      b.style.height=h+'px'; b.style.transform='translateY('+y+'px)';
+      if(show){ b.classList.add('on'); clearTimeout(t); t=setTimeout(function(){ b.classList.remove('on'); },900); }
+    };
+    inn.addEventListener('scroll',function(){ d._bar(true); },{passive:true});
+  }
   [].slice.call(document.querySelectorAll('dialog.rp')).forEach(function(d){
+    scrollBar(d);
     // 點到 dialog 本身（內容 .rp-in 以外的外圍＝::backdrop）、按 X、按 Esc 都走 shut（先縮回按鈕再關）
     d.addEventListener('click',function(e){ if(e.target===d) shut(d); });
     d.querySelector('.rp-x').addEventListener('click',function(){ shut(d); });
@@ -641,7 +665,7 @@ const SCRIPT = `
   // src＝被點的元素（動畫起點）；重整後自動打開回原本那個就不播動畫。關閉時縮回同平台的吻合按鈕
   function open(p,src){ var d=document.getElementById('rp-'+p); if(d && !d.open){
     d._src=src||document.querySelector('button.match[data-p="'+p+'"]');
-    d.showModal(); lgApply(d); if(ro&&LG) ro.observe(d); grow(d,src); remember(p); } }
+    d.showModal(); lgApply(d); if(ro&&LG) ro.observe(d); grow(d,src); d._bar(true); remember(p); } }   // 打開時閃一下指示條＝提示可以捲
   [].slice.call(document.querySelectorAll('button.match,.dial-box[data-p]')).forEach(function(b){
     b.addEventListener('click',function(){ open(b.dataset.p,b); });
   });
