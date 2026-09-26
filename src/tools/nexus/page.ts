@@ -383,6 +383,10 @@ const STYLE = `
   dialog.rp::backdrop{background:rgba(20,22,26,.16)}
   dialog.rp[open]{display:flex}
   dialog.rp[open]::backdrop{animation:fade .2s ease-out}
+  /* 關窗：遮罩跟著縮回動畫一起淡出（shut 設 data-closing，動畫跑完才真的 close；不這樣做遮罩會在最後一下子消失）。
+     縮回按鈕 .3s、按鈕已捲出畫面就地淡出 .2s，時間各自對齊 */
+  dialog.rp[data-closing]::backdrop{opacity:0;transition:opacity .3s cubic-bezier(.4,0,.7,.2)}
+  dialog.rp[data-closing="fade"]::backdrop{transition:opacity .2s ease-in}
   @keyframes fade{from{opacity:0}}
   /* 浮窗開著時原頁面照樣能捲（滾輪在浮窗外＝捲原頁、在浮窗內＝捲明細，.rp-in 的 overscroll-behavior 擋住連動）：
      浮窗固定在畫面中央，背景從玻璃後面流過，才看得到折射跟著動 */
@@ -629,6 +633,7 @@ const SCRIPT = `
     if(REDUCE||!d.animate){ d.close(); return; }
     d.dataset.closing='1';
     if(!src){
+      d.dataset.closing='fade';
       fade(d,1,0,{duration:200,easing:'ease-in',fill:'forwards'});
       d.animate([{transform:'none'},{transform:'scale(.92)'}],{duration:200,easing:'ease-in',fill:'forwards'}).onfinish=function(){ done(d); };
       return;
