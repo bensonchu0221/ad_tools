@@ -391,20 +391,24 @@ const STYLE = `
   /* 浮窗開著時原頁面照樣能捲（滾輪在浮窗外＝捲原頁、在浮窗內＝捲明細，.rp-in 的 overscroll-behavior 擋住連動）：
      浮窗固定在畫面中央，背景從玻璃後面流過，才看得到折射跟著動 */
   /* 液態玻璃（.lg＝JS 確認是 Chromium 並產好圖才加；仿 iOS 控制中心）：浮窗本身不掛濾鏡，玻璃由 JS 插的三層組成——
-     .lg-refr 邊緣透鏡折射（SVG 濾鏡）、.lg-frost 中間磨砂（遮罩挖空邊緣）、.lg-lite 白罩＋邊緣高光。
+     .lg-refr 邊緣透鏡折射（SVG 濾鏡）、.lg-frost 三層漸進磨砂（遮罩錯開）、.lg-lite 邊緣高光。
      CSS 這邊只剩外部陰影，原本 .glass 的內側亮線／漸層邊框會跟高光打架，拿掉 */
   dialog.rp.lg{background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;
     box-shadow:0 0 0 .5px rgba(20,22,26,.1),0 2px 6px rgba(20,22,26,.06),0 34px 70px -24px rgba(20,22,26,.42)}
   dialog.rp.lg::before{display:none}
+  /* 玻璃不蓋白罩，背景比較暗也比較花：浮窗內灰字從 #6B7280 加深到 #363A42（iOS 也是前景色跟著背景調；
+     #6B7280 在玻璃上實測最差對比掉到 2.x） */
+  dialog.rp{--mut:#363A42}
   .lg-layer{position:absolute;inset:0;pointer-events:none;border-radius:inherit}
-  .lg-frost{-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);-webkit-mask-size:100% 100%;mask-size:100% 100%}
+  .lg-frost{-webkit-mask-size:100% 100%;mask-size:100% 100%}   /* 模糊量由 JS 依 FROSTS 設 */
   .lg-lite{background:0 0/100% 100% no-repeat}
   .rp-in{position:relative;z-index:1}
-  .rp-in{flex:1;min-width:0;overflow:auto;padding:26px 28px 24px;overscroll-behavior:contain;outline:none}
+  /* 留白 40px：字要落在漸進模糊已經夠糊的區域（最外 10px 是清楚的折射，往內 80px 才疊滿） */
+  .rp-in{flex:1;min-width:0;overflow:auto;padding:40px 42px 38px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
   .rp h3{font-size:16px;font-weight:600;margin:0}
   /* 叉叉固定在浮窗右上角（對齊標題列），捲上來的內容從底下經過時被它自己的小磨砂糊掉 */
-  .rp-x{position:absolute;z-index:2;top:20px;right:20px;width:34px;height:34px;border-radius:50%;cursor:pointer;
+  .rp-x{position:absolute;z-index:2;top:30px;right:30px;width:34px;height:34px;border-radius:50%;cursor:pointer;
     background:rgba(255,255,255,.6);border:1px solid rgba(255,255,255,.85);box-shadow:inset 0 1px 0 #fff,0 0 0 .5px var(--hair),0 4px 10px -4px rgba(20,22,26,.18);
     -webkit-backdrop-filter:blur(10px) saturate(160%);backdrop-filter:blur(10px) saturate(160%)}
   .rp-x::before,.rp-x::after{content:"";position:absolute;left:50%;top:50%;width:13px;height:1.6px;border-radius:1px;background:var(--ink)}
@@ -491,8 +495,8 @@ const STYLE = `
     .pf-num dd{font-size:15px}
     .match{grid-column:1/-1}
     dialog.rp{border-radius:22px;max-height:86vh}
-    .rp-in{padding:20px 16px}
-    .rp-x{top:12px;right:12px}
+    .rp-in{padding:34px 26px 30px}   /* 手機也要避開最外 10px 的清楚折射帶 */
+    .rp-x{top:24px;right:24px}
   }
   @media(prefers-reduced-motion:reduce){
     .ring-running,.bf-bar i,.bf-bar i::after,html:not(.intro-seen) .pf-t .nw{animation:none}
@@ -532,6 +536,14 @@ const SCRIPT = `
     return function(d){ return d>=BEZEL?0:out[Math.round(Math.max(d,0)/BEZEL*N)]; };
   })(), MAXD=0;
   for(var q=0;q<=BEZEL;q+=.25) MAXD=Math.max(MAXD,LUT(q));
+  // 漸進式模糊（2026-09-27 使用者從 v1~v4 四版 demo 選定 v4）：
+  //  「清楚＋一張大模糊」用遮罩交叉淡化，過渡帶中段會是清楚疊模糊的殘影＝看得出一條界線；
+  //  改疊三層薄模糊（兄弟圖層逐層再糊，疊滿≈√(4²+7²+9²)≈12px），遮罩起點與寬度錯開，每一步只多糊一點。
+  //  最外 10px（折射最強那段）一層都不蓋，邊緣保持清楚；提亮／降對比放最內層。不蓋白罩（使用者看過嫌突兀）
+  var FROSTS=[
+    { css:'blur(4px)', fa:10, fb:40 },
+    { css:'blur(7px)', fa:20, fb:60 },
+    { css:'blur(9px) brightness(1.08) contrast(.85)', fa:30, fb:80 } ];
   function smooth(a,b,v){ var t=Math.min(Math.max((v-a)/(b-a),0),1); return t*t*(3-2*t); }
   // 圓角矩形的內距離（離邊多遠）＋往外的法向量；px/py 是相對中心的座標
   function sdf(px,py,hx,hy,r){
@@ -542,43 +554,42 @@ const SCRIPT = `
   }
   // 依浮窗實際尺寸產生三張圖：
   //  map：位移圖，R／G＝x／y 位移（128＝不動），往內取樣
-  //  mask：磨砂圖層的遮罩（曲面那圈透明、露出底下的折射；往內變不透明）
-  //  lite：白罩＋邊緣高光（依 DPR 畫，高光細線才不糊）。白罩中間濃、曲面那圈很淡；
-  //        高光＝最外緣 1px 亮線＋往內幾 px 的柔光，亮度看法線跟光源（左上）的夾角，左上、右下最亮（iOS 的邊緣反光）
+  //  masks：每層磨砂一張遮罩（曲面那圈透明、露出底下的折射；往內變不透明）
+  //  lite：邊緣高光（依 DPR 畫，細線才不糊）＝最外緣 1px 亮線＋往內幾 px 的柔光，
+  //        亮度看法線跟光源（左上）的夾角，左上、右下最亮（iOS 的邊緣反光）
   function lgMaps(w,h,r){
     var c=document.createElement('canvas'), g, i, j, k, s;
     c.width=w; c.height=h; g=c.getContext('2d');
-    var dm=g.createImageData(w,h), mm=g.createImageData(w,h), D=dm.data, M=mm.data, hx=w/2, hy=h/2;
+    var dm=g.createImageData(w,h), D=dm.data, hx=w/2, hy=h/2, F=FROSTS, f;
+    var mms=F.map(function(){ return g.createImageData(w,h); }), MD=mms.map(function(x){ return x.data; });   // .data 是 DOM getter，別在像素迴圈裡讀
     for(j=0;j<h;j++) for(i=0;i<w;i++){
       k=(j*w+i)*4; s=sdf(i+.5-hx,j+.5-hy,hx,hy,r);
       var m=LUT(s.d)/MAXD;                               // 位移圖存 -1~1，實際 px 由 scale 還原
       D[k]=128-s.nx*m*127; D[k+1]=128-s.ny*m*127; D[k+2]=128; D[k+3]=255;
-      M[k]=M[k+1]=M[k+2]=255; M[k+3]=smooth(BEZEL*.3,BEZEL*1.05,s.d)*255;
+      for(f=0;f<F.length;f++){ var M=MD[f]; M[k]=M[k+1]=M[k+2]=255; M[k+3]=smooth(F[f].fa,F[f].fb,s.d)*255; }
     }
     g.putImageData(dm,0,0); var map=c.toDataURL();
-    g.putImageData(mm,0,0); var mask=c.toDataURL();
+    var masks=mms.map(function(mm){ g.putImageData(mm,0,0); return c.toDataURL(); });
     var dpr=Math.min(window.devicePixelRatio||1,2), W=Math.round(w*dpr), H=Math.round(h*dpr);
     c.width=W; c.height=H; g=c.getContext('2d');
     var lm=g.createImageData(W,H), L=lm.data, lx=-Math.SQRT1_2, ly=-Math.SQRT1_2;
     for(j=0;j<H;j++) for(i=0;i<W;i++){
       k=(j*W+i)*4; s=sdf((i+.5)/dpr-hx,(j+.5)/dpr-hy,hx,hy,r);
-      var diag=(i/W+j/H)/2, a;
-      if(s.d>BEZEL*1.1){ a=.67-.14*diag; }                           // 曲面以內只剩白罩（省掉下面的指數運算）
-      else {
-        var tint=.07+(.6-.14*diag)*smooth(BEZEL*.3,BEZEL*1.05,s.d);   // 白罩：左上稍濃、右下稍淡
+      var a=0;                                                         // 曲面以內全透明（省掉下面的指數運算）
+      if(s.d<=BEZEL*1.1){
         var face=Math.abs(s.nx*lx+s.ny*ly), dir=.28+.72*face*face;     // 法線越對著光源（或背對）越亮
         var rim=Math.exp(-s.d*s.d/.81)*.95+Math.exp(-s.d/5)*.22;       // 外緣細亮線＋往內柔光
-        a=1-(1-tint)*(1-Math.min(rim*dir,1));
+        a=Math.min(rim*dir,1);
       }
       L[k]=L[k+1]=L[k+2]=255; L[k+3]=a*255;
     }
     g.putImageData(lm,0,0);
-    return { map:map, mask:mask, lite:c.toDataURL() };
+    return { map:map, masks:masks, lite:c.toDataURL() };
   }
   // 玻璃拆成三個兄弟圖層（浮窗本身不掛 backdrop-filter）——浮窗開著時原頁面照樣能捲，濾鏡每一幀都要重算，要夠快：
   //  .lg-refr：SVG 濾鏡只做邊緣折射（整片跑一張位移圖，便宜）＋CSS saturate
-  //  .lg-frost：CSS blur 磨砂（GPU 做，幾乎免費），用 mask 圖把曲面那圈挖空、露出底下的折射
-  //  .lg-lite：白罩＋高光，靜態圖片
+  //  .lg-f0~2（.lg-frost）：三層 CSS blur 漸進磨砂（GPU 做，幾乎免費），各自用 mask 圖決定從離邊多遠開始糊
+  //  .lg-lite：邊緣高光，靜態圖片
   //  全塞進同一個 SVG 濾鏡的版本（磨砂＋遮罩＋高光圖都在濾鏡裡）在 980×569 浮窗捲動時一幀 26ms；拆開後約 8.5ms（120Hz 滿幀）。
   //  兄弟圖層才行：浮窗自己掛 backdrop-filter／opacity 會變成 backdrop root，裡面的圖層就看不到原頁面了（所以動畫不能動浮窗的 opacity）
   function lgApply(d){
@@ -592,16 +603,18 @@ const SCRIPT = `
       svgHost.style.position='absolute'; document.body.appendChild(svgHost); }
     var old=document.getElementById(id); if(old) old.remove();
     svgHost.insertAdjacentHTML('beforeend','<filter id="'+id+'" color-interpolation-filters="sRGB">'
-      + '<feGaussianBlur in="SourceGraphic" stdDeviation="1" result="soft"/>'
       + '<feImage href="'+m.map+'" x="0" y="0" width="'+w+'" height="'+h+'" preserveAspectRatio="none" result="map"/>'
-      + '<feDisplacementMap in="soft" in2="map" scale="'+(MAXD*2).toFixed(2)+'" xChannelSelector="R" yChannelSelector="G"/></filter>');
+      + '<feDisplacementMap in="SourceGraphic" in2="map" scale="'+(MAXD*2).toFixed(2)+'" xChannelSelector="R" yChannelSelector="G"/></filter>');
     var layer=function(cls){ var e=d.querySelector('.'+cls);
       if(!e){ e=document.createElement('div'); e.className='lg-layer '+cls; e.setAttribute('aria-hidden','true'); d.insertBefore(e,d.querySelector('.rp-in')); }
       return e; };
-    var refr=layer('lg-refr'), frost=layer('lg-frost'), lite=layer('lg-lite');
+    var refr=layer('lg-refr');
+    var frosts=FROSTS.map(function(_,i){ var e=layer('lg-f'+i); e.classList.add('lg-frost'); return e; });
+    var lite=layer('lg-lite');
     refr.style.backdropFilter='none'; refr.offsetWidth;   // 同 id 換新濾鏡時 Chrome 不會自己重抓，先清掉再掛
-    refr.style.backdropFilter='url(#'+id+') saturate(1.7)';
-    frost.style.webkitMaskImage=frost.style.maskImage='url('+m.mask+')';
+    refr.style.backdropFilter='url(#'+id+') saturate(1.5)';
+    frosts.forEach(function(e,i){ e.style.backdropFilter=FROSTS[i].css;
+      e.style.webkitMaskImage=e.style.maskImage='url('+m.masks[i]+')'; });
     lite.style.backgroundImage='url('+m.lite+')';
     d.classList.add('lg');
   }
