@@ -403,7 +403,7 @@ const STYLE = `
   .lg-frost{-webkit-mask-size:100% 100%;mask-size:100% 100%}   /* 模糊量由 JS 依 FROSTS 設 */
   .lg-lite{background:0 0/100% 100% no-repeat}
   .rp-in{position:relative;z-index:1}
-  /* 留白 40px：字要落在漸進模糊已經夠糊的區域（最外 10px 是清楚的折射，往內 80px 才疊滿） */
+  /* 留白 40px：字要落在漸進模糊已經夠糊的區域（最外 4px 不糊、之後逐層加糊，往內 80px 才疊滿） */
   .rp-in{flex:1;min-width:0;overflow:auto;padding:40px 42px 38px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
   .rp h3{font-size:16px;font-weight:600;margin:0}
@@ -495,7 +495,7 @@ const STYLE = `
     .pf-num dd{font-size:15px}
     .match{grid-column:1/-1}
     dialog.rp{border-radius:22px;max-height:86vh}
-    .rp-in{padding:34px 26px 30px}   /* 手機也要避開最外 10px 的清楚折射帶 */
+    .rp-in{padding:34px 26px 30px}   /* 手機也要讓字落在夠糊的區域 */
     .rp-x{top:24px;right:24px}
   }
   @media(prefers-reduced-motion:reduce){
@@ -538,10 +538,11 @@ const SCRIPT = `
   for(var q=0;q<=BEZEL;q+=.25) MAXD=Math.max(MAXD,LUT(q));
   // 漸進式模糊（2026-09-27 使用者從 v1~v4 四版 demo 選定 v4）：
   //  「清楚＋一張大模糊」用遮罩交叉淡化，過渡帶中段會是清楚疊模糊的殘影＝看得出一條界線；
-  //  改疊三層薄模糊（兄弟圖層逐層再糊，疊滿≈√(4²+7²+9²)≈12px），遮罩起點與寬度錯開，每一步只多糊一點。
-  //  最外 10px（折射最強那段）一層都不蓋，邊緣保持清楚；提亮／降對比放最內層。不蓋白罩（使用者看過嫌突兀）
+  //  改疊三層薄模糊（兄弟圖層逐層再糊，疊滿≈√(6²+7²+9²)≈12.9px），遮罩起點與寬度錯開，每一步只多糊一點。
+  //  最外 4px 一層都不蓋，邊緣保持清楚；提亮／降對比放最內層。不蓋白罩（使用者看過嫌突兀）
+  //  2026-09-29 使用者指定第 1 層 blur(4px)／離邊 10px 起 → blur(6px)／離邊 4→20px 就全糊（折射帶從更外面就開始糊；中間試過 2px、4→40px——smoothstep 前段太緩，最外 10px 幾乎不糊）
   var FROSTS=[
-    { css:'blur(4px)', fa:10, fb:40 },
+    { css:'blur(6px)', fa:4, fb:20 },
     { css:'blur(7px)', fa:20, fb:60 },
     { css:'blur(9px) brightness(1.08) contrast(.85)', fa:30, fb:80 } ];
   function smooth(a,b,v){ var t=Math.min(Math.max((v-a)/(b-a),0),1); return t*t*(3-2*t); }
