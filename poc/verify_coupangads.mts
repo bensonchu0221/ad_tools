@@ -4,7 +4,7 @@ import {
   planRotation, titleOf, descOf, budgetPerGroup, textMatches, imageMatches,
   DAILY_BUDGET, MIN_GROUP_BUDGET, IMAGE_SIZE, aliasOf,
   CAMPAIGNS, RETIRED_CAMPAIGNS, ALL_CAMPAIGNS, isRetiredCampaign,
-  campaignBudget, campaignNoOf, groupNameOf, PINNED_GROUP_IDS, type GroupView,
+  campaignBudget, campaignNoOf, groupNameOf, PINNED_GROUP_IDS, PAUSE_STALE_GROUPS, FIXED_GROUP_BUDGET, type GroupView,
 } from '../src/tools/coupangads/plan.js';
 import { aggregateForBq } from '../src/tools/coupangads/bq.js';
 import { ctrOf, compareByCtr, normDate, enumDays, buildDaily } from '../src/tools/coupangads/stats.js';
@@ -216,6 +216,18 @@ console.log('\n[手動保留：不在 reco 也不暫停（2026-09-29 為 9 月�
   check('保留的商品回到 reco → 走 keep、不重複算進 pinned', r2.keep.length === 1 && r2.pinned.length === 0 && r2.activeCount === 1);
   const r3 = planRotation(gs, ps, 7000, new Set());
   check('沒有保留名單時行為與原本相同', r3.pinned.length === 0 && r3.pause.length === 2 && r3.activeCount === 2);
+  // 9 月底衝刺模式：整個規則⑤停用、每檔預算固定
+  const r4 = planRotation(gs, ps, 7000, new Set(), { pauseStale: false, fixedBudget: 700 });
+  check('衝刺模式：不在 reco 的開著的一律不暫停（不只保留名單）', r4.pause.length === 0 && r4.pinned.map((g) => g.groupId).sort().join() === '102,103', r4.pinned.map((g) => g.groupId));
+  check('衝刺模式：新商品照開、關著的不會被打開', r4.create.length === 1 && !r4.pinned.some((g) => g.groupId === 104) && r4.reactivate.length === 0);
+  check('衝刺模式：在跑檔數＝keep 1＋create 1＋留著的 2＝4', r4.activeCount === 4, r4.activeCount);
+  check('衝刺模式：每檔預算固定 700，不照檔數攤', r4.budgetPerGroup === 700, r4.budgetPerGroup);
+  const many = Array.from({ length: 60 }, (_, i) => G(500 + i, String(500 + i), P(500 + i, 'X', 10)));
+  check('60 檔時公式會砍到 233（這就是固定預算的理由）', planRotation(many, [], 7000, new Set(), { pauseStale: false }).budgetPerGroup === 233);
+  check('不帶選項＝正常輪替（預設值不被衝刺模式污染）', planRotation(gs, ps, 7000, new Set()).pause.length === 2);
+  check('線上設定：衝刺模式開著（10 月前不暫停、每檔 700）', PAUSE_STALE_GROUPS === false && FIXED_GROUP_BUDGET === 700);
+  check('sync 真的有把衝刺模式傳進 planRotation',
+    /pauseStale:\s*PAUSE_STALE_GROUPS,\s*fixedBudget:\s*FIXED_GROUP_BUDGET/.test(readFileSync(new URL('../src/tools/coupangads/sync.ts', import.meta.url), 'utf8')));
   check('線上保留名單就是這次重開的 20 檔', PINNED_GROUP_IDS.size === 20 && PINNED_GROUP_IDS.has(234654) && PINNED_GROUP_IDS.has(234205) && !PINNED_GROUP_IDS.has(229982));
 }
 

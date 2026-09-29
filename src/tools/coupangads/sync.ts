@@ -36,6 +36,7 @@ import {
 import {
   planRotation, titleOf, descOf, CPC, CAMPAIGNS, RETIRED_CAMPAIGNS, CAMPAIGN_NAME,
   campaignBudget, campaignNoOf, groupNameOf, IMAGE_SIZE, aliasOf, type GroupView, type CampaignSpec,
+  PINNED_GROUP_IDS, PAUSE_STALE_GROUPS, FIXED_GROUP_BUDGET,
 } from './plan.js';
 import { getDailyBudget } from './settings.js';
 import { approveOwnCreatives, reviewConfigured, type ReviewResult } from './review.js';
@@ -194,7 +195,8 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
     // 4) 決策（純函式）
     const plan = planRotation(
       mine.map((s) => toView(s, crByGroup.get(s.groupId)?.cr_mt_name ?? null)),
-      products, budgetOf(spec),
+      products, budgetOf(spec), PINNED_GROUP_IDS,
+      { pauseStale: PAUSE_STALE_GROUPS, fixedBudget: FIXED_GROUP_BUDGET }, // 9 月底衝刺模式，見 plan.ts
     );
     const budget = plan.budgetPerGroup;
     const out: CampaignSyncResult = {

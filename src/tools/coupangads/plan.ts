@@ -180,6 +180,25 @@ export const PINNED_GROUP_IDS: ReadonlySet<number> = new Set([
   234203, 234204, 234651, 234195, 234193, 234197, 234201, 234198, 234202, 234205,
 ]);
 
+/**
+ * **9 月底衝刺模式（2026-09-29 使用者指定，10 月使用者會回來手動調整）**：
+ * - `PAUSE_STALE_GROUPS=false`：不在 reco 的 group **一律不暫停**（整個規則⑤停用，不只保留名單），只增不減；
+ *   新商品照常新開、舊商品回來照常重啟 ⇒ 在跑檔數會一天比一天多。
+ * - `FIXED_GROUP_BUDGET=700`：每檔日預算固定，不照「日預算 ÷ 在跑檔數 × 2」攤——檔數長到 60 時公式會把每檔
+ *   砍到 233，高 CTR 的舊檔反而被卡住。總花費仍由 campaign 日預算（7000）當硬上限。
+ * ⚠️ 兩個都是暫時的：恢復正常輪替＝改回 `true`／`null`（並考慮清空 `PINNED_GROUP_IDS`）。
+ * 退役 campaign 的 group 照樣會被暫停（那段在 sync.ts，不受這裡影響）。
+ */
+export const PAUSE_STALE_GROUPS = false;
+export const FIXED_GROUP_BUDGET: number | null = 700;
+
+export interface RotationOptions {
+  /** false ⇒ 不在 reco 的 group 全部繼續跑（進 `pinned`），不暫停。預設 true＝正常輪替。 */
+  pauseStale?: boolean;
+  /** 有值 ⇒ 每檔日預算固定為此值，不照在跑檔數攤。預設 null＝照公式。 */
+  fixedBudget?: number | null;
+}
+
 export interface RotationPlan {
   keep: { group: GroupView; product: CoupangProduct }[];                       // 完全不動
   pinned: GroupView[];                                                        // 不在 reco 但手動保留、繼續跑
@@ -232,6 +251,7 @@ export function imageMatches(group: Pick<GroupView, 'mtName'>, productId: number
 export function planRotation(
   groups: GroupView[], products: CoupangProduct[], campaignDayBudget = campaignBudget(CAMPAIGNS[0]),
   pinnedIds: ReadonlySet<number> = PINNED_GROUP_IDS,
+  { pauseStale = true, fixedBudget = null }: RotationOptions = {},
 ): RotationPlan {
   const recoIds = new Set(products.map((p) => String(p.productId)));
   // 一個商品理論上只會有一個 group；真的撞到多個（例如歷史遺留）就優先用還開著、id 較新的那個
@@ -262,12 +282,13 @@ export function planRotation(
 
   // 不在 reco、又還開著的才要暫停（已經停掉的不用重複下指令）；手動保留的例外，繼續跑
   const stale = groups.filter((g) => g.active && !recoIds.has(g.productId));
-  const pinned = stale.filter((g) => pinnedIds.has(g.groupId));
-  const pause = stale.filter((g) => !pinnedIds.has(g.groupId));
+  const retained = (g: GroupView) => !pauseStale || pinnedIds.has(g.groupId);
+  const pinned = stale.filter(retained);
+  const pause = stale.filter((g) => !retained(g));
 
   const activeCount = keep.length + reimage.length + retext.length + reactivate.length + create.length + pinned.length;
   return {
     keep, pinned, reimage, retext, reactivate, create, pause, activeCount,
-    budgetPerGroup: budgetPerGroup(campaignDayBudget, activeCount),
+    budgetPerGroup: fixedBudget ?? budgetPerGroup(campaignDayBudget, activeCount),
   };
 }
