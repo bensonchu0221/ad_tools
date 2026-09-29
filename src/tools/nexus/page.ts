@@ -567,19 +567,30 @@ const SCRIPT = `
   //  masks：每層磨砂一張遮罩（曲面那圈透明、露出底下的折射；往內變不透明）
   //  lite：邊緣高光（依 DPR 畫，細線才不糊）＝最外緣 1px 亮線＋往內幾 px 的柔光，
   //        亮度看法線跟光源（左上）的夾角，左上、右下最亮（iOS 的邊緣反光）
+  //  位移圖只做浮窗的 1/MAP_DIV（2026-09-29 使用者看過 demo 選 1/4）：feImage 會拉回浮窗大小、雙線性補值，
+  //  折射量本來就平滑遞減，看不出差；但原尺寸位移圖讓折射層成為整個玻璃的主要成本（拿掉折射層 3.29→0.8ms／幀，
+  //  磨砂三層＋遮罩＋高光幾乎不花時間）。解除 60Hz 上限、1440×900 DPR2、浮窗 980×720 捲動單輪實測：原尺寸 5.93ms → 1/2 1.50 → 1/4 0.78ms
+  var MAP_DIV=4;
   function lgMaps(w,h,r){
     var c=document.createElement('canvas'), g, i, j, k, s;
     c.width=w; c.height=h; g=c.getContext('2d');
-    var dm=g.createImageData(w,h), D=dm.data, hx=w/2, hy=h/2, F=FROSTS, f;
+    var hx=w/2, hy=h/2, F=FROSTS, f;
     var mms=F.map(function(){ return g.createImageData(w,h); }), MD=mms.map(function(x){ return x.data; });   // .data 是 DOM getter，別在像素迴圈裡讀
     for(j=0;j<h;j++) for(i=0;i<w;i++){
       k=(j*w+i)*4; s=sdf(i+.5-hx,j+.5-hy,hx,hy,r);
-      var m=LUT(s.d)/MAXD;                               // 位移圖存 -1~1，實際 px 由 scale 還原
-      D[k]=128-s.nx*m*127; D[k+1]=128-s.ny*m*127; D[k+2]=128; D[k+3]=255;
       for(f=0;f<F.length;f++){ var M=MD[f]; M[k]=M[k+1]=M[k+2]=255; M[k+3]=smooth(F[f].fa,F[f].fb,s.d)*255; }
     }
-    g.putImageData(dm,0,0); var map=c.toDataURL();
     var masks=mms.map(function(mm){ g.putImageData(mm,0,0); return c.toDataURL(); });
+    // 位移圖（低解析度）：每格取該格中心點在浮窗座標的位置
+    var mw=Math.max(1,Math.round(w/MAP_DIV)), mh=Math.max(1,Math.round(h/MAP_DIV)), sx=w/mw, sy=h/mh;
+    c.width=mw; c.height=mh; g=c.getContext('2d');
+    var dm=g.createImageData(mw,mh), D=dm.data;
+    for(j=0;j<mh;j++) for(i=0;i<mw;i++){
+      k=(j*mw+i)*4; s=sdf((i+.5)*sx-hx,(j+.5)*sy-hy,hx,hy,r);
+      var m=LUT(s.d)/MAXD;                               // 位移圖存 -1~1，實際 px 由 scale 還原
+      D[k]=128-s.nx*m*127; D[k+1]=128-s.ny*m*127; D[k+2]=128; D[k+3]=255;
+    }
+    g.putImageData(dm,0,0); var map=c.toDataURL();
     var dpr=Math.min(window.devicePixelRatio||1,2), W=Math.round(w*dpr), H=Math.round(h*dpr);
     c.width=W; c.height=H; g=c.getContext('2d');
     var lm=g.createImageData(W,H), L=lm.data, lx=-Math.SQRT1_2, ly=-Math.SQRT1_2;
