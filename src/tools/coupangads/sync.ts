@@ -224,6 +224,16 @@ export async function syncCoupangAds(opts: { dryRun?: boolean; trigger?: 'cron' 
       } catch (e: any) { errors.push(`group ${group.groupId} 預算調整失敗：${e.message}`); }
     }
 
+    // 5a1) 手動保留（不在 reco 但不暫停）：一樣只對齊日預算。商品不在 reco ⇒ 沒有新文案可比，文案/素材/名稱都不碰
+    for (const group of plan.pinned) {
+      try {
+        if (Number(slotByGroup.get(group.groupId)?.dayBudget ?? 0) !== budget) {
+          await updateGroup(email, group.groupId, { budget: { day_budget: budget, price: CPC } });
+        }
+        await upsertCoupangSlot({ ...(slotByGroup.get(group.groupId) as any), groupId: group.groupId, dayBudget: budget, active: true });
+      } catch (e: any) { errors.push(`group ${group.groupId}（手動保留）預算調整失敗：${e.message}`); }
+    }
+
     // 5a2) 只換素材（文案沒變）：把舊的 Display 尺寸圖換成 native 圖。會進待審，換完就不再動。
     for (const { group, product } of plan.reimage) {
       const cur = slotByGroup.get(group.groupId);

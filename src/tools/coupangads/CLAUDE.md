@@ -14,6 +14,10 @@
   ③**舊商品回到 reco → 重啟它自己那個 group**（`group_status` 2→1），素材/落地頁/subId 原封不動 ⇒ **文案沒變就免重審、開啟即有量**（這是永久對映最大的紅利）；
   ④**全新商品 → 建新 group**（絕不覆蓋既有 group）；⑤**不在 reco 又還開著 → 暫停**（已停的不重複下指令）。
   決策全在 `plan.ts planRotation`（純函式，`GroupView`／`CampaignView` 進、`keep/retext/reactivate/create/pause` 出）。2026-08-27 實測 dry-run：reco 20 檔 → 不動 15、新開 5、暫停 5、重啟 0。
+- **⚠️⚠️ 手動保留名單 `plan.ts PINNED_GROUP_IDS`（2026-09-29，規則⑤的例外）**：名單內**還開著**的 group 不在 reco 也不暫停（進 `plan.pinned`），算進在跑檔數、每次同步照公式對齊日預算（`sync.ts` 5a1，只動預算、文案/素材/名稱不碰）；**已關掉的不會被自動重開**（使用者 14:00 手動關的會維持關閉）。**沒有到期日——不需要時要清空**，否則會一直跑。
+  - **起因**：9/27 起 CTR 從 ~0.6% 掉到 0.25%（曝光仍有 50～60 萬/天，CPC 1 元 ⇒ 花不掉），同事截 R 後台審核頁：9/27 起新上的素材在〈谷歌ADX〉〈MSN〉都還是「等待審核」（百度大腦過、Geoedge 審核中）⇒ 只吃得到小流量。為了 9 月花滿 10 萬，把 9/26～27 還在跑、CTR ≥0.4%、落地頁 200 有貨的 20 個舊 group 重開（`group_status` 2→1、日預算 700；**重開不動素材 ⇒ 不重審**，回讀 summary_status 仍是 1/4）。挑選：暫停中、cpg 194431、商品不在線上 → 最後有曝光日越近越優先、再比 CTR；229982（燒烤盤 CTR 0.73%）因**缺貨**剔除，由 234205 補。
+  - **⚠️ 各渠道審核狀態（百度大腦／Geoedge／谷歌ADX／MSN）API 查不到**：那頁欄位是 `bd_status／geo_status／gl_status／msn_status`（值 1=通過、2=失敗、3=不適用、101~108=待審/審核中、103=審核中；MSN 另有 4=部分通過），但 console `/api/manage-review/getCrTroubleList` 回 **`code=1107 您沒有權限`**、`getCrReviewList`／`getCrReviewInfo` 試了 `cur_page/size`、`start/end`、`cr_id`、`id` 都回 `code -1`。只能用「有沒有跑出大流量＋高 CTR」反推過審。
+  - **⚠️ 驗落地頁會被 Coupang 的 Akamai 擋**：curl、Playwright 無頭 Chromium 開商品頁一律 **403 Access Denied**（追蹤連結 onelink → link.tw.coupang.com 兩跳正常）；本機 Chrome headless 過了 1 支就被頻率限制，**連使用者自己的 Chrome 也一起被擋十幾分鐘**（同 IP）。可行做法：curl 只驗「轉址鏈最後落在 `/products/{pid}`」，庫存改在使用者 Chrome（claude-in-chrome）**一頁一頁慢慢開**，看頁面 JSON-LD 的 `schema.org/InStock|OutOfStock`——**別用「已售完／缺貨」字樣比對**，原始 HTML 的文案字典裡本來就有這些字，會全部誤判成售完。
 - **⚠️⚠️ campaign 支數：拆兩支又改回一支（2026-09-03 → 2026-09-07，同一週來回一次）**：
   - **為什麼拆**：使用者要讓第二支吃不同的「流量來源」，內容完全複製第一支，預算 1000／1500 分兩包。
   - **為什麼改回**：R 端操作流量的人（Lulü）把**流量調節改設在帳戶層**了 ⇒ 不必再為了設流量來源複製一整支 campaign，預算也不用拆。日預算回到 2500、每檔 group 回到 250（20 檔時）；同日再調高為 3000 ⇒ 每檔 300，2026-09-10 又調回 2500 ⇒ 每檔 250，2026-09-15 調高為 4170 ⇒ 每檔 417，**2026-09-29 調高為 7000 ⇒ 每檔 700**（皆使用者指定；09-29 的原因＝9 月要在這個帳戶花滿 10 萬台幣）。

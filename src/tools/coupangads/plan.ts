@@ -166,8 +166,23 @@ export interface GroupView {
   mtName: string | null;
 }
 
+/**
+ * **手動保留的 group**：不在 reco 裡也不暫停（輪替規則⑤的例外）。
+ * 2026-09-29 使用者指定：近 4 天新上的素材卡在谷歌 ADX／MSN 等大流量端待審，CTR 從 0.6% 掉到 0.25%、花不完預算，
+ * 為了 9 月花滿 10 萬，把 9/26～27 還在跑、CTR 高（≥0.4%）且落地頁 200 有貨的 20 個舊 group 重開。
+ * 重開 group 不動素材 ⇒ 不重審、開了就有量。
+ * - 只擋「暫停」：已經關掉的（例如使用者 14:00 手動關的）**不會**被自動重開。
+ * - 會算進在跑檔數 ⇒ 每檔預算照原公式一起攤，而且保留的 group 也會被對齊到同一個每檔預算。
+ * - ⚠️ 沒有到期日：不再需要時要把這份清空，否則它們會一直跑下去。
+ */
+export const PINNED_GROUP_IDS: ReadonlySet<number> = new Set([
+  234654, 234655, 234656, 234653, 234657, 234646, 234647, 234649, 234648, 232588,
+  234203, 234204, 234651, 234195, 234193, 234197, 234201, 234198, 234202, 234205,
+]);
+
 export interface RotationPlan {
   keep: { group: GroupView; product: CoupangProduct }[];                       // 完全不動
+  pinned: GroupView[];                                                        // 不在 reco 但手動保留、繼續跑
   reimage: { group: GroupView; product: CoupangProduct }[];                    // 文案沒變、只換素材
   retext: { group: GroupView; product: CoupangProduct; reimage: boolean }[];   // 改文案（順便換素材）
   reactivate: { group: GroupView; product: CoupangProduct; retext: boolean; reimage: boolean }[]; // 重啟舊 group
@@ -214,7 +229,10 @@ export function imageMatches(group: Pick<GroupView, 'mtName'>, productId: number
  * @param campaignDayBudget **這一支** campaign 的日預算（不是兩支合計）。預設是第一支的設定值；
  *   呼叫端（sync.ts）傳的是 `campaignBudget(spec, await getDailyBudget())`。
  */
-export function planRotation(groups: GroupView[], products: CoupangProduct[], campaignDayBudget = campaignBudget(CAMPAIGNS[0])): RotationPlan {
+export function planRotation(
+  groups: GroupView[], products: CoupangProduct[], campaignDayBudget = campaignBudget(CAMPAIGNS[0]),
+  pinnedIds: ReadonlySet<number> = PINNED_GROUP_IDS,
+): RotationPlan {
   const recoIds = new Set(products.map((p) => String(p.productId)));
   // 一個商品理論上只會有一個 group；真的撞到多個（例如歷史遺留）就優先用還開著、id 較新的那個
   const byProduct = new Map<string, GroupView>();
@@ -242,12 +260,14 @@ export function planRotation(groups: GroupView[], products: CoupangProduct[], ca
     else keep.push({ group: g, product: p });
   }
 
-  // 不在 reco、又還開著的才要暫停（已經停掉的不用重複下指令）
-  const pause = groups.filter((g) => g.active && !recoIds.has(g.productId));
+  // 不在 reco、又還開著的才要暫停（已經停掉的不用重複下指令）；手動保留的例外，繼續跑
+  const stale = groups.filter((g) => g.active && !recoIds.has(g.productId));
+  const pinned = stale.filter((g) => pinnedIds.has(g.groupId));
+  const pause = stale.filter((g) => !pinnedIds.has(g.groupId));
 
-  const activeCount = keep.length + reimage.length + retext.length + reactivate.length + create.length;
+  const activeCount = keep.length + reimage.length + retext.length + reactivate.length + create.length + pinned.length;
   return {
-    keep, reimage, retext, reactivate, create, pause, activeCount,
+    keep, pinned, reimage, retext, reactivate, create, pause, activeCount,
     budgetPerGroup: budgetPerGroup(campaignDayBudget, activeCount),
   };
 }

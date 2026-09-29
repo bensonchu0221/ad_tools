@@ -4,7 +4,7 @@ import {
   planRotation, titleOf, descOf, budgetPerGroup, textMatches, imageMatches,
   DAILY_BUDGET, MIN_GROUP_BUDGET, IMAGE_SIZE, aliasOf,
   CAMPAIGNS, RETIRED_CAMPAIGNS, ALL_CAMPAIGNS, isRetiredCampaign,
-  campaignBudget, campaignNoOf, groupNameOf, type GroupView,
+  campaignBudget, campaignNoOf, groupNameOf, PINNED_GROUP_IDS, type GroupView,
 } from '../src/tools/coupangads/plan.js';
 import { aggregateForBq } from '../src/tools/coupangads/bq.js';
 import { ctrOf, compareByCtr, normDate, enumDays, buildDaily } from '../src/tools/coupangads/stats.js';
@@ -198,6 +198,25 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   const r = planRotation(gs, []);
   check('reco 回空 → 只暫停還開著的、不重複暫停已停的', r.pause.length === 1 && r.pause[0].groupId === 102);
   check('reco 回空 → 不建新', r.create.length === 0 && r.activeCount === 0);
+}
+
+console.log('\n[手動保留：不在 reco 也不暫停（2026-09-29 為 9 月花費重開 20 個高 CTR 舊 group）]');
+{
+  const ps = [P(1, 'A', 10), P(9, 'NEW', 50)];
+  const gs = [G(101, '1', ps[0]), G(102, '2', P(2, 'B', 20)), G(103, '3', P(3, 'C', 30)), G(104, '4', P(4, 'D', 40), false)];
+  const pin = new Set([102, 104]);
+  const r = planRotation(gs, ps, 7000, pin);
+  check('保留且開著、不在 reco → 不暫停、進 pinned', r.pinned.length === 1 && r.pinned[0].groupId === 102 && !r.pause.some((g) => g.groupId === 102));
+  check('沒保留的照樣暫停', r.pause.length === 1 && r.pause[0].groupId === 103);
+  check('保留但已關掉的（例如 14:00 手動關）不會被重開', !r.reactivate.some((x) => x.group.groupId === 104) && !r.pinned.some((g) => g.groupId === 104));
+  check('保留的算進在跑檔數（keep 1＋create 1＋pinned 1＝3）', r.activeCount === 3, r.activeCount);
+  check('每檔預算照在跑檔數攤（floor(7000/3×2)）', r.budgetPerGroup === budgetPerGroup(7000, 3), r.budgetPerGroup);
+  // 保留名單裡的商品剛好回到 reco：走正常 keep，不可重複計數
+  const r2 = planRotation([G(102, '2', P(2, 'B', 20))], [P(2, 'B', 20)], 7000, pin);
+  check('保留的商品回到 reco → 走 keep、不重複算進 pinned', r2.keep.length === 1 && r2.pinned.length === 0 && r2.activeCount === 1);
+  const r3 = planRotation(gs, ps, 7000, new Set());
+  check('沒有保留名單時行為與原本相同', r3.pinned.length === 0 && r3.pause.length === 2 && r3.activeCount === 2);
+  check('線上保留名單就是這次重開的 20 檔', PINNED_GROUP_IDS.size === 20 && PINNED_GROUP_IDS.has(234654) && PINNED_GROUP_IDS.has(234205) && !PINNED_GROUP_IDS.has(229982));
 }
 
 console.log('\n[換素材：舊的 300×250 要被換成 native 圖，換完就不再動]');
