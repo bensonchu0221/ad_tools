@@ -553,7 +553,9 @@ await ok('狀態頁：刻度一帳一格、R/P 畫整圈、吻合按鈕與明細
   assert.match(html, /<dialog class="rp glass" id="rp-D"/); // 明細是浮動視窗，不佔版面
   assert.match(html, /class="tick"[\s\S]*class="tk-fg"/); // 自動更新倒數環
   assert.match(html, /<h3 class="pf-t"[^>]*>[\s\S]*?<span class="nw">Discovery<\/span>/); // 平台名斜線大字
-  assert.match(html, /<div class="rp-tint"[^>]*><\/div><div class="rp-in"/); // 折射模式的羽化白罩
+  // 叉叉是 dialog 直接子元素（固定在右上角、不跟內容捲）；玻璃圖層由 JS 插入，伺服器端不輸出
+  assert.match(html, /<dialog class="rp glass" id="rp-D"[^>]*><button type="button" class="rp-x"[^>]*><\/button><div class="rp-in"/);
+  assert.ok(!html.includes('rp-tint'), '白罩已拿掉（2026-09-27 材質定案：漸進式模糊、不蓋白罩）');
   assert.match(html, /<b class="word">完成<\/b><small>2 \/ 2<\/small>/); // M 全部完成：大字「完成」、小字數字
   assert.match(html, /<b>1<\/b><i>\/ 3<\/i>/); // D 還沒完成：大字完成數
   // R／P 全平台一個 job：小字是 T-1 有數字的帳戶數，不是 job 數（以前寫 1 / 1 被看成只有一個帳戶）
