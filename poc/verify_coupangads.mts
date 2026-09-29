@@ -59,7 +59,7 @@ check('MIN_GROUP_BUDGET 是 50', MIN_GROUP_BUDGET === 50);
 // 這就是 8/26 曝光崩掉的情境：舊公式 500÷67＝7 元，CPC 1 元一天最多 7 次點擊、pacing 攤 24 小時幾乎不出量
 check('舊事故重現：500 元 67 檔也不再砍到 7 元', budgetPerGroup(500, 67, 1) === 50, budgetPerGroup(500, 67, 1));
 check('下限不會反過來灌大正常值', budgetPerGroup(3000, 20) === 300);
-check('DAILY_BUDGET 是 4170（2026-09-15 由 2500 調高）', DAILY_BUDGET === 4170, DAILY_BUDGET);
+check('DAILY_BUDGET 是 7000（2026-09-29 由 4170 調高）', DAILY_BUDGET === 7000, DAILY_BUDGET);
 
 console.log('\n[campaign 支數（2026-09-07 由兩支改回一支，第二支退役）]');
 check('在跑的只有一支', CAMPAIGNS.length === 1, CAMPAIGNS.map((c) => c.name));
@@ -67,11 +67,11 @@ check('第一支名稱不可變（線上既有那支就叫這個，改了會另�
   CAMPAIGNS[0].name === '[Coupang] reco 自動投放', CAMPAIGNS[0].name);
 check('第一支 group 前綴不可變（改了會把線上每個 group 都改名）',
   CAMPAIGNS[0].groupPrefix === '[Coupang]', CAMPAIGNS[0].groupPrefix);
-check('日預算 4170（2026-09-15 由 2500 調高）', CAMPAIGNS[0].dayBudget === 4170, CAMPAIGNS[0].dayBudget);
+check('日預算 7000（2026-09-29 由 4170 調高）', CAMPAIGNS[0].dayBudget === 7000, CAMPAIGNS[0].dayBudget);
 check('DAILY_BUDGET 是在跑那幾支的加總（退役的不算進總額）',
-  DAILY_BUDGET === CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0) && DAILY_BUDGET === 4170, DAILY_BUDGET);
-check('20 檔 → 每檔 417', budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) === 417, budgetPerGroup(CAMPAIGNS[0].dayBudget, 20));
-check('沒有覆蓋時就用設定值', campaignBudget(CAMPAIGNS[0]) === 4170, campaignBudget(CAMPAIGNS[0]));
+  DAILY_BUDGET === CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0) && DAILY_BUDGET === 7000, DAILY_BUDGET);
+check('20 檔 → 每檔 700', budgetPerGroup(CAMPAIGNS[0].dayBudget, 20) === 700, budgetPerGroup(CAMPAIGNS[0].dayBudget, 20));
+check('沒有覆蓋時就用設定值', campaignBudget(CAMPAIGNS[0]) === 7000, campaignBudget(CAMPAIGNS[0]));
 check('總額被覆蓋時照比例（單支＝全拿）', campaignBudget(CAMPAIGNS[0], 5000) === 5000, campaignBudget(CAMPAIGNS[0], 5000));
 check('極小值也不會變成 0（0 元等於整支不投）', campaignBudget(CAMPAIGNS[0], 1) >= 1, campaignBudget(CAMPAIGNS[0], 1));
 // 使用者每天 14:00 手動關掉最差的一半（20 檔關 10 檔）：剩下那一半的 group 預算加總必須吃得下整個 campaign 日預算
@@ -90,7 +90,7 @@ check('isRetiredCampaign 認得出來', isRetiredCampaign(2) && !isRetiredCampai
 check('ALL_CAMPAIGNS 含在跑的＋退役的（group 歸屬判斷要用這份）',
   ALL_CAMPAIGNS.length === CAMPAIGNS.length + RETIRED_CAMPAIGNS.length);
 check('退役的日預算不進 DAILY_BUDGET（總花費上限只看在跑的）',
-  DAILY_BUDGET === 4170 && RETIRED_CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0) === 0);
+  DAILY_BUDGET === 7000 && RETIRED_CAMPAIGNS.reduce((a, c) => a + c.dayBudget, 0) === 0);
 {
   // ⚠️ 核心：退役 campaign 的 group 不可以被當成「這個商品已經有 group 了」
   const ps = [P(1, '水杯', 100)];
@@ -162,7 +162,7 @@ console.log('\n[planRotation：group↔商品永久對映，舊商品回來是�
   const gs = [G(101, '1', ps[0]), G(102, '2', ps[1])];
   const r = planRotation(gs, ps);
   check('全部同商品同價、素材已是 native → 全 keep、零改動', r.keep.length === 2 && r.reimage.length === 0 && r.retext.length === 0 && r.reactivate.length === 0 && r.create.length === 0 && r.pause.length === 0);
-  check('在跑檔數＝2、每檔 4170（＝日預算 4170÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 4170, r.budgetPerGroup);
+  check('在跑檔數＝2、每檔 7000（＝日預算 7000÷2×2）', r.activeCount === 2 && r.budgetPerGroup === 7000, r.budgetPerGroup);
 }
 {
   const ps = [P(1, 'A', 10), P(2, 'B', 20)];
@@ -267,7 +267,7 @@ console.log('\n[多支 campaign 必須分開算輪替（混在一起會少開一
   check('第二支建完後也回到全 keep（不會每天重建）', r2b.keep.length === 2 && r2b.create.length === 0);
   check('兩支合計在跑 4 個 group（＝2 商品 × 2 支）', r1.activeCount + r2b.activeCount === 4);
   check('每支的每檔預算各算各的（日預算不同 ⇒ 不可以是同一個數字）',
-    r1.budgetPerGroup === 4170 && r2b.budgetPerGroup === 1500,
+    r1.budgetPerGroup === 7000 && r2b.budgetPerGroup === 1500,
     [r1.budgetPerGroup, r2b.budgetPerGroup]);
 }
 
