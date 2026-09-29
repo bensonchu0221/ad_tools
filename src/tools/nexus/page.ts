@@ -384,8 +384,8 @@ const STYLE = `
   dialog.rp[open]{display:flex}
   dialog.rp[open]::backdrop{animation:fade .2s ease-out}
   /* 關窗：遮罩跟著縮回動畫一起淡出（shut 設 data-closing，動畫跑完才真的 close；不這樣做遮罩會在最後一下子消失）。
-     縮回按鈕 .3s、按鈕已捲出畫面就地淡出 .2s，時間各自對齊 */
-  dialog.rp[data-closing]::backdrop{opacity:0;transition:opacity .3s cubic-bezier(.4,0,.7,.2)}
+     縮回按鈕 .42s（曲線同 shut 的位移）、按鈕已捲出畫面就地淡出 .2s，時間各自對齊 */
+  dialog.rp[data-closing]::backdrop{opacity:0;transition:opacity .42s cubic-bezier(.45,0,.55,1)}
   dialog.rp[data-closing="fade"]::backdrop{transition:opacity .2s ease-in}
   @keyframes fade{from{opacity:0}}
   /* 浮窗開著時原頁面照樣能捲（滾輪在浮窗外＝捲原頁、在浮窗內＝捲明細，.rp-in 的 overscroll-behavior 擋住連動）：
@@ -629,7 +629,7 @@ const SCRIPT = `
       +Math.max(a.width/b.width,.05)+','+Math.max(a.height/b.height,.05)+')';
   }
   // 淡入淡出一律動子元素（玻璃圖層＋內容）的 opacity，不動浮窗本身——浮窗 opacity<1 會變 backdrop root，玻璃瞬間變空白
-  function fade(d,from,to,opt){ [].slice.call(d.children).forEach(function(c){ c.animate([{opacity:from},{opacity:to}],opt); }); }
+  // （例外：非液態玻璃模式沒有玻璃圖層，白底／磨砂掛在浮窗本身，只能淡浮窗）
   function done(d){ d.close(); [d].concat([].slice.call(d.children)).forEach(function(e){ e.getAnimations().forEach(function(x){ x.cancel(); }); });
     delete d.dataset.closing; }
   function grow(d,src){
@@ -638,22 +638,40 @@ const SCRIPT = `
     [].slice.call(d.querySelectorAll('.lg-layer')).forEach(function(c){ c.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}); });
     [].slice.call(d.querySelectorAll('.rp-in,.rp-x')).forEach(function(c){ c.animate([{opacity:0,transform:'translateY(6px)'},{opacity:1,transform:'none'}],{duration:280,delay:160,easing:'ease-out',fill:'backwards'}); });
   }
+  // 關窗：縮成小圓點鑽進來源元素中心（2026-09-29 使用者從 A／A+B1(Genie 梯形近似) 兩版 demo 選 A）。
+  //  舊版縮到「來源外框大小」就 close，最後會看到一塊方塊突然消失，原因有三，各自對應：
+  //  ①終點＝直徑 16~32px 的圓點（不是來源外框）；圓角 25% 之後漸變成 50%＝橢圓半徑，非等比縮到 D×D 剛好是正圓
+  //  ②外陰影掛在浮窗本身（浮窗不能動 opacity），前 60% 就收掉，不然 close() 那一幀整圈跳掉
+  //  ③玻璃在「已經很小」的後段才淡（45%→90% 歸零）；位移用對稱 ease-in-out，淡到看不見時已走完 ~93%，不會半途消失
+  //  落地時來源彈一下（像 Dock 圖示接住視窗）
   function shut(d){
     if(d.dataset.closing) return;
     var src=d._src && d._src.isConnected ? d._src : null;
     if(src){ var sr=src.getBoundingClientRect();              // 原頁面捲走了、按鈕不在畫面上：就地縮小淡出，不要飛出畫面
       if(sr.bottom<0||sr.top>innerHeight) src=null; }
     if(REDUCE||!d.animate){ d.close(); return; }
-    d.dataset.closing='1';
+    var lg=d.classList.contains('lg'), T=src?420:200, arr=function(sel){ return [].slice.call(d.querySelectorAll(sel)); };
+    d.dataset.closing=src?'1':'fade';
+    d.animate([{boxShadow:getComputedStyle(d).boxShadow},{boxShadow:'none',offset:.6},{boxShadow:'none'}],{duration:T,fill:'forwards'});
+    arr('.rp-in,.rp-x,.rp-bar').forEach(function(c){ c.animate([{opacity:1},{opacity:0}],{duration:120,fill:'forwards'}); });
     if(!src){
-      d.dataset.closing='fade';
-      fade(d,1,0,{duration:200,easing:'ease-in',fill:'forwards'});
-      d.animate([{transform:'none'},{transform:'scale(.92)'}],{duration:200,easing:'ease-in',fill:'forwards'}).onfinish=function(){ done(d); };
+      var o={duration:T,easing:'ease-in',fill:'forwards'};
+      arr('.lg-layer').forEach(function(c){ c.animate([{opacity:1},{opacity:0}],o); });
+      if(!lg) d.animate([{opacity:1},{opacity:0}],o);
+      d.animate([{transform:'none'},{transform:'scale(.92)'}],o).onfinish=function(){ done(d); };
       return;
     }
-    [].slice.call(d.querySelectorAll('.rp-in,.rp-x,.rp-bar')).forEach(function(c){ c.animate([{opacity:1},{opacity:0}],{duration:120,fill:'forwards'}); });
-    [].slice.call(d.querySelectorAll('.lg-layer')).forEach(function(c){ c.animate([{opacity:1},{opacity:0}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'}); });
-    d.animate([{transform:'none'},{transform:flip(d,src)}],{duration:300,easing:'cubic-bezier(.4,0,.7,.2)',fill:'forwards'}).onfinish=function(){ done(d); };
+    var a=src.getBoundingClientRect(), b=d.getBoundingClientRect();
+    var D=Math.min(Math.max(Math.min(a.width,a.height)*.22,16),32);
+    var fadeK=[{opacity:1},{opacity:1,offset:.45,easing:'ease-in'},{opacity:0,offset:.9},{opacity:0}];
+    arr('.lg-layer').forEach(function(c){ c.animate(fadeK,{duration:T,fill:'forwards'}); });
+    if(!lg) d.animate(fadeK,{duration:T,fill:'forwards'});
+    var R=getComputedStyle(d).borderTopLeftRadius;
+    d.animate([{borderRadius:R},{borderRadius:R,offset:.25},{borderRadius:'50%'}],{duration:T,fill:'forwards'});
+    d.animate([{transform:'none'},{transform:'translate('+((a.left+a.width/2)-(b.left+b.width/2))+'px,'+((a.top+a.height/2)-(b.top+b.height/2))+'px) scale('+D/b.width+','+D/b.height+')'}],
+      {duration:T,easing:'cubic-bezier(.45,0,.55,1)',fill:'forwards'}).onfinish=function(){ done(d); };
+    setTimeout(function(){ if(src.isConnected) src.animate([{transform:'scale(1)'},{transform:'scale(1.07)',offset:.35},{transform:'scale(1)'}],
+      {duration:360,easing:'cubic-bezier(.3,.7,.4,1)'}); },T*.82);
   }
 
   var KEY='nexus-open', store={get:function(){try{return JSON.parse(sessionStorage.getItem(KEY)||'{}')}catch(e){return {}}},
