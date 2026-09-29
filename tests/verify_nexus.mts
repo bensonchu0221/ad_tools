@@ -421,11 +421,14 @@ await ok('M 裝置 job：回補切 7 天、只寫裝置表、不動覆蓋紀錄�
   assert.deepEqual(calls, [['write', null, 'device'], ['write', '860212', 'facts'], ['coverage', '860212']]);
 });
 
-await ok('排除清單：3 個 MediaGo 舊帳戶略過、其他帳戶照抓', () => {
+await ok('排除清單：3 個 MediaGo 舊帳戶＋M Serene House 略過、其他帳戶照抓', () => {
   assert.equal(isSkipped({ platform: 'D', accountId: '1319' }), true);
   assert.equal(isSkipped({ platform: 'D', accountId: '24492' }), true);
   assert.equal(isSkipped({ platform: 'D', accountId: '31243' }), false);
   assert.equal(isSkipped({ platform: 'M', accountId: '1319' }), false); // 只排除 D 平台的那個 id
+  assert.equal(isSkipped({ platform: 'M', accountId: '860502' }), true);
+  assert.equal(isSkipped({ platform: 'D', accountId: '860502' }), false);
+  assert.equal(isSkipped({ platform: 'M', accountId: '860212' }), false);
 });
 
 await ok('job：D 拿不到帳戶＋倉庫從無數字 → 不重試錯誤（帶標記）；有過數字 → 原錯誤照走重試', async () => {
@@ -624,17 +627,37 @@ await ok('失敗 job 已補回：之後成功的 job 拼起來涵蓋整段才算
   assert.ok(!markSupersededNexusJobs([{ ...f, platform: 'M' }], [s1, s2])[0].superseded, '別的平台不算');
 
   const done = markSupersededNexusJobs([f], [s1, s2])[0];
-  const open = bjob(8408, 'M', 'failed', { accountName: 'Serene', finishedAt: '2026-09-26 04:27:00', message: 'WAS_SOME_ERROR' });
+  const open = bjob(8408, 'M', 'failed', { accountName: '固力伸', finishedAt: '2026-09-26 04:27:00', message: 'WAS_SOME_ERROR' });
   const input = healthBase();
   input.failures = [done, open];
   const h = evaluateHealth(input);
   const txt = h.items.map((i) => i.text).join('|');
-  assert.match(txt, /1 個帳戶、共 1 個 job 重試 3 次仍失敗[\s\S]*Serene/);
+  assert.match(txt, /1 個帳戶、共 1 個 job 重試 3 次仍失敗[\s\S]*固力伸/);
   assert.ok(!txt.includes('佳聖'), '已補回的不報');
   const html = statusPage({ input, health: h, batchJobs: [done, bjob(3, 'D', 'success')], jobs: [done, open] });
   const hot = html.slice(html.indexOf('失敗與執行中的 job'), html.indexOf('最近 100 筆'));
-  assert.ok(hot.includes('Serene') && !hot.includes('佳聖'), '已補回的不列在待處理');
+  assert.ok(hot.includes('固力伸') && !hot.includes('佳聖'), '已補回的不列在待處理');
   assert.match(html, /失敗・已補回 ×3/);
+  assert.ok(!/class="t-failed"/.test(html), '刻度圈當完成畫');
+});
+
+await ok('排除清單帳戶以前失敗的 job：狀態頁不列、刻度不紅、健檢不報；其他帳戶照報', () => {
+  // 2026-09-29：M Serene House 09-25 起每天 WAS_SOME_ERROR_TRY_AGAIN_LATER，列入排除清單後舊的失敗 job 不該一直掛著
+  const serene = bjob(9287, 'M', 'failed', { accountId: '860502', accountName: 'Serene House', attemptCount: 3, finishedAt: '2026-09-29 04:27:17', message: 'MGID API 400：WAS_SOME_ERROR_TRY_AGAIN_LATER' });
+  const other = bjob(9288, 'M', 'failed', { accountId: '860212', accountName: '固力伸', attemptCount: 3, finishedAt: '2026-09-29 04:27:17', message: '爆了' });
+  const input = healthBase();
+  input.failures = [serene, other];
+  const h = evaluateHealth(input);
+  const txt = h.items.map((i) => i.text).join('|');
+  assert.ok(!txt.includes('Serene'), '已排除的不報');
+  assert.match(txt, /固力伸/);
+  input.failures = [serene];
+  assert.ok(!evaluateHealth(input).items.some((i) => /重試 3 次仍失敗/.test(i.text)), '只有已排除的失敗 → 不出這一項');
+
+  const html = statusPage({ input, health: h, batchJobs: [serene, bjob(3, 'M', 'success')], jobs: [serene] });
+  const hot = html.slice(html.indexOf('失敗與執行中的 job'), html.indexOf('最近 100 筆'));
+  assert.ok(!hot.includes('Serene'), '已排除的不列在待處理');
+  assert.match(html, /失敗・已排除 ×3/);
   assert.ok(!/class="t-failed"/.test(html), '刻度圈當完成畫');
 });
 

@@ -7,7 +7,7 @@
 //  - job 清單只列失敗／執行中，其餘收進 details
 import { sbPage } from '../../core/sbui.js';
 import type { NexusJobRow, NexusPlatform } from '../../core/store.js';
-import { addDays } from './run.js';
+import { addDays, isSkipped } from './run.js';
 import { P_UNATTRIBUTED } from './fetch.js';
 import type { HealthInput, HealthReport } from './health.js';
 import { summarizeRecon, reconLevel, fmtMatch, RECON, type PlatformRecon } from './recon.js';
@@ -20,6 +20,8 @@ const num = (n: number) => Math.round(n).toLocaleString('en-US');
 const pct = (x: number) => `${(x * 100).toFixed(x >= 0.1 ? 1 : 2)}%`;
 
 type St = NexusJobRow['status'];
+/** 帳戶已列入排除清單（run.ts SKIP_ACCOUNTS）的失敗 job：不再抓了，不算待處理。 */
+const excluded = (j: NexusJobRow) => j.status === 'failed' && isSkipped(j);
 // 刻度排列順序：先畫跑完的、再畫失敗的，圈子看起來就像一格一格填滿；失敗剛好落在進度前緣最顯眼
 const ORDER: Record<St, number> = { success: 0, failed: 1, running: 2, queued: 3 };
 const ST_LABEL: Record<St, string> = { success: '完成', failed: '失敗', running: '執行中', queued: '排隊' };
@@ -154,8 +156,8 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
   const cards: string[] = [];
   const panels: string[] = [];
   for (const p of PLATFORMS) {
-    // 失敗但之後已被別的 job 補回的，刻度圈當完成畫（資料已經在了，不是待處理的紅燈）
-    const pj = batchJobs.filter((j) => j.platform === p).map((j) => (j.superseded ? { ...j, status: 'success' as const } : j));
+    // 失敗但之後已被別的 job 補回的，刻度圈當完成畫（資料已經在了，不是待處理的紅燈）；已排除帳戶的失敗也一樣
+    const pj = batchJobs.filter((j) => j.platform === p).map((j) => (j.superseded || excluded(j) ? { ...j, status: 'success' as const } : j));
     let imp = 0, spend = 0;
     const acctWithData = new Set<string>();
     for (const c of input.coverage) if (c.platform === p && c.dt === t1) {
@@ -192,15 +194,22 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
   }
 
   // ── job：只列要處理的，其餘收起來 ──
+  // 失敗但之後已補回、或帳戶已列入排除清單的，都不算要處理
+  const jobStatus = (j: NexusJobRow) => {
+    const [cls, label, title] = j.superseded ? ['st-done', '失敗・已補回', '這次失敗了，但之後已有成功的 job 重抓同一段區間']
+      : excluded(j) ? ['st-done', '失敗・已排除', '帳戶已列入排除清單，之後不再抓']
+      : [({ success: 'st-done', failed: 'st-fail', running: 'st-run', queued: 'st-queued' } as const)[j.status], ST_LABEL[j.status], ''];
+    return `<span class="st ${cls}"${title ? ` title="${title}"` : ''}>${label}${j.attemptCount > 1 ? ` ×${j.attemptCount}` : ''}</span>`;
+  };
   const jobRow = (j: NexusJobRow) => `<tr>
     <td class="muted">${j.id}</td><td>${j.kind === 'daily' ? '每日' : '回補'}</td><td><span class="src src-${j.platform.toLowerCase()}">${j.platform}</span></td>
     <td>${esc(j.accountName)}</td><td class="muted">${j.sd.slice(5)}~${j.ed.slice(5)}</td>
-    <td><span class="st ${j.superseded ? 'st-done' : ({ success: 'st-done', failed: 'st-fail', running: 'st-run', queued: 'st-queued' } as const)[j.status]}"${j.superseded ? ' title="這次失敗了，但之後已有成功的 job 重抓同一段區間"' : ''}>${j.superseded ? '失敗・已補回' : ST_LABEL[j.status]}${j.attemptCount > 1 ? ` ×${j.attemptCount}` : ''}</span></td>
+    <td>${jobStatus(j)}</td>
     <td class="msg-cell">${esc(j.status === 'running' ? j.phase : j.message)}</td>
     <td class="muted">${esc((j.finishedAt ?? j.startedAt ?? j.queuedAt ?? '').slice(5, 16))}</td></tr>`;
   const thead = `<thead><tr><th>#</th><th>類型</th><th>平台</th><th>帳戶</th><th>區間</th><th>狀態</th><th>訊息</th><th>時間</th></tr></thead>`;
-  // 已補回的失敗 job 不算要處理的，只留在下面「最近 100 筆」
-  const hot = jobs.filter((j) => (j.status === 'failed' && !j.superseded) || j.status === 'running');
+  // 已補回／已排除的失敗 job 不算要處理的，只留在下面「最近 100 筆」
+  const hot = jobs.filter((j) => (j.status === 'failed' && !j.superseded && !excluded(j)) || j.status === 'running');
 
   const bf = input.backfill;
   const bfLeft = bf.queued + bf.running;

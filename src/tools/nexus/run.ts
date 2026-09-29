@@ -60,14 +60,19 @@ export function chunkRange(sd: string, ed: string, days: number): { sd: string; 
 export interface AccountRef { platform: NexusPlatform; accountId: string; accountName: string }
 
 /**
- * 不抓的帳戶（使用者 2026-09-24 決定略過）。都是已移轉到 MediaGo 平台、停用多年的舊帳戶：
- * D 平台 API 對它們回 403 "Please use Mediago's API to request."（從 Cloud Run 甚至認證就失敗），
- * 改打 api.mediago.io 才看得到 campaign，且全部停用、近月零花費。
+ * 不抓的帳戶（使用者確認是停用帳戶後決定略過）。倉庫裡已有的歷史數字不動，只是之後不再排 job。
+ * - D（2026-09-24）：已移轉到 MediaGo 平台、停用多年的舊帳戶。D 平台 API 對它們回 403
+ *   "Please use Mediago's API to request."（從 Cloud Run 甚至認證就失敗），改打 api.mediago.io 才看得到 campaign，
+ *   且全部停用、近月零花費。
+ * - M（2026-09-29）：statistics-reports 每天回 400 WAS_SOME_ERROR_TRY_AGAIN_LATER、重試 3 次都失敗（09-25 起連 4 天），
+ *   最後有數字是 2026-07-07，使用者確認沒在跑。
+ * 這些帳戶以前失敗的 job 不算待處理（狀態頁、健檢都不報）。
  */
 export const SKIP_ACCOUNTS: Record<string, string> = {
   'D:1319': 'Wavenet_Tena（MediaGo 帳戶，最後異動 2022-03）',
   'D:1732': '4A_Springtrees_tsh_loan（MediaGo 帳戶，最後異動 2023-02）',
   'D:24492': 'TW_affluentbyte_Eric_NEW（MediaGo 帳戶，最後異動 2023-12）',
+  'M:860502': 'Serene House（MGID API 一直回 WAS_SOME_ERROR_TRY_AGAIN_LATER，最後有數字 2026-07-07）',
 };
 export const isSkipped = (t: { platform: NexusPlatform; accountId: string }) => `${t.platform}:${t.accountId}` in SKIP_ACCOUNTS;
 

@@ -8,7 +8,7 @@ import {
   nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows, nexusReconFor,
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
-import { addDays, twToday, UNREACHABLE_TAG } from './run.js';
+import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
 import { summarizeRecon, fmtMatch, RECON } from './recon.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
@@ -72,8 +72,8 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
 
   // ② 放棄重試的 job。「D 平台拿不到、倉庫也從無數字」的帳戶單獨歸一行黃燈（多半是停用的舊帳戶），
   //    其餘照紅燈——有數字的帳戶斷了才是真的會漏資料
-  //    之後已被別的 job 補回整段區間的（superseded）不算
-  const open = inp.failures.filter((f) => !f.superseded);
+  //    之後已被別的 job 補回整段區間的（superseded）、帳戶已列入排除清單的不算
+  const open = inp.failures.filter((f) => !f.superseded && !isSkipped(f));
   const unreachable = open.filter((f) => String(f.message ?? '').startsWith(UNREACHABLE_TAG));
   const failures = open.filter((f) => !String(f.message ?? '').startsWith(UNREACHABLE_TAG));
   if (unreachable.length) {
