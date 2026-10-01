@@ -29,8 +29,18 @@ const STYLE = `
   .pt .ar{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
   .pt tr.grp{cursor:pointer}
   .pt tr.grp:hover td{background:#F7F8FA}
-  .pt tr.kid td{background:#FAFBFC;font-size:12.5px;padding-top:8px;padding-bottom:8px}
-  .pt tr.kid td:first-child{border-left:3px solid var(--line)}
+  .pt tr.kid td{font-size:12.5px;padding-top:8px;padding-bottom:8px;color:#374151}
+  .pt tr.grp.open td{border-bottom-color:transparent}
+  /* 展開的子列＝下沉：灰底＋上緣內陰影（母列像浮在上面）＋縮排與樹狀連接線（2026-10-01 使用者從三版 demo 選 v3「兩者都有」） */
+  .pt tr.kid td,.pt tr.kidfoot td{background:#EEF1F5;border-bottom-color:#E2E6EC}
+  .pt tr.first td{box-shadow:inset 0 8px 8px -8px rgba(20,22,26,.30)}
+  .pt tr.last td{box-shadow:inset 0 -6px 6px -6px rgba(20,22,26,.16)}
+  .pt tr.first.last td{box-shadow:inset 0 8px 8px -8px rgba(20,22,26,.30),inset 0 -6px 6px -6px rgba(20,22,26,.16)}
+  .pt tr.kid td.nmcell{padding-left:30px}
+  .pt tr.kid td.tree{position:relative}
+  .pt tr.kid td.tree::before{content:"";position:absolute;left:14px;top:0;bottom:0;border-left:1.5px solid #B8BFCA}
+  .pt tr.kid.tend td.tree::before{bottom:50%}
+  .pt tr.kid td.tree::after{content:"";position:absolute;left:14px;top:50%;width:36px;border-top:1.5px solid #B8BFCA}
   .nm{font-weight:600;line-height:1.35}
   .meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:4px;font-size:12px;color:var(--mut)}
   .tag{font-family:var(--mono);font-size:10.5px;border:1px solid var(--line);border-radius:3px;padding:1px 5px;color:var(--mut)}
@@ -56,14 +66,14 @@ const STYLE = `
     background:var(--slot);border:2px solid var(--mut);box-shadow:0 0 0 2px var(--slot)}
   .pace .prj.red{border-color:var(--red)} .pace .prj.amber{border-color:var(--amber)} .pace .prj.green{border-color:var(--green)}
   .pace .cap{position:absolute;left:0;right:0;top:25px;font-size:10.5px;color:var(--mut);white-space:nowrap;line-height:1.2}
-  .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--mut);margin:10px 2px 0}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--mut);margin:0 2px 10px}
   .legend span{display:inline-flex;align-items:center;gap:6px}
   .lg-fil{width:16px;height:8px;background:var(--ink);border-radius:2px}
   .lg-now{width:2px;height:14px;background:var(--slate)}
   .lg-prj{width:9px;height:9px;transform:rotate(45deg);border:2px solid var(--mut)}
   .issue{color:var(--err);font-size:12px;margin-top:3px}
   .issue a{color:var(--err)}
-  .kidfoot td{background:#FAFBFC;padding:6px 10px 12px;font-size:12px}
+  .kidfoot td{padding:6px 10px 12px 40px;font-size:12px}
   /* 預算表抓漏 */
   details.gap{background:var(--slot);border:1px solid var(--line);border-radius:6px;margin-bottom:10px}
   details.gap summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:14px;list-style:none}
@@ -82,7 +92,7 @@ const STYLE = `
 const SCRIPT = `
 (function(){
   var PATH='/tools/pacing';
-  var data=null, am='', lvl='all', q='', open={}, mergeMode=false, picked={};
+  var data=null, am='', lvl='all', q='', open={}, mergeMode=false, picked={}, first=true;
   var $=function(id){ return document.getElementById(id); };
 
   function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
@@ -167,24 +177,26 @@ const SCRIPT = `
   }
 
   function renderTable(gs){
-    var h='<div class="scroll"><table class="pt"><thead><tr>'+(mergeMode?'<th></th>':'')+'<th></th><th>預算</th><th>狀態</th><th>走期</th><th class="ar">預算／已花</th><th>走速</th><th class="ar">預估結案</th><th class="ar">每日應花</th></tr></thead><tbody>';
+    var h='<div class="scroll"><table class="pt"><thead><tr>'+(mergeMode?'<th></th>':'')+'<th></th><th>預算</th><th>狀態</th><th>走期</th><th class="ar">預算／已花</th><th title="灰軌＝預算、黑＝已花、直線＝時間進度、菱形＝預估結案">走速</th><th class="ar">預估結案</th><th class="ar">每日應花</th></tr></thead><tbody>';
     gs.forEach(function(g){
       var p=g.pace, isOpen=!!open[g.key];
-      h+='<tr class="grp" data-k="'+esc(g.key)+'">';
+      h+='<tr class="grp'+(isOpen?' open':'')+'" data-k="'+esc(g.key)+'">';
       if(mergeMode) h+='<td><input type="checkbox" data-pick="'+esc(g.key)+'"'+(picked[g.key]?' checked':'')+' aria-label="選取 '+esc(g.name)+'"></td>';
       h+='<td style="width:26px"><button class="xbtn" aria-expanded="'+isOpen+'" aria-label="展開各平台"><span class="ch">▸</span></button></td>';
       h+='<td>'+headName(g)+'</td><td>'+chip(p)+'</td><td>'+flight(p,g.start,g.end)+'</td>';
       h+='<td class="ar">'+fmt(p.budget)+'<div class="sub2">'+fmt(p.spent)+'</div></td>';
       h+='<td>'+bar(p)+'</td><td class="ar">'+pct(p.projectedPct)+'</td><td class="ar">'+need(p)+'</td></tr>';
       if(isOpen){
-        g.children.forEach(function(k){
+        var nk=g.children.length, foot=g.mergeIds.length>0;
+        g.children.forEach(function(k,i){
           var c=k.cfg, kp=k.pace, f=c.platform==='V';
-          h+='<tr class="kid">'+(mergeMode?'<td></td>':'')+'<td></td><td>'+badge(c.platform)+' <span style="font-family:var(--mono);font-size:12px">'+esc(c.accountId)+'</span> '+esc(c.accountName)
+          var cls='kid'+(i===0?' first':'')+(i===nk-1?' tend':'')+(i===nk-1&&!foot?' last':'');
+          h+='<tr class="'+cls+'">'+(mergeMode?'<td></td>':'')+'<td class="tree"></td><td class="nmcell">'+badge(c.platform)+' <span style="font-family:var(--mono);font-size:12px">'+esc(c.accountId)+'</span> '+esc(c.accountName)
             +(f?'<div class="sub2">D1 影音：金額是客戶價 ×0.6，合計列已換回客戶價</div>':'')+issues(k)+'</td>';
           h+='<td>'+chip(kp)+'</td><td>'+flight(kp,c.start,c.end)+'</td><td class="ar">'+fmt(kp.budget)+'<div class="sub2">'+fmt(kp.spent)+'</div></td>';
           h+='<td>'+bar(kp)+'</td><td class="ar">'+pct(kp.projectedPct)+'</td><td class="ar">'+need(kp)+'</td></tr>';
         });
-        if(g.mergeIds.length) h+='<tr class="kidfoot"><td colspan="'+(mergeMode?9:8)+'">這列是手動合併的。<button class="btn-line" data-unmerge="'+esc(g.mergeIds.join(','))+'">拆開</button></td></tr>';
+        if(foot) h+='<tr class="kidfoot last"><td colspan="'+(mergeMode?9:8)+'">這列是手動合併的。<button class="btn-line" data-unmerge="'+esc(g.mergeIds.join(','))+'">拆開</button></td></tr>';
       }
     });
     return h+'</tbody></table></div>';
@@ -273,7 +285,7 @@ const SCRIPT = `
     fetch(PATH+'/data').then(function(r){ return r.json().then(function(j){ if(!r.ok) throw new Error(j.error||r.status); return j; }); })
       .then(function(j){
         data=j; $('status').innerHTML='';
-        if(am===''&&data.me){ var k=amKey(data.me); if(data.owners.some(function(o){ return amKey(o)===k; })) am=k; }
+        if(first){ am=data.defaultAm||''; first=false; } // 只在第一次載入套預設；合併後重新整理不改使用者選的篩選
         renderFilters(); render();
       })
       .catch(function(err){ $('status').innerHTML='<div class="msg msg-err">讀取失敗：'+esc(err.message)+'</div>'; });
@@ -304,10 +316,11 @@ export function pacingPage(): string {
       <button type="button" class="btn-line" id="cancelMerge">取消</button>
     </div>
     <div id="status"></div>
-    <div id="list"></div>
     <div class="legend">
-      <span><i class="lg-fil"></i>已花</span><span><i class="lg-now"></i>時間進度（照比例該花到這裡）</span><span><i class="lg-prj"></i>預估結案（近 7 日平均推估）</span>
+      <span><i class="lg-fil"></i>已花</span><span><i class="lg-now"></i>時間進度（平均花的話該花到這裡）</span>
+      <span><i class="lg-prj"></i>預估結案：照近 7 日速度花到走期結束，會落在預算的哪裡（紅＝花不完或已超支、橘＝會超花、綠＝正常）</span>
     </div>
+    <div id="list"></div>
     <div id="gaps"></div>
     <footer>ad_tools · tool#10 pacing</footer>
   `;

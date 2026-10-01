@@ -2,7 +2,7 @@
 // 全程假資料（手算期望值），不連 DB／Sheets。用法：npx tsx tests/verify_pacing.mts
 import assert from 'node:assert/strict';
 import {
-  normName, addDays, dayDiff, twToday, paceOf, groupConfigs, groupPace, configIssues, assemble, V_RATE,
+  normName, addDays, dayDiff, twToday, paceOf, groupConfigs, groupPace, configIssues, assemble, defaultAm, V_RATE,
   type BhConfig, type SpendRow,
 } from '../src/tools/pacing/calc.js';
 import { parseSheet, sheetGaps, monthTab, type SheetRow } from '../src/tools/pacing/sheet.js';
@@ -258,9 +258,29 @@ await ok('組裝：各平台資料日、只顯示進行中／未開始／7 天�
   assert.equal(out.dataThrough.M, '2026-09-29'); // 沒有任何資料的平台退回昨天
   assert.deepEqual(out.groups.map((g) => g.name), ['B', 'G', 'J', 'A', 'H', 'F', 'I', 'E']);
   assert.equal(out.hiddenCount, 1);
+  assert.deepEqual(out.owners, ['am@popin.cc']); // 篩選按鈕只放顯示中的列的負責人
   const g = out.groups.find((x) => x.name === 'G')!;
   assert.equal(g.pace.level, 'yellow');
   assert.equal(g.pace.remaining, 33); // R 資料只到 9/28 ⇒ 9/29~10/31 都還算剩餘
+});
+
+await ok('篩選按鈕只列顯示中的負責人；早已結束的設定的負責人不出現', () => {
+  const cs = [
+    cfg({ platform: 'D', accountId: '301', accountName: 'X', budget: 1000, start: '2026-09-01', end: '2026-09-30', owner: 'lulu@popin.cc' }),
+    cfg({ platform: 'R', accountId: '302', accountName: 'Qbi', budget: 1000, start: '2026-03-01', end: '2026-03-31', owner: 'benson@popin.cc' }),
+  ];
+  const out = assemble({ today: '2026-09-30', configs: cs, spend: [], merges: [], known: new Set(['D|301', 'R|302']) });
+  assert.deepEqual(out.owners, ['lulu@popin.cc']);
+});
+
+await ok('預設篩選：只有預算表上的 AM、且有顯示中的列才預設看自己，其他人（如 benson）看全部', () => {
+  const owners = ['lulu@popin.cc', 'benson@popin.cc'];
+  const am = ['Joyce', 'LuLu', '不用AM'];
+  assert.equal(defaultAm('lulu@popin.cc', am, owners), 'lulu'); // 大小寫不同也對得上（LuLu）
+  assert.equal(defaultAm('benson@popin.cc', am, owners), ''); // 不是 AM：就算名下有列也看全部
+  assert.equal(defaultAm('joyce@popin.cc', am, owners), ''); // 是 AM 但沒有顯示中的列：看全部，免得一進來空白
+  assert.equal(defaultAm(null, am, owners), '');
+  assert.equal(defaultAm('lulu@popin.cc', [], owners), ''); // 預算表讀不到時不猜
 });
 
 // ---------- 預算表 ----------

@@ -298,7 +298,20 @@ function rank(p: Pace): number {
   return p.level === 'green' ? 6 : 5;
 }
 
-export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, string>; groups: GroupView[]; hiddenCount: number } {
+const amKey = (email: string) => String(email ?? '').split('@')[0].toLowerCase();
+
+/**
+ * 進頁面預設篩選誰：只有「預算表負責AM 欄上的人」、而且有顯示中的列，才預設看自己；
+ * 其他人（例如 benson 名下只有 3 月的舊測試設定）一律預設全部，免得一進來空白。回 '' 代表全部。
+ */
+export function defaultAm(me: string | null, amNames: string[], owners: string[]): string {
+  if (!me) return '';
+  const k = amKey(me);
+  if (!amNames.some((n) => n.toLowerCase() === k)) return '';
+  return owners.some((o) => amKey(o) === k) ? k : '';
+}
+
+export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, string>; groups: GroupView[]; hiddenCount: number; owners: string[] } {
   const yesterday = addDays(inp.today, -1);
   const dataThrough = Object.fromEntries(PLATFORMS.map((p) => [p, ''])) as Record<Platform, string>;
   const idx = new Map<string, Map<string, number>>();
@@ -336,5 +349,7 @@ export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, st
     });
   }
   groups.sort((a, b) => rank(a.pace) - rank(b.pace) || b.pace.budget - a.pace.budget || a.name.localeCompare(b.name));
-  return { dataThrough, groups, hiddenCount };
+  // 篩選按鈕只放顯示中的列的負責人（早已結束、沒顯示的設定的負責人不放，不然按下去是空的）
+  const owners = [...new Set(groups.flatMap((g) => g.owners))].filter(Boolean).sort();
+  return { dataThrough, groups, hiddenCount, owners };
 }

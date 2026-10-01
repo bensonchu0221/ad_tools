@@ -10,7 +10,7 @@ import { currentUser } from '../../core/auth.js';
 import {
   pacingBhConfigs, pacingWarehouseSpend, pacingBhVSpend, pacingKnownAccounts, pacingMerges, pacingMerge, pacingUnmerge,
 } from '../../core/store.js';
-import { assemble, addDays, twToday, PACE, PLATFORMS, type BhConfig, type Platform, type SpendRow } from './calc.js';
+import { assemble, defaultAm, addDays, twToday, PACE, PLATFORMS, type BhConfig, type Platform, type SpendRow } from './calc.js';
 import { parseSheet, sheetGaps, monthTab, type SheetRow, type KnownName } from './sheet.js';
 import { fetchSheetValues, fetchSheetGid, SHEET_URL } from './source.js';
 import { pacingPage } from './page.js';
@@ -62,7 +62,7 @@ export async function buildPacingData(me: string | null) {
   const sheet = await sheetPart(today, configs, knownNames);
   return {
     today, me, ...out, sheet, amNames: sheet.amNames, pace: PACE, sheetUrl: SHEET_URL, bhUrl: BH_URL,
-    owners: [...new Set(configs.map((c) => c.owner))].filter(Boolean).sort(),
+    defaultAm: defaultAm(me, sheet.amNames, out.owners),
   };
 }
 
