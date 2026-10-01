@@ -10,6 +10,7 @@ popin 內部工具集（取代舊 dctool）。
 - tool#7＝FUI 面板（`/tools/fuidash`）：**視覺語言實驗頁，全部是合成假資料**，不接任何後端。2026-08-27 建立，起因是想把科幻片 HUD 那套「資訊密度＋發光訊號」在專案裡真的做一次。不上首頁導覽列（比照 `adstream-lab`），只走直接網址。
 - tool#8＝D1 影音報表（`/tools/d1videoad`）：D1 平台**影音廣告**的曝光／點擊／25-50-75%／完整播放報表，含折線圖、campaign 表格與 Excel 匯出。2026-09-01 建立，**零資料表、零排程**（清單即時查 Firestore、成效即時打 Action4）。**D 平台報表 API 完全拿不到影音**，見下。
 - tool#9＝nexus 資料倉庫（`/tools/nexus`，首頁與導覽列「資料倉庫」）：四平台全帳戶「素材 × 日」每日寫進 BQ `popinpoc1.reporting.nexus_*`，給 Looker Studio（老闆以 customer 角度看）與各報表工具共用。2026-09-23 建立。
+- tool#10＝走速（`/tools/pacing`，首頁與導覽列「走速」）：AM 在 BH（Budget Hunter，repo `r_bulk_upload`）設定的「平台帳戶×預算×走期」改成**一個預算一列**看各平台加總的走速、點開看各平台。**BH 只讀不改**；花費讀 nexus（D1 影音暫讀 BH）；業務預算表（每月 deliver Sheet）只拿來抓漏。2026-10-01 建立。
 - Token 管理（共用工具 `/tools/tokens`）：集中維護 D 帳號 token 與 MGID token 的 UI（單頁 D／MGID 分頁切換）。R token 走全域 env 自動選取，無管理頁。2026-07-11 從 adpreview 搬出獨立。
 
 ## 溝通與程式規範
@@ -62,5 +63,6 @@ popin 內部工具集（取代舊 dctool）。
 - tool#7 FUI 面板 → `src/tools/fuidash/CLAUDE.md`
 - tool#8 D1 影音報表 → `src/tools/d1videoad/CLAUDE.md`
 - tool#9 nexus 資料倉庫 → `src/tools/nexus/CLAUDE.md`
+- tool#10 走速 → `src/tools/pacing/CLAUDE.md`
 - Token 管理頁 → `src/tools/tokens/CLAUDE.md`
 - 待辦（各工具線上待驗清單） → `docs/TODO.md`

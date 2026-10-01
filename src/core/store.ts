@@ -2652,3 +2652,126 @@ export async function nexusReconFor(dt: string): Promise<{ checkedAt: string | n
     })),
   };
 }
+
+// ---------- tool#10 走速（pacing）----------
+// BH（Budget Hunter，repo r_bulk_upload）跟本工具在同一個 Cloud SQL，庫名 budget_hunter；本工具對它只讀不寫。
+// 手動合併表 pacing_merges 是本工具自管表，放在連線預設庫 ad_tools。
+const BH_DB = process.env.BH_DB ?? 'budget_hunter';
+
+export interface PacingBhRow {
+  id: number; platform: string; accountId: string; accountName: string; budget: number; start: string; end: string; owner: string;
+}
+
+/** BH 的 active 設定（AM 在 BH 上傳的「平台帳戶×預算×走期」）。 */
+export async function pacingBhConfigs(): Promise<PacingBhRow[]> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [rows] = await p.query(
+    `SELECT id, platform, account_id, account_name, budget,
+            DATE_FORMAT(start_date,'%Y-%m-%d') AS s, DATE_FORMAT(end_date,'%Y-%m-%d') AS e, owner_email
+       FROM \`${BH_DB}\`.bh_accounts WHERE status = 'active'`
+  );
+  return (rows as any[]).map((r) => ({
+    id: Number(r.id), platform: r.platform, accountId: String(r.account_id), accountName: r.account_name ?? '',
+    budget: Number(r.budget), start: r.s, end: r.e, owner: r.owner_email ?? '',
+  }));
+}
+
+/** 倉庫的帳戶×日花費（D/R/M/P）：nexus 每日批次寫 BQ 時順手記在 nexus_coverage，不必查 BQ。 */
+export async function pacingWarehouseSpend(sd: string, ed: string): Promise<{ platform: string; accountId: string; dt: string; spend: number }[]> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [rows] = await p.query(
+    `SELECT platform, account_id, DATE_FORMAT(dt,'%Y-%m-%d') AS dt, spend FROM nexus_coverage WHERE dt BETWEEN ? AND ?`, [sd, ed]
+  );
+  return (rows as any[]).map((r) => ({ platform: r.platform, accountId: String(r.account_id), dt: r.dt, spend: Number(r.spend) }));
+}
+
+/**
+ * V（D1 影音）花費：倉庫還沒有 D1 影音，先讀 BH 自己用 Action4 抓好的 bh_daily_stats。
+ * 那張表只用 account_id 當鍵（沒有平台欄）；V 的 account_id 是 D1 帳戶名字串，不會跟數字 ID 撞。
+ */
+export async function pacingBhVSpend(accountIds: string[], sd: string, ed: string): Promise<{ accountId: string; dt: string; spend: number }[]> {
+  if (!accountIds.length) return [];
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [rows] = await p.query(
+    `SELECT account_id, DATE_FORMAT(date,'%Y-%m-%d') AS dt, spend FROM \`${BH_DB}\`.bh_daily_stats
+      WHERE account_id IN (?) AND date BETWEEN ? AND ?`, [accountIds, sd, ed]
+  );
+  return (rows as any[]).map((r) => ({ accountId: String(r.account_id), dt: r.dt, spend: Number(r.spend) }));
+}
+
+/** 系統認得的帳戶：D/M token 表＋倉庫出現過的帳戶（只取名稱，不取 token）。抓 BH 設定錯誤與預算表抓漏用。 */
+export async function pacingKnownAccounts(): Promise<{ platform: string; accountId: string; name: string }[]> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [[d], [m], [c]] = await Promise.all([
+    p.query(`SELECT account_id, account_name FROM \`${TOKENS_DB}\`.d_tokens`),
+    p.query(`SELECT api_client_id, client_name FROM \`${TOKENS_DB}\`.mgid_tokens`),
+    p.query(`SELECT platform, account_id, MAX(account_name) AS account_name FROM nexus_coverage GROUP BY platform, account_id`),
+  ]);
+  return [
+    ...(d as any[]).map((r) => ({ platform: 'D', accountId: String(r.account_id), name: r.account_name ?? '' })),
+    ...(m as any[]).map((r) => ({ platform: 'M', accountId: String(r.api_client_id), name: r.client_name ?? '' })),
+    ...(c as any[]).map((r) => ({ platform: r.platform, accountId: String(r.account_id), name: r.account_name ?? '' })),
+  ];
+}
+
+let pacingSchemaReady = false;
+async function pacingPool(): Promise<mysql.Pool> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  if (pacingSchemaReady) return p;
+  // 手動合併：一筆 BH 設定（bh_id＝bh_accounts.id）屬於哪個合併群組。同一群組的設定在走速頁併成一列。
+  await p.query(`
+    CREATE TABLE IF NOT EXISTS pacing_merges (
+      bh_id INT NOT NULL PRIMARY KEY,
+      group_id VARCHAR(32) NOT NULL,
+      merged_by VARCHAR(255) NOT NULL DEFAULT '',
+      merged_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_group (group_id)
+    ) DEFAULT CHARSET=utf8mb4
+  `);
+  pacingSchemaReady = true;
+  return p;
+}
+
+export async function pacingMerges(): Promise<{ bhId: number; groupId: string }[]> {
+  const p = await pacingPool();
+  const [rows] = await p.query(`SELECT bh_id, group_id FROM pacing_merges`);
+  return (rows as any[]).map((r) => ({ bhId: Number(r.bh_id), groupId: r.group_id }));
+}
+
+/** 合併：選到的設定原本若已在別的合併群組，整個舊群組一起搬進新群組（等於把幾個合併群組再併成一個）。 */
+export async function pacingMerge(bhIds: number[], by: string): Promise<string> {
+  const p = await pacingPool();
+  const groupId = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [old] = await conn.query(`SELECT DISTINCT group_id FROM pacing_merges WHERE bh_id IN (?)`, [bhIds]);
+    const oldIds = (old as any[]).map((r) => r.group_id);
+    if (oldIds.length) await conn.query(`UPDATE pacing_merges SET group_id = ? WHERE group_id IN (?)`, [groupId, oldIds]);
+    await conn.query(
+      `INSERT INTO pacing_merges (bh_id, group_id, merged_by) VALUES ?
+         ON DUPLICATE KEY UPDATE group_id = VALUES(group_id), merged_by = VALUES(merged_by), merged_at = CURRENT_TIMESTAMP`,
+      [bhIds.map((id) => [id, groupId, by])]
+    );
+    await conn.commit();
+    return groupId;
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+/** 拆開：刪掉這些合併群組，設定回到自動分組。 */
+export async function pacingUnmerge(groupIds: string[]): Promise<number> {
+  if (!groupIds.length) return 0;
+  const p = await pacingPool();
+  const [r] = await p.query(`DELETE FROM pacing_merges WHERE group_id IN (?)`, [groupIds]);
+  return (r as mysql.ResultSetHeader).affectedRows;
+}

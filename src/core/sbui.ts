@@ -14,6 +14,7 @@ const NAV: { key: string; label: string; href: string }[] = [
   { key: 'coupangads', label: '酷澎聯盟', href: '/tools/coupangads' },
   { key: 'd1videoad', label: 'D1 影音', href: '/tools/d1videoad' },
   { key: 'nexus', label: '資料倉庫', href: '/tools/nexus' },
+  { key: 'pacing', label: '走速', href: '/tools/pacing' },
 ];
 
 // 共用 CSS：base（變數/字體/版面/topbar/分頁）＋ 通用表單元件（卡片/輸入/可搜尋下拉/訊息/表格/狀態）。
