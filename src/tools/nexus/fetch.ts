@@ -8,7 +8,7 @@ import { fetchReport } from '../../core/rixbee.js';
 import {
   fetchMgidReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex, getClientCurrency, getClientTimezone, type MgidClient, type MgidReportRow,
 } from '../../core/mgid.js';
-import { fetchRedashDeviceDaily, type RedashRow } from '../../core/mgidRedash.js';
+import { fetchRedashDeviceDaily, fetchRedashTeaserDaily, type RedashRow } from '../../core/mgidRedash.js';
 import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../core/store.js';
 import { fetchPrismReportAll, normalizePrismDate } from '../../core/prism.js';
 import { fetchCvDetailMap } from '../adstream/run.js';
@@ -412,12 +412,43 @@ export function toMRedashDeviceRows(o: {
 }
 
 /**
+ * Redash 墊底（2026-10-05 使用者同意）：token 表沒有的帳戶，事實表（素材層）改用 Redash 素材級數字補上，
+ * Looker 才不會整個帳戶看不到。account_id 一樣記 client:<Client ID>，前綴本身就是「這是墊底」的標記。
+ *  - 拿得到：campaign、teaser ID、ad_requests、曝光、點擊（跟 API 完全一致）、main goal 轉換（記在 conv_buy，跟裝置表同一套）
+ *  - 拿不到：標題／圖片／落地頁（NULL）、interest／decision 轉換（NULL＝拿不到，不是 0）
+ *  - 花費：Redash 台幣＝美金 × 單一固定匯率。2026-10-05 實測 22 帳戶比 API 計費低 0.02~0.20%（合計 −0.19%），
+ *    不做校正（乘係數是假精確），幣別記 twd
+ * 只收對不上 owner 的 campaign、日期落在區間內、而且有任何數字的列。純函式。
+ */
+export function toMRedashOrphanFacts(o: {
+  rows: RedashRow[]; owners: Map<string, MOwner>; sd: string; ed: string; syncedAt: string;
+}): Row[] {
+  const out: Row[] = [];
+  for (const r of o.rows) {
+    if (o.owners.has(r.campaignId)) continue;
+    const date = ymdDash(r.date);
+    if (!date || date < o.sd || date > o.ed) continue;
+    if (!r.imp && !r.click && !r.spendUsd && !r.convBuy && !r.adRequests) continue;
+    out.push({
+      date, account_id: `${M_UNMAPPED_PREFIX}${r.clientId}`, account_name: r.clientName, currency: 'twd',
+      campaign_id: str(r.campaignId), campaign_name: str(r.campaignName),
+      teaser_id: str(r.teaserId), teaser_title: null, teaser_url: null, teaser_image: null,
+      ad_requests: int(r.adRequests), imp: int(r.imp), click: int(r.click), spend: money(r.spendTwd),
+      conv_interest: null, conv_decision: null, conv_buy: int(r.convBuy),
+      synced_at: o.syncedAt,
+    });
+  }
+  return out;
+}
+
+/**
  * M 全平台裝置表：對照帳戶（各帳戶 campaign 清單、時區、幣別）→ 每個時區查一次 Redash → 轉列。
  * 某個帳戶 token 壞掉只記 warning：它的 campaign 對不上，照樣以 client:<Client ID> 寫入，不丟數字。
  */
 export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
   const warnings: string[] = [];
   const owners = new Map<string, MOwner>();
+  const listFailed: { id: string; name: string }[] = [];
   const accounts = (await listMgidAccounts()).filter((a) => !/^98/.test(a.apiClientId));
   for (const [i, a] of accounts.entries()) {
     onPhase(`M 裝置：對照帳戶 ${i + 1}/${accounts.length}（${a.clientName}）`);
@@ -429,11 +460,24 @@ export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: strin
       const owner = { accountId: a.apiClientId, accountName: a.clientName, tz: await getClientTimezone(client), currency: await getClientCurrency(client) };
       for (const cid of campaigns) if (!owners.has(cid)) owners.set(cid, owner);
     } catch (e: any) {
+      listFailed.push({ id: a.apiClientId, name: a.clientName });
       warnings.push(`M ${a.clientName}（${a.apiClientId}）campaign 清單抓不到，它的裝置數字會記在 client:<Client ID>：${String(e?.message ?? e).slice(0, 120)}`);
     }
   }
   const apiSpend = new Map<string, number>();
-  for (const c of await nexusCoverageRows(sd, ed)) if (c.platform === 'M') apiSpend.set(`${c.accountId}|${c.dt}`, c.spend);
+  const hasFacts = new Set<string>();
+  for (const c of await nexusCoverageRows(sd, ed)) {
+    if (c.platform !== 'M') continue;
+    apiSpend.set(`${c.accountId}|${c.dt}`, c.spend);
+    if (c.rows > 0) hasFacts.add(c.accountId);
+  }
+  // 防重複計算：清單抓不到的帳戶如果這段已經有事實列（它自己的 job 抓成功了），它的 campaign 會被當成沒 token、
+  // 再用 Redash 墊一份 ⇒ 同一筆數字算兩次。這種多半是暫時性錯誤，整個 job 失敗走重試。
+  // 這段沒有事實列的（token 壞了、帳戶 job 也失敗）照常墊底，正好補上它的缺口。
+  const risky = listFailed.filter((a) => hasFacts.has(a.id));
+  if (risky.length) {
+    throw new Error(`M ${risky.map((a) => `${a.name}（${a.id}）`).join('、')} campaign 清單抓不到、但這段已有事實列，墊底會重複計算，稍後重試`);
+  }
   const tzs = [...new Set([M_DEFAULT_TZ, ...[...owners.values()].map((o) => o.tz)])];
   const byTz: Record<string, RedashRow[]> = {};
   for (const tz of tzs) {
@@ -441,8 +485,16 @@ export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: strin
     byTz[tz] = await fetchRedashDeviceDaily(sd, ed, tz, { onWait: (sec) => onPhase(`M 裝置：Redash 排隊中 ${sec} 秒（${tz}）`) });
   }
   const { rows, unmapped } = toMRedashDeviceRows({ byTz, owners, apiSpend, sd, ed, syncedAt });
-  if (unmapped.length) warnings.push(`Redash 有、token 表沒有的帳戶：${unmapped.map((u) => `${u.clientName}（Client ID ${u.clientId}）`).join('、')}`);
-  return { facts: [], device: rows, warnings };
+  // token 表沒有的帳戶：事實表用 Redash 素材級墊底。對不上的帳戶一律當台北時區（跟上面裝置列同一套）。
+  // 沒有對不上的帳戶就不多查；但寫入時照樣會清掉這段的舊墊底列（帳戶補了 token 之後就靠這個退場）。
+  let facts: Row[] = [];
+  if (unmapped.length) {
+    onPhase(`M 裝置：Redash 素材級查詢 ${sd}~${ed}（替 ${unmapped.length} 個沒 token 的帳戶墊底）`);
+    const teasers = await fetchRedashTeaserDaily(sd, ed, M_DEFAULT_TZ, { onWait: (sec) => onPhase(`M 裝置：Redash 素材級排隊中 ${sec} 秒`) });
+    facts = toMRedashOrphanFacts({ rows: teasers, owners, sd, ed, syncedAt });
+    warnings.push(`Redash 有、token 表沒有的帳戶（素材層已用 Redash 墊底 ${facts.length} 列）：${unmapped.map((u) => `${u.clientName}（Client ID ${u.clientId}）`).join('、')}`);
+  }
+  return { facts, device: rows, warnings };
 }
 
 // ────────────────────────────── P ──────────────────────────────

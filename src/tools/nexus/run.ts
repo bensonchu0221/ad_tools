@@ -12,7 +12,7 @@ import {
   nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs, withNexusBqWriteLock,
   type NexusJobInput, type NexusJobRow, type NexusCoverageEntry, type NexusPlatform,
 } from '../../core/store.js';
-import { fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, type Row, type FetchResult } from './fetch.js';
+import { fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, M_UNMAPPED_PREFIX, type Row, type FetchResult } from './fetch.js';
 import {
   FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX,
   integratedViewSql,
@@ -26,7 +26,7 @@ export const DAILY_DAYS = 2;
 export const BACKFILL_CHUNK_DAYS: Record<NexusPlatform, number> = { D: 14, R: 30, M: 30, P: 30 };
 /** M 裝置 job（Redash 全平台）的回補切段：Redash 一次查太多天會排很久，切 7 天。 */
 export const M_DEVICE_CHUNK_DAYS = 7;
-/** M 裝置 job 的帳戶欄：'*'＝全平台，只寫裝置表（事實表由各帳戶 job 寫）。 */
+/** M 裝置 job 的帳戶欄：'*'＝全平台，寫裝置表＋事實表的 client: 墊底列（其餘事實列由各帳戶 job 寫）。 */
 export const M_DEVICE_JOB = '*';
 const isMDeviceJob = (j: { platform: NexusPlatform; accountId: string }) => j.platform === 'M' && j.accountId === M_DEVICE_JOB;
 
@@ -142,8 +142,11 @@ export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId
   }
 }
 
-/** 寫哪幾張表：M 的事實表（各帳戶 job）與裝置表（Redash 全平台 job）分開寫，其餘平台一起寫。 */
-export type SliceTables = 'both' | 'facts' | 'device';
+/**
+ * 寫哪幾張表：M 的事實表（各帳戶 job）與裝置表（Redash 全平台 job）分開寫，其餘平台一起寫。
+ * 'device_orphans'＝M Redash 全平台 job：整段裝置表＋事實表裡 client: 開頭的墊底列（只動這些，正式帳戶的事實列碰不到）。
+ */
+export type SliceTables = 'both' | 'facts' | 'device' | 'device_orphans';
 
 /** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表與／或裝置表的這段切片刪掉再寫回。 */
 export function buildReplaceSql(o: {
@@ -156,7 +159,11 @@ export function buildReplaceSql(o: {
   const range = `date BETWEEN DATE ${sqlString(o.sd)} AND DATE ${sqlString(o.ed)}`;
   const cols = (c: string[]) => c.join(', ');
   const lines = ['BEGIN TRANSACTION;'];
-  if (tables !== 'device') {
+  if (tables === 'device_orphans') {
+    // 這段的墊底列一律先刪：帳戶補了 token 之後重跑，它就不會再是對不上的帳戶，舊墊底列在這裡退場（不會跟正式列重複）
+    lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range} AND STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)});`);
+    if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
+  } else if (tables !== 'device') {
     lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range}${acct};`);
     if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
   }
@@ -206,9 +213,14 @@ export async function retryOnBqConflict<T>(
 export async function writeSlice(o: {
   platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; tables?: SliceTables;
 }): Promise<void> {
-  if (!bqReady) await ensureNexusBq();
+  // 防呆先做、再碰 BQ
   assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`);
   assertRowsInSlice(o.device, o.sd, o.ed, o.accountId, `${o.platform} 裝置表`);
+  if (o.tables === 'device_orphans') {
+    const bad = o.facts.find((r) => !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX));
+    if (bad) throw new Error(`M 墊底列的帳戶 ${String(bad.account_id)} 不是 ${M_UNMAPPED_PREFIX} 開頭，拒絕寫入（會跟正式帳戶重複）`);
+  }
+  if (!bqReady) await ensureNexusBq();
   const tag = `${o.platform}_${(o.accountId ?? 'all').replace(/[^A-Za-z0-9]/g, '')}`;
   const stages: string[] = [];
   try {
@@ -296,8 +308,8 @@ export async function runNexusJob(
   const syncedAt = new Date().toISOString();
   const accountId = job.accountId === '*' ? null : job.accountId;
   const deviceOnly = isMDeviceJob(job);
-  // M：各帳戶 job 只寫事實表，裝置表整個交給 Redash 全平台 job（兩邊不會互刪）
-  const tables: SliceTables = deviceOnly ? 'device' : job.platform === 'M' ? 'facts' : 'both';
+  // M：各帳戶 job 只寫事實表，裝置表＋沒 token 帳戶的墊底事實列交給 Redash 全平台 job（兩邊不會互刪）
+  const tables: SliceTables = deviceOnly ? 'device_orphans' : job.platform === 'M' ? 'facts' : 'both';
   const label = `${job.platform} ${job.accountName} ${job.sd}~${job.ed}`;
   let res: FetchResult;
   try {

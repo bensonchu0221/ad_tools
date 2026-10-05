@@ -20,8 +20,10 @@ export interface RedashRow {
   clientName: string;
   campaignId: string;
   campaignName: string;
-  /** Redash 原始裝置名：desktop／mobile／tablet／smarttv… */
+  /** Redash 原始裝置名：desktop／mobile／tablet／smarttv…（素材級查詢沒拆裝置時是 '-'） */
   device: string;
+  /** teaser ID（只有素材級查詢有值；裝置查詢沒拆 teaser 時是空字串） */
+  teaserId: string;
   /** Impressions (Viewable)＝API impressions */
   imp: number;
   /** Impressions (Total)＝ad requests */
@@ -34,9 +36,23 @@ export interface RedashRow {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+type RedashOpts = { timeoutMs?: number; onWait?: (sec: number) => void };
+
 /** 日 × campaign × 裝置（全部 Broadciel 帳戶），日期依 tz 切。 */
-export async function fetchRedashDeviceDaily(
-  sd: string, ed: string, tz: string, opts: { timeoutMs?: number; onWait?: (sec: number) => void } = {}
+export function fetchRedashDeviceDaily(sd: string, ed: string, tz: string, opts: RedashOpts = {}): Promise<RedashRow[]> {
+  return runRedash(sd, ed, tz, { Teaser_Breakdown: '0', dimension1: 'device' }, opts);
+}
+
+/**
+ * 日 × campaign × teaser（全部 Broadciel 帳戶），日期依 tz 切。nexus 拿來替 token 表沒有的帳戶墊素材層。
+ * 2026-10-05 實測：只有 teaser ID，沒有標題／圖片／落地頁；曝光、點擊跟 API 完全一致。
+ */
+export function fetchRedashTeaserDaily(sd: string, ed: string, tz: string, opts: RedashOpts = {}): Promise<RedashRow[]> {
+  return runRedash(sd, ed, tz, { Teaser_Breakdown: 'teaser', dimension1: '0' }, opts);
+}
+
+async function runRedash(
+  sd: string, ed: string, tz: string, breakdown: { Teaser_Breakdown: string; dimension1: string }, opts: RedashOpts
 ): Promise<RedashRow[]> {
   const key = process.env.MGID_REDASH_KEY;
   if (!key) throw new Error('MGID_REDASH_KEY 未設定（Secret Manager ad-tools-nexus-mgid-redash-key）');
@@ -44,10 +60,10 @@ export async function fetchRedashDeviceDaily(
     // 同參數 1 小時內的結果直接用快取：重試或同一天第二次跑不必再排隊
     max_age: 3600,
     parameters: {
-      Date: { start: sd, end: ed }, timezone: tz, Date_Breakdown: 'date', Teaser_Breakdown: '0',
+      Date: { start: sd, end: ed }, timezone: tz, Date_Breakdown: 'date', Teaser_Breakdown: breakdown.Teaser_Breakdown,
       client_id: ['0'], curator: ['ALL'], country_name: ['ALL'], camp_types: ['ALL'], teas_category: 'ALL',
       pub_subnet: ['-1'], tier: ['ALL'], site_language: ['ALL'],
-      dimension1: 'device', dimension2: '0', dimension3: '0', dimension4: '0', dimension5: '0',
+      dimension1: breakdown.dimension1, dimension2: '0', dimension3: '0', dimension4: '0', dimension5: '0',
     },
   });
   const started = Date.now();
@@ -78,6 +94,7 @@ export function toRedashRows(raw: any[]): RedashRow[] {
     return {
       date: String(r['Date Breakdown']), clientId: String(r['Client ID']), clientName: String(r['Clients Name'] ?? '').trim(),
       campaignId: String(r['Campaign ID']), campaignName: String(r['Campaign Name'] ?? ''), device: String(r.dimension_1 ?? ''),
+      teaserId: /^\d+$/.test(String(r['Teaser Breakdown'] ?? '')) && String(r['Teaser Breakdown']) !== '0' ? String(r['Teaser Breakdown']) : '',
       imp: n(r['Impressions (Viewable)']), adRequests: n(r['Impressions (Total)']), click: n(r.Clicks),
       spendUsd: n(r['Spent, USD']), spendTwd: n(r['Spent, TWD']), convBuy: n(r['Conversion (main goal)']),
     };
