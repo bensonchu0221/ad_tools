@@ -13,7 +13,8 @@ import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../cor
 import { fetchPrismReportAll, normalizePrismDate } from '../../core/prism.js';
 import { fetchCvDetailMap } from '../adstream/run.js';
 import { parseLooseDate } from '../weeklyreport/report.js';
-import { D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, type Platform } from './schema.js';
+import { bqQuery, sqlString } from '../../core/bigquery.js';
+import { D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, type Platform } from './schema.js';
 
 export type Row = Record<string, unknown>;
 export interface FetchResult { facts: Row[]; device: Row[]; warnings: string[] }
@@ -412,6 +413,25 @@ export function toMRedashDeviceRows(o: {
 }
 
 /**
+ * 帳戶對照補洞：各帳戶「現行」campaign 清單不含已刪除的 campaign，但它自己的 job 照樣透過 statistics-reports
+ * 把那些 campaign 的數字寫進事實表了 ⇒ 只看清單會把它當成沒 token 的帳戶，墊底再寫一份＝重複計算。
+ * （2026-10-05 實例：TANITA 860511 的 campaign 在 Redash 掛 Client ID 980137，7/19~8/25 墊底多算 2,826,916 曝光。）
+ * ⇒ 這段事實表裡正式帳戶出現過的 campaign 一律算那個帳戶的（清單已對到的不覆蓋）。純函式，回傳補了幾支。
+ */
+export function addFactCampaignOwners(
+  owners: Map<string, MOwner>, accountOwners: Map<string, MOwner>, pairs: { accountId: string; campaignId: string }[]
+): number {
+  let added = 0;
+  for (const { accountId, campaignId } of pairs) {
+    const owner = accountOwners.get(accountId);
+    if (!owner || !campaignId || owners.has(campaignId)) continue;
+    owners.set(campaignId, owner);
+    added++;
+  }
+  return added;
+}
+
+/**
  * Redash 墊底（2026-10-05 使用者同意）：token 表沒有的帳戶，事實表（素材層）改用 Redash 素材級數字補上，
  * Looker 才不會整個帳戶看不到。account_id 一樣記 client:<Client ID>，前綴本身就是「這是墊底」的標記。
  *  - 拿得到：campaign、teaser ID、ad_requests、曝光、點擊（跟 API 完全一致）、main goal 轉換（記在 conv_buy，跟裝置表同一套）
@@ -448,6 +468,7 @@ export function toMRedashOrphanFacts(o: {
 export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
   const warnings: string[] = [];
   const owners = new Map<string, MOwner>();
+  const accountOwners = new Map<string, MOwner>();
   const listFailed: { id: string; name: string }[] = [];
   const accounts = (await listMgidAccounts()).filter((a) => !/^98/.test(a.apiClientId));
   for (const [i, a] of accounts.entries()) {
@@ -458,6 +479,7 @@ export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: strin
       const client: MgidClient = { apiClientId: a.apiClientId, token, clientName: a.clientName };
       const campaigns = Object.keys(await fetchCampaignNameMap(client));
       const owner = { accountId: a.apiClientId, accountName: a.clientName, tz: await getClientTimezone(client), currency: await getClientCurrency(client) };
+      accountOwners.set(a.apiClientId, owner);
       for (const cid of campaigns) if (!owners.has(cid)) owners.set(cid, owner);
     } catch (e: any) {
       listFailed.push({ id: a.apiClientId, name: a.clientName });
@@ -478,6 +500,10 @@ export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: strin
   if (risky.length) {
     throw new Error(`M ${risky.map((a) => `${a.name}（${a.id}）`).join('、')} campaign 清單抓不到、但這段已有事實列，墊底會重複計算，稍後重試`);
   }
+  // 事實表裡正式帳戶寫過的 campaign（含已從清單刪掉的）也算它的。單一 M 事實表、只選兩欄、日期分區，掃描量很小
+  const factPairs = await bqQuery(`SELECT DISTINCT account_id, campaign_id FROM \`${FACT_TABLE.M}\`
+    WHERE date BETWEEN DATE ${sqlString(sd)} AND DATE ${sqlString(ed)} AND NOT STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)}) AND campaign_id IS NOT NULL`);
+  addFactCampaignOwners(owners, accountOwners, factPairs.map((r) => ({ accountId: String(r.account_id), campaignId: String(r.campaign_id) })));
   const tzs = [...new Set([M_DEFAULT_TZ, ...[...owners.values()].map((o) => o.tz)])];
   const byTz: Record<string, RedashRow[]> = {};
   for (const tz of tzs) {

@@ -2,7 +2,7 @@
 // 全程假資料，不連 API／BQ／DB。用法：npx tsx tests/verify_nexus.mts
 import assert from 'node:assert/strict';
 import {
-  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -162,6 +162,25 @@ await ok('Redash 原始列：欄名對應、缺欄位（查詢被改）直接丟
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '28063408' }])[0].teaserId, '28063408');
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '0' }])[0].teaserId, '');
   assert.equal(toRedashRows([base])[0].teaserId, '');
+});
+
+await ok('M 帳戶對照：事實表裡正式帳戶寫過的 campaign（清單已刪）也算它的，不會被墊底重複計算（2026-10-05 TANITA 980137）', () => {
+  const tanita = { accountId: '860511', accountName: 'TANITA', tz: 'Asia/Taipei', currency: 'twd' };
+  const other = { accountId: '860212', accountName: '新素簡', tz: 'Asia/Taipei', currency: 'twd' };
+  const owners = new Map([['c-live', tanita], ['c-shared', other]]);
+  const n = addFactCampaignOwners(owners, new Map([['860511', tanita], ['860212', other]]), [
+    { accountId: '860511', campaignId: 'c-deleted' }, // 清單沒有、事實表有 → 補給 860511
+    { accountId: '860511', campaignId: 'c-shared' }, // 清單已對到別人 → 不覆蓋
+    { accountId: '999999', campaignId: 'c-x' }, // 清單抓不到的帳戶 → 沒有 owner 資訊，不補
+  ]);
+  assert.equal(n, 1);
+  assert.equal(owners.get('c-deleted')?.accountId, '860511');
+  assert.equal(owners.get('c-shared')?.accountId, '860212');
+  assert.equal(owners.has('c-x'), false);
+  // 接著產墊底：c-deleted 有 owner 了 → 不會再記成 client:980137
+  const facts = toMRedashOrphanFacts({ rows: [rd({ date: '2026-08-01', clientId: '980137', campaignId: 'c-deleted', teaserId: '1', imp: 100 })],
+    owners, sd: '2026-08-01', ed: '2026-08-01', syncedAt: T });
+  assert.equal(facts.length, 0);
 });
 
 await ok('M 墊底：只收對不上 owner 的 campaign、記 client:<Client ID>、Redash 台幣、拿不到的欄位 NULL', () => {
