@@ -456,6 +456,22 @@ export function addFactCampaignOwners(
 }
 
 /**
+ * 排除清單（SKIP_ACCOUNTS）的帳戶不跑自己的 job，但 token 還在、campaign 清單照樣對得到 ⇒ 萬一它又有量，
+ * 裝置表會掛在它名下、素材層卻沒人寫＝漏。所以這段事實表裡沒有它寫過的 campaign 一律放掉，改走 client: 墊底。
+ * 這段有它的舊事實列（回補排除前的歷史）就保留歸屬，免得跟舊列重複。純函式，回傳放掉幾支。
+ */
+export function releaseSkippedOwners(
+  owners: Map<string, MOwner>, isSkippedAccount: (accountId: string) => boolean, pairs: { accountId: string; campaignId: string }[]
+): number {
+  const written = new Set(pairs.map((p) => `${p.accountId}|${p.campaignId}`));
+  let released = 0;
+  for (const [cid, o] of owners) {
+    if (isSkippedAccount(o.accountId) && !written.has(`${o.accountId}|${cid}`)) { owners.delete(cid); released++; }
+  }
+  return released;
+}
+
+/**
  * Redash 墊底（2026-10-05 使用者同意）：token 表沒有的帳戶，事實表（素材層）改用 Redash 素材級數字補上，
  * Looker 才不會整個帳戶看不到。account_id 一樣記 client:<Client ID>，前綴本身就是「這是墊底」的標記。
  *  - 拿得到：campaign、teaser ID、ad_requests、曝光、點擊（跟 API 完全一致）、main goal 轉換（記在 conv_buy，跟裝置表同一套）
@@ -489,7 +505,9 @@ export function toMRedashOrphanFacts(o: {
  * M 全平台裝置表：對照帳戶（各帳戶 campaign 清單、時區、幣別）→ 每個時區查一次 Redash → 轉列。
  * 某個帳戶 token 壞掉只記 warning：它的 campaign 對不上，照樣以 client:<Client ID> 寫入，不丟數字。
  */
-export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
+export async function fetchMRedashDevice(
+  sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void, isSkippedAccount: (accountId: string) => boolean = () => false
+): Promise<FetchResult> {
   const warnings: string[] = [];
   const owners = new Map<string, MOwner>();
   const accountOwners = new Map<string, MOwner>();
@@ -527,7 +545,9 @@ export async function fetchMRedashDevice(sd: string, ed: string, syncedAt: strin
   // 事實表裡正式帳戶寫過的 campaign（含已從清單刪掉的）也算它的。單一 M 事實表、只選兩欄、日期分區，掃描量很小
   const factPairs = await bqQuery(`SELECT DISTINCT account_id, campaign_id FROM \`${FACT_TABLE.M}\`
     WHERE date BETWEEN DATE ${sqlString(sd)} AND DATE ${sqlString(ed)} AND NOT STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)}) AND campaign_id IS NOT NULL`);
-  addFactCampaignOwners(owners, accountOwners, factPairs.map((r) => ({ accountId: String(r.account_id), campaignId: String(r.campaign_id) })));
+  const pairs = factPairs.map((r) => ({ accountId: String(r.account_id), campaignId: String(r.campaign_id) }));
+  addFactCampaignOwners(owners, accountOwners, pairs);
+  releaseSkippedOwners(owners, isSkippedAccount, pairs);
   const tzs = [...new Set([M_DEFAULT_TZ, ...[...owners.values()].map((o) => o.tz)])];
   const byTz: Record<string, RedashRow[]> = {};
   for (const tz of tzs) {

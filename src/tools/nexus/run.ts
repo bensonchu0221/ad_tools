@@ -73,6 +73,7 @@ export const SKIP_ACCOUNTS: Record<string, string> = {
   'D:1732': '4A_Springtrees_tsh_loan（MediaGo 帳戶，最後異動 2023-02）',
   'D:24492': 'TW_affluentbyte_Eric_NEW（MediaGo 帳戶，最後異動 2023-12）',
   'M:860502': 'Serene House（MGID API 一直回 WAS_SOME_ERROR_TRY_AGAIN_LATER，最後有數字 2026-07-07）',
+  'M:872749': 'MundoPixar 舊帳戶（倉庫 5/21 起從無數字、10/04 起天天 WAS_SOME_ERROR；新 campaign 開在 Client ID 991479，走 Redash 墊底）',
 };
 export const isSkipped = (t: { platform: NexusPlatform; accountId: string }) => `${t.platform}:${t.accountId}` in SKIP_ACCOUNTS;
 
@@ -276,7 +277,7 @@ async function fetchForJob(job: NexusJobInput, syncedAt: string, onPhase: (p: st
         const batch = (job as Partial<NexusJobRow>).batch;
         const pending = batch ? await nexusPendingJobs(batch, 'M', M_DEVICE_JOB) : 0;
         if (pending) throw new NexusDeferError(`M 各帳戶還有 ${pending} 個 job 沒跑完，稍後再產生裝置表`);
-        return fetchMRedashDevice(job.sd, job.ed, syncedAt, onPhase);
+        return fetchMRedashDevice(job.sd, job.ed, syncedAt, onPhase, (id) => isSkipped({ platform: 'M', accountId: id }));
       }
       const token = await getMgidTokenById(job.accountId);
       if (!token) throw new Error(`MGID 帳號 ${job.accountId}（${job.accountName}）在 nexus.mgid_tokens 找不到 token`);

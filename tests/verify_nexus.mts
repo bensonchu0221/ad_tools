@@ -2,7 +2,7 @@
 // 全程假資料，不連 API／BQ／DB。用法：npx tsx tests/verify_nexus.mts
 import assert from 'node:assert/strict';
 import {
-  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -162,6 +162,17 @@ await ok('Redash 原始列：欄名對應、缺欄位（查詢被改）直接丟
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '28063408' }])[0].teaserId, '28063408');
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '0' }])[0].teaserId, '');
   assert.equal(toRedashRows([base])[0].teaserId, '');
+});
+
+await ok('M 排除帳戶：這段沒寫過事實列的 campaign 放掉改走墊底；有舊事實列的保留歸屬', () => {
+  const old = { accountId: '872749', accountName: 'MundoPixar 舊', tz: 'Asia/Taipei', currency: 'twd' };
+  const sh = { accountId: '860502', accountName: 'Serene House', tz: 'Asia/Taipei', currency: 'twd' };
+  const live = { accountId: '860212', accountName: '新素簡', tz: 'Asia/Taipei', currency: 'twd' };
+  const owners = new Map([['p1', old], ['s1', sh], ['s2', sh], ['n1', live]]);
+  const skip = (id: string) => id === '872749' || id === '860502';
+  const n = releaseSkippedOwners(owners, skip, [{ accountId: '860502', campaignId: 's1' }]);
+  assert.equal(n, 2);
+  assert.deepEqual([...owners.keys()].sort(), ['n1', 's1']);
 });
 
 await ok('teaser-stat 只信近 60 天：cutoff 依台北日、更舊的日子拿掉（沿用 statistics-reports）', () => {
@@ -489,6 +500,7 @@ await ok('排除清單：3 個 MediaGo 舊帳戶＋M Serene House 略過、其�
   assert.equal(isSkipped({ platform: 'D', accountId: '31243' }), false);
   assert.equal(isSkipped({ platform: 'M', accountId: '1319' }), false); // 只排除 D 平台的那個 id
   assert.equal(isSkipped({ platform: 'M', accountId: '860502' }), true);
+  assert.equal(isSkipped({ platform: 'M', accountId: '872749' }), true);
   assert.equal(isSkipped({ platform: 'D', accountId: '860502' }), false);
   assert.equal(isSkipped({ platform: 'M', accountId: '860212' }), false);
 });
@@ -645,7 +657,7 @@ await ok('狀態頁：今天還沒入列、還沒比對也能畫', () => {
   assert.match(html, /跑完後比對/);
 });
 
-await ok('健檢：Redash 有、token 表沒有的 M 帳戶 → 已墊底黃燈點名、墊底沒寫進去紅燈', () => {
+await ok('健檢：Redash 有、token 表沒有的 M 帳戶 → 已墊底綠燈只在結論列名單、墊底沒寫進去紅燈', () => {
   const a = healthBase();
   a.recon = { checkedAt: '2026-09-24 04:32:00', rows: [rr('M', `${M_UNMAPPED_PREFIX}991666`, [0, 0, 0], [10, 1, 31.8])] };
   a.recon.rows[0].accountName = '悅GARDEN';
@@ -654,10 +666,9 @@ await ok('健檢：Redash 有、token 表沒有的 M 帳戶 → 已墊底黃燈�
   assert.match(miss.text, /1 個 MGID 帳戶.*墊底也沒寫進素材層.*悅GARDEN（Client ID 991666）/);
   a.recon.rows[0] = { ...rr('M', `${M_UNMAPPED_PREFIX}991666`, [10, 1, 31.8], [10, 1, 31.8]), accountName: '悅GARDEN' };
   const r = evaluateHealth(a);
-  const covered = r.items.find((i) => /token 表沒有/.test(i.text))!;
-  assert.equal(covered.level, 'warn');
-  assert.match(covered.text, /1 個 MGID 帳戶.*Redash 墊底.*悅GARDEN（Client ID 991666）/);
-  assert.equal(r.level, 'warn');
+  assert.equal(r.items.some((i) => /token 表沒有|墊底/.test(i.text)), false);
+  assert.match(r.summary.join('|'), /M 用 Redash 墊底 1 帳.*悅GARDEN（Client ID 991666）/);
+  assert.equal(r.level, 'ok');
 });
 
 await ok('M 墊底寫入防呆：Redash 全平台 job 的事實列不是 client: 開頭 → 拒寫', async () => {

@@ -166,8 +166,8 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       });
     }
     if (parts.length) summary.push(`比對吻合 ${parts.join('／')}`);
-    // M：Redash（MGID 內部全帳戶）有投放、token 表卻沒有的帳戶。素材層會用 Redash 墊底（2026-10-05 起），
-    // 數字不缺但沒有素材圖文、花費是換算值 ⇒ 黃燈提醒補 token（使用者 2026-10-05 拍板降黃）；
+    // M：Redash（MGID 內部全帳戶）有投放、token 表卻沒有的帳戶。素材層會用 Redash 墊底（2026-10-05 起）。
+    // AM 主管給 Redash 就是為了「沒填 token 也不漏」⇒ 墊底是正規路徑，綠燈只在結論區列名單（2026-10-06 使用者拍板）；
     // 墊底沒寫進去（素材層仍是 0）才是真的缺數字 ⇒ 紅燈。
     const orphans = inp.recon.rows.filter((r) => r.platform === 'M' && r.accountId.startsWith(M_UNMAPPED_PREFIX) && (r.device.imp || r.device.spend));
     const names = (rows: typeof orphans) => rows.map((r) => `${r.accountName}（Client ID ${r.accountId.slice(M_UNMAPPED_PREFIX.length)}）`).join('、');
@@ -179,12 +179,7 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
         text: `${missing.length} 個 MGID 帳戶 ${t1} 有投放、但 token 表沒有，Redash 墊底也沒寫進素材層（倉庫缺它的素材數字）：${names(missing)}`,
       });
     }
-    if (covered.length) {
-      items.push({
-        level: 'warn',
-        text: `${covered.length} 個 MGID 帳戶 ${t1} 有投放、但 token 表沒有，素材層暫用 Redash 墊底（無素材圖文、花費為換算值），請到後台取得 token 補進 token 管理頁後回補：${names(covered)}`,
-      });
-    }
+    if (covered.length) summary.push(`M 用 Redash 墊底 ${covered.length} 帳（無 token；無素材圖文、花費為換算值）：${names(covered)}`);
   }
 
   // ⑥ 回補進度（有在跑才報）
