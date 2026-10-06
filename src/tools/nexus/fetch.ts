@@ -307,14 +307,37 @@ export function mergeTeaserStat(
 
 /** 抓單一 MGID 帳號的事實表（沿用 core/mgid：帳戶時區、零點擊 campaign 補救都已內建），數字再以 teaser-stat 校正。
  * 裝置表不在這裡抓：MGID API 的裝置報表會整支排除零點擊 campaign，改由全平台 Redash job 產生（fetchMRedashDevice）。 */
+/**
+ * teaser-stat 只信近這麼多天（2026-10-06 實測）：越舊越不穩——7/08 以前曝光會被分到別的日子（7/04~7/08 加總跟
+ * Redash 一樣 587,964、逐日卻差到 14 萬，點擊不受影響）、7/09~7/14 同一天每次查數字都在變、約 95 天後整個回空；
+ * 9/24 寫入時 7/15 以後（≤71 天）與 8 月（30~55 天）都跟 Redash／statistics-reports 逐日一致。
+ * 更舊的日子保留 statistics-reports（跟 Redash 只差 0.05~0.13%）。每日批次（T-2~T-1）不受影響，只影響回補。
+ */
+export const TEASER_STAT_MAX_AGE_DAYS = 60;
+
+/** teaser-stat 校正的最早日期（台北日 − TEASER_STAT_MAX_AGE_DAYS）。純函式。 */
+export function teaserStatCutoff(now = new Date()): string {
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  const d = new Date(`${today}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - TEASER_STAT_MAX_AGE_DAYS);
+  return d.toISOString().slice(0, 10);
+}
+
+/** 把 teaser-stat 結果裡早於 cutoff 的日子拿掉（那些日子沿用 statistics-reports）。純函式。 */
+export function dropStaleTeaserStat(stats: Record<string, any>, cutoff: string): Record<string, any> {
+  return Object.fromEntries(Object.entries(stats).filter(([d]) => d >= cutoff));
+}
+
 export async function fetchMAccount(
-  client: MgidClient, sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void
+  client: MgidClient, sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void, now = new Date()
 ): Promise<FetchResult> {
   onPhase(`M ${client.clientName}：teaser 報表`);
   const raw = await fetchMgidReport(client, sd, ed);
+  const cutoff = teaserStatCutoff(now);
+  const useTeaserStat = ed >= cutoff; // 整段都太舊就不打 teaser-stat（回補快很多）
   // 要查的 teaser＝原始列出現過的＋「有數字的 campaign」底下全部 teaser（statistics-reports 不回傳生涯零點擊 teaser）
   const meta = new Map<string, MTeaserMeta>();
-  if (raw.length) {
+  if (raw.length && useTeaserStat) {
     const idx = await fetchTeaserIndex(client);
     const campName = new Map(raw.map((r) => [r.campaignId, r.campaignName]));
     for (const cid of campName.keys()) {
@@ -324,11 +347,12 @@ export async function fetchMAccount(
       }
     }
   }
-  const tids = [...new Set([...raw.map((r) => r.teaserId).filter(Boolean), ...meta.keys()])];
+  const tids = useTeaserStat ? [...new Set([...raw.map((r) => r.teaserId).filter(Boolean), ...meta.keys()])] : [];
+  const statSd = sd >= cutoff ? sd : cutoff;
   const stats = new Map<string, Record<string, any>>();
   for (const [i, tid] of tids.entries()) {
     onPhase(`M ${client.clientName}：teaser-stat 校正 ${i + 1}/${tids.length}`);
-    stats.set(tid, await fetchTeaserStat(client, tid, sd, ed));
+    stats.set(tid, dropStaleTeaserStat(await fetchTeaserStat(client, tid, statSd, ed), cutoff));
     await new Promise((r) => setTimeout(r, 150)); // 廣告主 API 併發 6+ 會 429，序列＋節流
   }
   const { rows } = mergeTeaserStat(raw, stats, meta);

@@ -2,7 +2,7 @@
 // 全程假資料，不連 API／BQ／DB。用法：npx tsx tests/verify_nexus.mts
 import assert from 'node:assert/strict';
 import {
-  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -162,6 +162,14 @@ await ok('Redash 原始列：欄名對應、缺欄位（查詢被改）直接丟
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '28063408' }])[0].teaserId, '28063408');
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '0' }])[0].teaserId, '');
   assert.equal(toRedashRows([base])[0].teaserId, '');
+});
+
+await ok('teaser-stat 只信近 60 天：cutoff 依台北日、更舊的日子拿掉（沿用 statistics-reports）', () => {
+  assert.equal(TEASER_STAT_MAX_AGE_DAYS, 60);
+  assert.equal(teaserStatCutoff(new Date('2026-10-06T03:00:00+08:00')), '2026-08-07');
+  assert.equal(teaserStatCutoff(new Date('2026-10-05T23:30:00Z')), '2026-08-07'); // UTC 還是 10-05、台北已 10-06
+  const kept = dropStaleTeaserStat({ '2026-08-06': { shows: 1 }, '2026-08-07': { shows: 2 }, '2026-10-05': { shows: 3 } }, '2026-08-07');
+  assert.deepEqual(Object.keys(kept), ['2026-08-07', '2026-10-05']);
 });
 
 await ok('M 帳戶對照：事實表裡正式帳戶寫過的 campaign（清單已刪）也算它的，不會被墊底重複計算（2026-10-05 TANITA 980137）', () => {
