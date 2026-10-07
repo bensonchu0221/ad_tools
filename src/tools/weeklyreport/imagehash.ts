@@ -9,6 +9,7 @@
 // 「同一張圖的兩平台縮圖」dHash=6（判不同，錯）竟高於「同背景但合成不同產品」的 dHash=9，
 // 放寬門檻必然誤合併、收緊則救不回。對齊法在 19 份真實報表 1156 組配對上，
 // 該合併的最大 18.5、不該合併的最小 33.5，中間有 80% 餘裕。
+import { execFile } from 'node:child_process';
 import { Jimp } from 'jimp';
 
 // ---- 分群門檻（實證值，改動請同步跑 poc/verify_image_hash.mts 的餘裕斷言）----
@@ -32,6 +33,34 @@ const FINE = { w: 64, h: 34, scales: [1.0, 1.1, 1.2, 1.3, 1.45, 1.6], pos: [0, 0
 
 export type DownloadedImage = { buffer: Buffer; extension: 'jpeg' | 'png' | 'gif' };
 
+const VIDEO_URL = /\.(mp4|mov|webm|m4v)(\?|$)/i;
+
+/** 跑 ffmpeg 截一格成 jpeg（stdout）；失敗或沒截到畫面回 null */
+function ffmpegFrame(url: string, seekSec: number): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    execFile(
+      'ffmpeg',
+      [
+        '-v', 'error', '-ss', String(seekSec), '-i', url, '-frames:v', '1',
+        // 整張等比縮進 300x157、白底補邊：直式影片不裁切，且符合 xlsx 縮圖格比例（不補邊會被拉扁）
+        '-vf', 'scale=300:157:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=300:157:(ow-iw)/2:(oh-ih)/2:white',
+        '-f', 'image2', '-c:v', 'mjpeg', 'pipe:1',
+      ],
+      { encoding: 'buffer', timeout: 20000, maxBuffer: 5 * 1024 * 1024 },
+      (err, stdout) => resolve(!err && stdout.length > 0 ? stdout : null)
+    );
+  });
+}
+
+/**
+ * 影片縮圖：截第 3 秒（避開開頭黑畫面／字卡，使用者指定）；影片不足 3 秒則退回第 0 秒。
+ * mp4 索引在檔尾也不會整支下載——ffmpeg 走 HTTP range 只讀需要的段落（實測每支 0.6~1.3 秒）。
+ * 本機或容器沒裝 ffmpeg（ENOENT）同樣回 null，不中斷報表。
+ */
+async function videoSnapshot(url: string): Promise<Buffer | null> {
+  return (await ffmpegFrame(url, 3)) ?? (await ffmpegFrame(url, 0));
+}
+
 /** 下載素材縮圖（去重；單張失敗回 null 不中斷） */
 export async function downloadImages(urls: string[]): Promise<Map<string, DownloadedImage | null>> {
   const unique = [...new Set(urls.filter(Boolean))];
@@ -39,12 +68,22 @@ export async function downloadImages(urls: string[]): Promise<Map<string, Downlo
   await Promise.all(
     unique.map(async (url) => {
       try {
+        // R 影音素材的 assetimage 是 mp4 本體（單支 10~24MB），R 的報表／管理 API 都沒有封面圖欄位。
+        // 2026-10-07 job 195 曾把 5 支 mp4 當 jpeg 塞進 xlsx（95MB），超過 Cloud Run 32MiB 回應上限→下載 500。
+        // 現改成 ffmpeg 截一格當縮圖；截不到就當無縮圖
+        if (VIDEO_URL.test(url)) {
+          const buf = await videoSnapshot(url);
+          out.set(url, buf ? { buffer: buf, extension: 'jpeg' } : null);
+          return;
+        }
         // 照舊：縮圖一律換成 300x157 的縮版
         const fetchUrl = url.replace(/__scv1__\d+x\d+/, '__scv1__300x157');
         const res = await fetch(fetchUrl, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = Buffer.from(await res.arrayBuffer());
         const type = res.headers.get('content-type') ?? '';
+        // 副檔名沒露餡的影片／HTML 錯誤頁也擋掉：只收 image/*
+        if (!type.startsWith('image/')) throw new Error(`not image: ${type}`);
+        const buf = Buffer.from(await res.arrayBuffer());
         const extension = type.includes('png') ? 'png' : type.includes('gif') ? 'gif' : 'jpeg';
         out.set(url, { buffer: buf, extension });
       } catch {

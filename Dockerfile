@@ -3,8 +3,8 @@ FROM mcr.microsoft.com/playwright:v1.60.0-jammy
 
 WORKDIR /app
 
-# 補中文字型，避免截圖中文變方框
-RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk \
+# 補中文字型（避免截圖中文變方框）＋ ffmpeg（週報截 R 影音素材縮圖）
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-cjk ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
