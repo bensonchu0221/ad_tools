@@ -47,6 +47,7 @@ const config: BulkConfigRow = {
 
 const originalFetch = globalThis.fetch;
 const apiBodies: any[] = [];
+let mockAdDescription = '測試內文';
 globalThis.fetch = async (_input: any, init?: RequestInit) => {
   const body = JSON.parse(String(init?.body ?? '{}'));
   apiBodies.push(body);
@@ -70,7 +71,7 @@ globalThis.fetch = async (_input: any, init?: RequestInit) => {
         creative_id: 'cr1',
         creative_name: '素材一',
         title: '升等特選經濟艙',
-        ad_description: '測試內文',
+        ad_description: mockAdDescription,
         cta_label: '立即了解',
         ctr: 0.05,
         viewable_impressions: 80,
@@ -121,8 +122,18 @@ try {
   const integrated = appended.get(INTEGRATED_TAB)!;
   assert.equal(integrated[0][0], 'P');
   assert.equal(integrated[0][6], 'g1');
-  assert.equal(integrated[0][10], '升等特選經濟艙');
+  assert.equal(integrated[0][9], '測試內文');
+  assert.equal(integrated[0][10], '測試內文');
   assert.deepEqual(integrated[0].slice(15), [0, 0, 0, 0]);
+
+  // ad_description 空白 → integrated 的 ad_name／headline 改填 creative_name；raw 仍保留空白原值
+  mockAdDescription = '  ';
+  await runConfig(config, () => {}, deps);
+  const blankIntegrated = appended.get(INTEGRATED_TAB)!;
+  assert.equal(blankIntegrated[0][9], '素材一');
+  assert.equal(blankIntegrated[0][10], '素材一');
+  assert.equal(appended.get(P_RAW_TAB)![0][P_SHEET_HEADER.indexOf('ad_description')], '  ');
+  mockAdDescription = '測試內文';
 
   const device = appended.get(DEVICE_TAB)!;
   assert.equal(device.length, 4);
@@ -132,7 +143,7 @@ try {
 
   const directIntegrated = buildIntegratedRows([], [], 'TS', config.cvBuckets, [], [{
     date: targetDate, advertiser_name: 'A', campaign_id: 'c', campaign_name: 'C',
-    adgroup_id: 'g', adgroup_name: 'G', creative_id: 'a', creative_name: 'Ad',
+    adgroup_id: 'g', adgroup_name: 'G', creative_id: 'a', ad_name: 'Ad',
     headline: 'H', impressions: 1, clicks: 1, spend: 1,
   }]);
   assert.equal(directIntegrated[0][0], 'P');

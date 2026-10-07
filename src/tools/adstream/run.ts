@@ -487,8 +487,9 @@ async function fetchPRows(
     const advertiserId = String(r.advertiser ?? '');
     const accountName = String(r.advertiser_name ?? advertiserId);
     const creativeName = String(r.creative_name ?? r.creative_id ?? '');
-    const dynamicTitle = String(r.title ?? '').trim();
-    const headline = dynamicTitle && dynamicTitle !== 'Unknown' ? dynamicTitle : creativeName;
+    // integrated 的 ad_name／headline 兩欄都用 P 的 ad_description（使用者指定，2026-10-07）；空的改填 creative_name。
+    // raw 分頁仍保留 creative_name／title／ad_description 原值
+    const adDescription = String(r.ad_description ?? '').trim() || creativeName;
     pRows.push([
       advertiserId, accountName, syncedAt, date,
       r.campaign_id ?? '', r.campaign_name ?? '', r.adgroup_id ?? '', r.adgroup_name ?? '',
@@ -504,8 +505,8 @@ async function fetchPRows(
       adgroup_id: r.adgroup_id ?? '',
       adgroup_name: r.adgroup_name ?? '',
       creative_id: r.creative_id ?? '',
-      creative_name: creativeName,
-      headline,
+      ad_name: adDescription,
+      headline: adDescription,
       impressions: r.impressions ?? '',
       clicks: r.clicks ?? '',
       spend: r.spend ?? '',
@@ -561,7 +562,7 @@ export function buildIntegratedRows(
     rows.push([
       'P', syncedAt, p.date ?? '', p.advertiser_name ?? '',
       p.campaign_id ?? '', p.campaign_name ?? '', p.adgroup_id ?? '', p.adgroup_name ?? '',
-      p.creative_id ?? '', p.creative_name ?? '', p.headline ?? '', '',
+      p.creative_id ?? '', p.ad_name ?? '', p.headline ?? '', '',
       p.impressions ?? '', p.clicks ?? '', p.spend ?? '',
       0, 0, 0, 0,
     ]);
