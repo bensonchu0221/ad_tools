@@ -14,7 +14,8 @@
 // 不會每次開頁面就查 BQ。
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { replaceNexusRecon, type NexusPlatform, type NexusReconRow } from '../../core/store.js';
-import { FACT_TABLE, DEVICE_TABLE } from './schema.js';
+import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE } from './schema.js';
+import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 /** 吻合率門檻：≥ ok 綠、≥ warn 黃、其餘紅。先抓寬一點，跑幾天看實際誤差再調。 */
 export const RECON = {
@@ -44,28 +45,33 @@ export function reconSql(dt: string): string {
       SUM(${imp}) AS imp, SUM(${click}) AS click, SUM(${spend}) AS spend
     FROM ${q(FACT_TABLE[p])} WHERE date = ${d} GROUP BY account_id`;
   }).join('\n    UNION ALL ');
+  const sums = (t: string) => `SELECT platform, account_id, ANY_VALUE(account_name) AS account_name,
+    SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
+  FROM ${q(t)} WHERE date = ${d} GROUP BY platform, account_id`;
   return `
 WITH f AS (
     ${facts}
 ), v AS (
-  SELECT platform, account_id, ANY_VALUE(account_name) AS account_name,
-    SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
-  FROM ${q(DEVICE_TABLE)} WHERE date = ${d} GROUP BY platform, account_id
+  ${sums(DEVICE_TABLE)}
+), m AS (
+  ${sums(MEDIA_TABLE)}
 )
-SELECT platform, account_id, COALESCE(f.account_name, v.account_name) AS account_name,
+SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name) AS account_name,
   IFNULL(f.imp, 0) AS f_imp, IFNULL(f.click, 0) AS f_click, IFNULL(f.spend, 0) AS f_spend,
-  IFNULL(v.imp, 0) AS v_imp, IFNULL(v.click, 0) AS v_click, IFNULL(v.spend, 0) AS v_spend
-FROM f FULL OUTER JOIN v USING (platform, account_id)`;
+  IFNULL(v.imp, 0) AS v_imp, IFNULL(v.click, 0) AS v_click, IFNULL(v.spend, 0) AS v_spend,
+  IFNULL(m.imp, 0) AS m_imp, IFNULL(m.click, 0) AS m_click, IFNULL(m.spend, 0) AS m_spend
+FROM f FULL OUTER JOIN v USING (platform, account_id) FULL OUTER JOIN m USING (platform, account_id)`;
 }
 
 /** BQ 結果列 → 比對列。純函式。 */
 export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow[] {
-  const n = (v: string | null) => Number(v ?? 0) || 0;
-  const money = (v: string | null) => Math.round(n(v) * 10000) / 10000;
+  const n = (v: string | null | undefined) => Number(v ?? 0) || 0;
+  const money = (v: string | null | undefined) => Math.round(n(v) * 10000) / 10000;
   return raw.map((r) => ({
     platform: r.platform as NexusPlatform, accountId: String(r.account_id ?? ''), accountName: String(r.account_name ?? ''),
     fact: { imp: n(r.f_imp), click: n(r.f_click), spend: money(r.f_spend) },
     device: { imp: n(r.v_imp), click: n(r.v_click), spend: money(r.v_spend) },
+    media: { imp: n(r.m_imp), click: n(r.m_click), spend: money(r.m_spend) },
   }));
 }
 
@@ -123,6 +129,34 @@ export function summarizeRecon(platform: NexusPlatform, rows: NexusReconRow[]): 
     platform, match: vals.length ? Math.min(...vals) : null, byMetric,
     accounts: mine.filter((r) => r.fact.imp || r.fact.spend || r.device.imp || r.device.spend).length, diffs,
   };
+}
+
+// ────────────────────────────── 媒體層 vs 素材層（2026-10-08） ──────────────────────────────
+
+/** 媒體層只比點擊、花費：D 版位報表的曝光天生比素材層少約 0.2%（10/6 實測 0.27%、14 天 0.17%，click／spend 完全一致）。 */
+export const MEDIA_METRICS = ['click', 'spend'] as const;
+
+export interface MediaRecon {
+  platform: NexusPlatform;
+  /** 點擊、花費兩個裡較差的吻合率；沒有媒體層資料（舊比對結果）或兩邊都沒數字為 null */
+  match: number | null;
+  /** false＝只顯示不亮燈：M 的媒體報表整支排除生涯零點擊 campaign，長期會有小落差 */
+  graded: boolean;
+}
+
+/**
+ * 媒體表 vs 素材表的吻合率，算法同 summarizeRecon（逐帳戶絕對差加總）。
+ * M 的 Redash 墊底帳戶（client:）沒有媒體層，不列入。
+ */
+export function summarizeMediaRecon(platform: NexusPlatform, rows: NexusReconRow[]): MediaRecon {
+  const mine = rows.filter((r) => r.platform === platform && r.media && !r.accountId.startsWith(M_UNMAPPED_PREFIX));
+  const vals: number[] = [];
+  for (const m of MEDIA_METRICS) {
+    let diff = 0, base = 0;
+    for (const r of mine) { diff += Math.abs(r.fact[m] - r.media![m]); base += Math.max(r.fact[m], r.media![m]); }
+    if (base > 0) vals.push(1 - diff / base);
+  }
+  return { platform, match: vals.length ? Math.min(...vals) : null, graded: platform !== 'M' };
 }
 
 export const reconLevel = (match: number | null): 'ok' | 'warn' | 'alert' | 'none' =>

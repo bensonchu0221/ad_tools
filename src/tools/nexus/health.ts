@@ -9,7 +9,7 @@ import {
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
-import { summarizeRecon, fmtMatch, RECON } from './recon.js';
+import { summarizeRecon, summarizeMediaRecon, fmtMatch, RECON } from './recon.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
@@ -166,6 +166,19 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       });
     }
     if (parts.length) summary.push(`比對吻合 ${parts.join('／')}`);
+    // 媒體層 vs 素材層（點擊、花費）。M 天生有小落差（零點擊 campaign 不在媒體報表）⇒ 只列數字不亮燈
+    const mparts: string[] = [];
+    for (const p of PLATFORMS) {
+      const s = summarizeMediaRecon(p, inp.recon.rows);
+      if (s.match === null) continue;
+      mparts.push(`${p} ${fmtMatch(s.match)}`);
+      if (!s.graded || s.match >= RECON.ok) continue;
+      items.push({
+        level: s.match < RECON.warn ? 'alert' : 'warn',
+        text: `${PNAME[p]} ${t1} 媒體層與素材層的點擊／花費只吻合 ${fmtMatch(s.match)}（媒體報表可能漏抓）`,
+      });
+    }
+    if (mparts.length) summary.push(`媒體層吻合 ${mparts.join('／')}`);
     // M：Redash（MGID 內部全帳戶）有投放、token 表卻沒有的帳戶。素材層會用 Redash 墊底（2026-10-05 起）。
     // AM 主管給 Redash 就是為了「沒填 token 也不漏」⇒ 墊底是正規路徑，綠燈只在結論區列名單（2026-10-06 使用者拍板）；
     // 墊底沒寫進去（素材層仍是 0）才是真的缺數字 ⇒ 紅燈。

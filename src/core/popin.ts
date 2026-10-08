@@ -355,6 +355,62 @@ export async function getAdReportBulk(
   return rows;
 }
 
+const SITE_PAGE_SIZE = 1000; // 端點上限（5000 回 code 1005 "page_size must be between 1 and 1000"）
+
+/**
+ * §3.5 Site Report：campaign × 投放版位 × 日（tool#9 nexus 媒體表用）。每支 campaign 一個請求、翻頁抓完。
+ * 2026-10-08 實測（與官方文件不符處）：參數是單支 `campaign_id`（文件範例 campaign_ids／pageSize 回 code 1000）、
+ * 回應在 `result`（文件寫 results）、日期 YYYY-MM-DD、一次可跨 60 天。限流屬 /data/v1/report/*（每 token 10 req/s）。
+ * code≠0 一律往外丟：這份要拿來算媒體總量，不能把失敗當成「沒資料」吞掉。
+ */
+export async function getSiteReports(
+  accessToken: string,
+  campaignIds: string[],
+  startDate: string, // YYYY-MM-DD
+  endDate: string // YYYY-MM-DD
+): Promise<any[]> {
+  const req = (cid: string, page: number) => ({
+    url: `${BASE}/data/v1/report/site/day/list?` + new URLSearchParams({
+      start_date: startDate, end_date: endDate, timezone: 'utc8', campaign_id: cid,
+      page_size: String(SITE_PAGE_SIZE), current_page: String(page),
+    }),
+    init: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
+  const parse = (cid: string, text: string): { rows: any[]; total: number } => {
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(`D 版位報表 campaign ${cid} 回應不是 JSON：${text.slice(0, 120)}`);
+    }
+    if (String(json?.code) !== '0') throw new Error(`D 版位報表 campaign ${cid} 失敗：${json?.code} ${json?.msg ?? json?.message ?? ''}`);
+    return { rows: Array.isArray(json?.result) ? json.result : [], total: Number(json?.total) || 0 };
+  };
+
+  const out: any[] = [];
+  const more: { cid: string; page: number }[] = [];
+  const expect = new Map<string, number>();
+  const got = new Map<string, number>();
+  const add = (cid: string, rows: any[]) => { out.push(...rows); got.set(cid, (got.get(cid) ?? 0) + rows.length); };
+  const first = await batchFetch(campaignIds.map((cid) => req(cid, 1)), { batchSize: 8 });
+  first.forEach((text, i) => {
+    const cid = campaignIds[i];
+    const { rows, total } = parse(cid, text);
+    expect.set(cid, total);
+    add(cid, rows);
+    for (let p = 2; p <= Math.ceil(total / SITE_PAGE_SIZE); p++) more.push({ cid, page: p });
+  });
+  if (more.length) {
+    const texts = await batchFetch(more.map((m) => req(m.cid, m.page)), { batchSize: 8 });
+    texts.forEach((text, i) => add(more[i].cid, parse(more[i].cid, text).rows));
+  }
+  // 翻頁拿到的列數要等於 total：少了＝某頁回空或分頁不穩，寧可失敗重試也不寫半套
+  for (const [cid, total] of expect) {
+    if ((got.get(cid) ?? 0) !== total) throw new Error(`D 版位報表 campaign ${cid} 應有 ${total} 列、只拿到 ${got.get(cid) ?? 0} 列`);
+  }
+  return out;
+}
+
 /** popin 圖片網址正規化：移除 __scv 後綴並補回副檔名（對應舊 ad_preview.php） */
 export function normalizePopinImage(url: string): string {
   const m = url.match(/\.([a-zA-Z0-9]+)(?:__scv.*)?$/);

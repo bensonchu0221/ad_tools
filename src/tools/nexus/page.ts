@@ -10,7 +10,7 @@ import type { NexusJobRow, NexusPlatform } from '../../core/store.js';
 import { addDays, isSkipped } from './run.js';
 import { P_UNATTRIBUTED } from './fetch.js';
 import type { HealthInput, HealthReport } from './health.js';
-import { summarizeRecon, reconLevel, fmtMatch, RECON, type PlatformRecon } from './recon.js';
+import { summarizeRecon, summarizeMediaRecon, reconLevel, fmtMatch, RECON, type PlatformRecon } from './recon.js';
 
 const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P'];
 const PNAME: Record<NexusPlatform, string> = { D: 'Discovery', R: 'Rixbee', M: 'MGID', P: 'Prism' };
@@ -177,6 +177,12 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
       // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面。開關動畫要從按鈕長出／縮回，所以關閉全交給 JS（不用 closedby）
       // 叉叉掛在浮窗上、不放進 .rp-in：內容捲動時它固定在右上角
       panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><button type="button" class="rp-x" aria-label="關閉"></button><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
+      // 媒體層 vs 素材層（點擊／花費）：一行小字。M 天生有小落差（零點擊 campaign 不在媒體報表）⇒ 不上色
+      const mr = summarizeMediaRecon(p, reconRows);
+      if (mr.match !== null) {
+        const ml = mr.graded ? reconLevel(mr.match) : 'ok';
+        matchBtn += `<p class="pf-media pm-${ml}" title="媒體表與素材表的點擊／花費加總比對${mr.graded ? '' : '（M 的媒體報表不含零點擊 campaign，有小落差屬正常）'}">媒體層 ${fmtMatch(mr.match)}</p>`;
+      }
     }
 
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
@@ -363,6 +369,8 @@ const STYLE = `
   .pf-num{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0 0;padding-top:14px;border-top:1px solid var(--hair)}
   .pf-num dt{font-size:11.5px;color:var(--mut)}
   .pf-num dd{margin:2px 0 0;font-family:var(--disp);font-size:16px;font-weight:500;font-variant-numeric:tabular-nums}
+  .pf-media{margin:6px 0 0;text-align:center;font-size:11.5px;color:var(--mut);font-variant-numeric:tabular-nums}
+  .pm-warn{color:var(--warnc);font-weight:600} .pm-alert{color:var(--err);font-weight:600}
 
   /* 吻合率：按了開浮動視窗。在玻璃上再做一層亮一點的玻璃片（不疊 backdrop-filter） */
   .match{margin-top:14px;display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;column-gap:10px;align-items:baseline;

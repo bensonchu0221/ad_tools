@@ -110,6 +110,18 @@ export const DEVICE_SCHEMA: BqField[] = [
   F('spend_usd', 'M：MGID Redash 原始美金花費（含 data fee）；其他平台 NULL'),
 ];
 
+// 媒體表（2026-10-08）：四平台「日 × 帳戶 × 投放媒體」，給 AM dashboard 看某天某媒體底下各帳戶的花費／曝光／點擊。
+// media 直接存 API 原始值、不歸戶（使用者決定）：D site_name（版位名）、R bundle、M source、P domain。
+// 粒度各平台不同：D/P 到 campaign；R/M 只到帳戶（campaign_id NULL）。只存可加總的數字，轉換不收。
+export const MEDIA_SCHEMA: BqField[] = [
+  DATE, S('platform', 'D/R/M/P', 'REQUIRED'), ACCOUNT_ID, S('account_name'),
+  S('campaign_id', 'D/P 有值；R/M 為 NULL'), S('campaign_name', 'D 有值；其餘 NULL'),
+  S('media', 'API 原始媒體名：D site_name／R bundle／M source／P domain'),
+  S('placement', 'D site_id／P slot；R/M 為 NULL'),
+  I('imp'), I('click'), F('spend', '花費（帳戶幣別）'),
+  SYNCED_AT,
+];
+
 // customer 對照表：目前由 AE/AM 在系統外維護，這張先建空表當「介面」。之後不論改成 Sheet 外部表
 // 或從 Cloud SQL 同步，只要表名與欄位不變，view 與 Looker 都不用改。
 export const CUSTOMER_MAP_SCHEMA: BqField[] = [
@@ -125,6 +137,7 @@ export const FACT_TABLE: Record<Platform, string> = {
 };
 export const FACT_SCHEMA: Record<Platform, BqField[]> = { D: D_SCHEMA, R: R_SCHEMA, M: M_SCHEMA, P: P_SCHEMA };
 export const DEVICE_TABLE = nexusTable('device_daily');
+export const MEDIA_TABLE = nexusTable('media_daily');
 export const CUSTOMER_MAP_TABLE = nexusTable('customer_account_map');
 export const INTEGRATED_VIEW = nexusTable('integrated_daily');
 
@@ -134,6 +147,8 @@ export const TABLE_SPECS: BqTableSpec[] = [
   { table: FACT_TABLE.M, schema: M_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id'], description: 'nexus：M 平台 teaser×日' },
   { table: FACT_TABLE.P, schema: P_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id'], description: 'nexus：P 平台 素材×日' },
   { table: DEVICE_TABLE, schema: DEVICE_SCHEMA, partitionField: 'date', clustering: ['platform', 'account_id'], description: 'nexus：四平台 裝置×日' },
+  // 叢集照 dashboard 主查詢：某天某媒體 → 各帳戶
+  { table: MEDIA_TABLE, schema: MEDIA_SCHEMA, partitionField: 'date', clustering: ['platform', 'media', 'account_id'], description: 'nexus：四平台 媒體×帳戶×日' },
   { table: CUSTOMER_MAP_TABLE, schema: CUSTOMER_MAP_SCHEMA, description: 'nexus：平台帳戶 → 客戶 對照（人工維護）' },
 ];
 

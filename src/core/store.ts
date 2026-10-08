@@ -2265,6 +2265,14 @@ async function nexusPool(): Promise<mysql.Pool> {
       PRIMARY KEY (dt, platform, account_id)
     ) DEFAULT CHARSET=utf8mb4
   `);
+  // 2026-10-08 媒體層比對：m_* 允許 NULL＝那次比對還沒有媒體層（舊結果）。MySQL 無 ADD COLUMN IF NOT EXISTS，先查 information_schema
+  const [mcol] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = 'nexus_recon' AND column_name = 'm_imp'`
+  );
+  if (!(((mcol as any[])[0]?.c ?? 0) > 0)) {
+    await p.query(`ALTER TABLE nexus_recon ADD COLUMN m_imp BIGINT NULL, ADD COLUMN m_click BIGINT NULL, ADD COLUMN m_spend DECIMAL(18,4) NULL`);
+  }
   nexusSchemaReady = true;
   return p;
 }
@@ -2605,6 +2613,8 @@ export interface NexusReconRow {
   fact: NexusReconTotals;
   /** 裝置表加總 */
   device: NexusReconTotals;
+  /** 媒體表加總（2026-10-08 起；更早的比對結果沒有＝undefined） */
+  media?: NexusReconTotals;
 }
 
 /** 整天取代：先刪這天再寫入，外加一列 platform='*' 標記「這天比對過了」（當天四平台都沒數字也照樣標）。 */
@@ -2614,14 +2624,17 @@ export async function replaceNexusRecon(dt: string, rows: NexusReconRow[]): Prom
   try {
     await conn.beginTransaction();
     await conn.query(`DELETE FROM nexus_recon WHERE dt = ?`, [dt]);
-    const all = [...rows, { platform: '*', accountId: '*', accountName: '', fact: { imp: 0, click: 0, spend: 0 }, device: { imp: 0, click: 0, spend: 0 } }];
+    const all: (Omit<NexusReconRow, 'platform'> & { platform: string })[] = [
+      ...rows, { platform: '*', accountId: '*', accountName: '', fact: { imp: 0, click: 0, spend: 0 }, device: { imp: 0, click: 0, spend: 0 } },
+    ];
     for (let i = 0; i < all.length; i += 500) {
       const chunk = all.slice(i, i + 500);
       await conn.query(
-        `INSERT INTO nexus_recon (dt, platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend)
-         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?)').join(',')}`,
+        `INSERT INTO nexus_recon (dt, platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend, m_imp, m_click, m_spend)
+         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',')}`,
         chunk.flatMap((r) => [dt, r.platform, r.accountId, r.accountName.slice(0, 255),
-          r.fact.imp, r.fact.click, r.fact.spend, r.device.imp, r.device.click, r.device.spend])
+          r.fact.imp, r.fact.click, r.fact.spend, r.device.imp, r.device.click, r.device.spend,
+          r.media?.imp ?? null, r.media?.click ?? null, r.media?.spend ?? null])
       );
     }
     await conn.commit();
@@ -2637,7 +2650,7 @@ export async function replaceNexusRecon(dt: string, rows: NexusReconRow[]): Prom
 export async function nexusReconFor(dt: string): Promise<{ checkedAt: string | null; rows: NexusReconRow[] }> {
   const p = await nexusPool();
   const [rows] = await p.query(
-    `SELECT platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend,
+    `SELECT platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend, m_imp, m_click, m_spend,
             DATE_FORMAT(CONVERT_TZ(checked_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS checked_at
        FROM nexus_recon WHERE dt = ?`, [dt]
   );
@@ -2649,6 +2662,8 @@ export async function nexusReconFor(dt: string): Promise<{ checkedAt: string | n
       platform: r.platform, accountId: String(r.account_id), accountName: r.account_name,
       fact: { imp: Number(r.f_imp), click: Number(r.f_click), spend: Number(r.f_spend) },
       device: { imp: Number(r.d_imp), click: Number(r.d_click), spend: Number(r.d_spend) },
+      // m_* 是 NULL＝那次比對還沒有媒體層（2026-10-08 以前）
+      ...(r.m_imp === null ? {} : { media: { imp: Number(r.m_imp), click: Number(r.m_click), spend: Number(r.m_spend) } }),
     })),
   };
 }

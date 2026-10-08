@@ -2,11 +2,12 @@
 // D／M 一帳一次（一帳一 token）；R 用 Super token、P 用全域 token，一次就拿到全平台所有帳戶。
 // 列的 key 就是 schema 欄名，可以直接交給 bqLoadRows。轉換邏輯是純函式（toXxxRows），測試不必打 API。
 import {
-  getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getCampaignDeviceReports, normalizePopinImage,
+  getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getCampaignDeviceReports, getSiteReports, normalizePopinImage,
 } from '../../core/popin.js';
 import { fetchReport } from '../../core/rixbee.js';
 import {
-  fetchMgidReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex, getClientCurrency, getClientTimezone, type MgidClient, type MgidReportRow,
+  fetchMgidReport, fetchMgidSourceReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex, getClientCurrency, getClientTimezone,
+  type MgidClient, type MgidReportRow, type MgidSourceRow,
 } from '../../core/mgid.js';
 import { fetchRedashDeviceDaily, fetchRedashTeaserDaily, type RedashRow } from '../../core/mgidRedash.js';
 import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../core/store.js';
@@ -17,7 +18,8 @@ import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, type Platform } from './schema.js';
 
 export type Row = Record<string, unknown>;
-export interface FetchResult { facts: Row[]; device: Row[]; warnings: string[] }
+/** media＝媒體表列（2026-10-08）；沒有媒體層的 job（M 裝置 job）省略。 */
+export interface FetchResult { facts: Row[]; device: Row[]; media?: Row[]; warnings: string[] }
 
 const compact = (ymd: string) => ymd.replace(/-/g, '');
 /** 各平台日期格式不一（YYYYMMDD／YYYY-MM-DD／YYYY/MM/DD）→ YYYY-MM-DD */
@@ -35,6 +37,68 @@ function requireDate(v: unknown, platform: Platform): string {
   // 日期壞掉就無法對準要取代的日期區間 → 整個 job 失敗重試，絕不寫進錯的分區
   if (!d) throw new Error(`${platform} 回傳無法解析的日期：${String(v ?? '')}`);
   return d;
+}
+
+// ────────────────────────────── 媒體表（四平台共用） ──────────────────────────────
+
+interface MediaInput {
+  date: string; platform: Platform; account_id: string; account_name: string | null;
+  campaign_id: string | null; campaign_name: string | null; media: string | null; placement: string | null;
+  imp: unknown; click: unknown; spend: unknown;
+}
+
+/**
+ * 媒體列收斂：同一個 (日, 平台, 帳戶, campaign, 媒體, 版位) 加總成一列，表上這組 key 保證唯一。純函式。
+ * 媒體名照 API 原值存、不歸戶（使用者 2026-10-07 決定）。
+ * 曝光／點擊／花費全 0 的列丟掉：R 一天 18,098 列裡 11,151 列全 0（帳戶×媒體組合出現但沒投到），
+ * 留著只會讓 dashboard 列出「花 0 元的帳戶」，加總不受影響（2026-10-06 實測丟前丟後四平台加總相同）。
+ */
+export function toMediaRows(inputs: MediaInput[], syncedAt: string): Row[] {
+  const byKey = new Map<string, Row>();
+  for (const r of inputs) {
+    if (!r.account_id) throw new Error(`${r.platform} 媒體列缺帳戶 ID`);
+    const key = [r.date, r.platform, r.account_id, r.campaign_id, r.media, r.placement].join('\u0001');
+    const cur = byKey.get(key);
+    if (cur) {
+      cur.imp = (cur.imp as number) + int(r.imp);
+      cur.click = (cur.click as number) + int(r.click);
+      cur.spend = money((cur.spend as number) + money(r.spend));
+      continue;
+    }
+    byKey.set(key, {
+      date: r.date, platform: r.platform, account_id: r.account_id, account_name: r.account_name,
+      campaign_id: r.campaign_id, campaign_name: r.campaign_name, media: r.media, placement: r.placement,
+      imp: int(r.imp), click: int(r.click), spend: money(r.spend), synced_at: syncedAt,
+    });
+  }
+  return [...byKey.values()].filter((r) => r.imp || r.click || r.spend);
+}
+
+/** D 版位報表（getSiteReports）→ 媒體列。media＝site_name（版位名，例如 news.ebc.net.tw_APP）。純函式。 */
+export function toDMediaRows(account: { id: string; name: string }, raw: any[], syncedAt: string): Row[] {
+  return toMediaRows(raw.map((r) => ({
+    date: requireDate(r.date, 'D'), platform: 'D' as const, account_id: account.id, account_name: account.name,
+    campaign_id: str(r.campaign_id), campaign_name: str(r.campaign_name), media: str(r.site_name), placement: str(r.site_id),
+    imp: r.impression, click: r.click, spend: r.spend,
+  })), syncedAt);
+}
+
+/** R day×user_id×app_bundle_id → 媒體列。media＝bundle（媒體網域）；只到帳戶層。純函式。 */
+export function toRMediaRows(raw: any[], syncedAt: string): Row[] {
+  return toMediaRows(raw.map((r) => ({
+    date: requireDate(r.day, 'R'), platform: 'R' as const, account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
+    campaign_id: null, campaign_name: null, media: str(r.bundle), placement: null,
+    imp: r.impression, click: r.click, spend: r.payment_revenue,
+  })), syncedAt);
+}
+
+/** M day×source（fetchMgidSourceReport）→ 媒體列。media＝source（網域或具名庫存）；只到帳戶層。純函式。 */
+export function toMMediaRows(account: { id: string; name: string }, raw: MgidSourceRow[], syncedAt: string): Row[] {
+  return toMediaRows(raw.map((r) => ({
+    date: requireDate(r.date, 'M'), platform: 'M' as const, account_id: account.id, account_name: account.name,
+    campaign_id: null, campaign_name: null, media: str(r.source), placement: null,
+    imp: r.imp, click: r.click, spend: r.spend,
+  })), syncedAt);
 }
 
 // ────────────────────────────── D ──────────────────────────────
@@ -163,11 +227,14 @@ export async function fetchDAccount(
   const cvMap = await fetchCvDetailMap(access, bulk, compact(sd), compact(ed));
   onPhase(`D ${account.name}：裝置維度`);
   const deviceRaw = await getCampaignDeviceReports(access, active, compact(sd), compact(ed));
+  onPhase(`D ${account.name}：投放版位（${active.length} 個 campaign）`);
+  const siteRaw = await getSiteReports(access, active, sd, ed);
 
   const acc = { id: account.id, name: account.name };
   return {
     facts: toDRows(acc, bulk, cvMap, adMeta, syncedAt),
     device: toDDeviceRows(acc, deviceRaw, syncedAt),
+    media: toDMediaRows(acc, siteRaw, syncedAt),
     warnings: [],
   };
 }
@@ -240,7 +307,48 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
   });
   // 單日仍超過 R 的單次列數上限＝資料被截斷，寧可整個 job 失敗也不要寫進半套數字
   if (warnings.length) throw new Error(`R 資料被截斷，不寫入：${warnings.join('；')}`);
-  return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), warnings };
+
+  // 媒體層：帳戶取自剛抓回的素材列（有數字的才查），不多打一次清單
+  const ids = [...new Set(raw
+    .filter((r: any) => Number(r.impression) || Number(r.click) || Number(r.payment_revenue))
+    .map((r: any) => String(r.user_id ?? '')).filter(Boolean))].sort();
+  onPhase(`R 媒體報表 ${sd}~${ed}（${ids.length} 個帳戶）`);
+  const mediaRaw = await fetchRMediaRaw(ids, async (userIds) => {
+    let truncated = false;
+    const rows = await fetchReport({
+      userType: 'super', userIds, startDate: sd, endDate: ed,
+      dimensions: ['day', 'user_id', 'app_bundle_id'], metrics: ['impression', 'click', 'payment_revenue'],
+      onWarn: () => { truncated = true; },
+    });
+    return { rows, truncated };
+  });
+  return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings };
+}
+
+/** R 媒體報表每批幾個帳戶：2026-10-06 全平台帳戶×bundle 一天 18,098 列（單次上限 10,000），5 帳戶一批單批最大 6,250 列。 */
+export const R_MEDIA_BATCH = 5;
+
+/**
+ * R 帳戶×媒體分批抓：bundle 長尾很長（一天 7 千多個），全平台一次查會破單次 10,000 列上限而被截斷。
+ * 某批回報截斷 ⇒ 丟掉該批、對半拆重抓；拆到單一帳戶仍截斷 ⇒ 丟錯（job 失敗，不寫半套）。
+ * fetchBatch 由呼叫端注入（測試用假資料）。
+ */
+export async function fetchRMediaRaw(
+  userIds: string[],
+  fetchBatch: (userIds: string[]) => Promise<{ rows: any[]; truncated: boolean }>,
+  batchSize = R_MEDIA_BATCH,
+): Promise<any[]> {
+  const out: any[] = [];
+  const run = async (ids: string[]): Promise<void> => {
+    const { rows, truncated } = await fetchBatch(ids);
+    if (!truncated) { out.push(...rows); return; }
+    if (ids.length === 1) throw new Error(`R 媒體報表帳戶 ${ids[0]} 單日仍超過單次列數上限，資料被截斷，不寫入`);
+    const half = Math.ceil(ids.length / 2);
+    await run(ids.slice(0, half));
+    await run(ids.slice(half));
+  };
+  for (let i = 0; i < userIds.length; i += batchSize) await run(userIds.slice(i, i + batchSize));
+  return out;
 }
 
 // ────────────────────────────── M ──────────────────────────────
@@ -358,7 +466,14 @@ export async function fetchMAccount(
   const { rows } = mergeTeaserStat(raw, stats, meta);
   const currency = rows.length ? await getClientCurrency(client) : '';
   const acc = { id: client.apiClientId, name: client.clientName };
-  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], warnings: [] };
+  // 媒體層：同一支 statistics-reports 換 day×source 維度（tool#5 同一個函式）。素材層原始列是空的，source 也一定空，省一次。
+  // ⚠️ statistics-reports 整支排除生涯零點擊 campaign、也沒走 teaser-stat 校正 ⇒ 總量會比素材層略少（10/6 實測 imp −0.11%）
+  let media: Row[] = [];
+  if (raw.length) {
+    onPhase(`M ${client.clientName}：媒體報表`);
+    media = toMMediaRows(acc, await fetchMgidSourceReport(client, sd, ed), syncedAt);
+  }
+  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], media, warnings: [] };
 }
 
 // ── M 裝置表：MGID Redash（全部 Broadciel 帳戶一次撈，含零點擊 campaign） ──
@@ -600,6 +715,20 @@ export function toPRows(raw: any[], syncedAt: string): Row[] {
   });
 }
 
+/** Prism date×advertiser×campaign×domain×slot → 媒體列。media＝domain、placement＝slot。純函式。 */
+export function toPMediaRows(raw: any[], syncedAt: string): Row[] {
+  return toMediaRows(raw.map((r) => {
+    const date = normalizePrismDate(r.date);
+    if (!date) throw new Error(`P 媒體報表回傳無法解析的日期：${String(r.date ?? '')}`);
+    const acc = pAccount(r);
+    return {
+      date, platform: 'P' as const, account_id: acc.id, account_name: acc.name,
+      campaign_id: str(r.campaign_id), campaign_name: null, media: str(r.domain), placement: str(r.slot),
+      imp: r.impressions, click: r.clicks, spend: r.spend,
+    };
+  }), syncedAt);
+}
+
 /** Prism 裝置列（Desktop/Mobile/Tablet）→ 倉庫列。P 沒有轉換事件。純函式。 */
 export function toPDeviceRows(raw: any[], syncedAt: string): Row[] {
   return raw.map((r) => {
@@ -617,7 +746,7 @@ export function toPDeviceRows(raw: any[], syncedAt: string): Row[] {
 
 /**
  * P 全平台（不帶 advertiser_ids）。⚠️ 每呼叫一次，P 後端就會查一次 BigQuery `prism_events`（會計費，
- * 表依 received_at 分日、依 event_name 叢集，只掃該日期區間），所以一個 job 只打兩次（素材＋裝置）。
+ * 表依 received_at 分日、依 event_name 叢集，只掃該日期區間），所以一個 job 只打三次（素材＋裝置＋媒體；媒體 2026-10-08 加）。
  */
 export async function fetchPAll(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
   onPhase(`P 全平台素材報表 ${sd}~${ed}`);
@@ -627,5 +756,10 @@ export async function fetchPAll(sd: string, ed: string, syncedAt: string, onPhas
     startDate: sd, endDate: ed,
     dimensions: ['date', 'advertiser', 'campaign_id', 'device'], metrics: ['impressions', 'clicks', 'spend'],
   });
-  return { facts: toPRows(raw, syncedAt), device: toPDeviceRows(dev, syncedAt), warnings: [] };
+  onPhase(`P 全平台媒體報表 ${sd}~${ed}`);
+  const med = await fetchPrismReportAll({
+    startDate: sd, endDate: ed,
+    dimensions: ['date', 'advertiser', 'campaign_id', 'domain', 'slot'], metrics: ['impressions', 'clicks', 'spend'],
+  });
+  return { facts: toPRows(raw, syncedAt), device: toPDeviceRows(dev, syncedAt), media: toPMediaRows(med, syncedAt), warnings: [] };
 }

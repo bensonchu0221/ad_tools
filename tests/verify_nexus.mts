@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -11,8 +12,8 @@ import {
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
-import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
-import { reconSql, toReconRows, summarizeRecon, reconLevel, fmtMatch, reconDue } from '../src/tools/nexus/recon.js';
+import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
+import { reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, reconLevel, fmtMatch, reconDue } from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
@@ -555,9 +556,11 @@ const rr = (platform: any, accountId: string, f: [number, number, number], d: [n
   fact: { imp: f[0], click: f[1], spend: f[2] }, device: { imp: d[0], click: d[1], spend: d[2] },
 });
 
-await ok('比對 SQL：四張事實表＋裝置表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
+await ok('比對 SQL：四張事實表＋裝置表＋媒體表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
   const sql = reconSql('2026-09-23');
-  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 5);
+  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 6);
+  assert.match(sql, /nexus_media_daily/);
+  assert.match(sql, /FULL OUTER JOIN m USING \(platform, account_id\)/);
   assert.match(sql, /SUM\(charge\)/);
   assert.match(sql, /SUM\(payment_revenue\)/);
   assert.match(sql, /SUM\(impressions\), SUM\(clicks\)|SUM\(impressions\) AS imp, SUM\(clicks\) AS click/);
@@ -566,8 +569,11 @@ await ok('比對 SQL：四張事實表＋裝置表都只查單一日期分區、
 });
 
 await ok('比對列轉換：BQ 字串轉數字、金額去浮點尾數、缺值當 0', () => {
-  const [r] = toReconRows([{ platform: 'D', account_id: '1', account_name: 'A', f_imp: '10', f_click: '2', f_spend: '3.000000001', v_imp: null, v_click: '2', v_spend: '3' }]);
-  assert.deepEqual(r, { platform: 'D', accountId: '1', accountName: 'A', fact: { imp: 10, click: 2, spend: 3 }, device: { imp: 0, click: 2, spend: 3 } });
+  const [r] = toReconRows([{ platform: 'D', account_id: '1', account_name: 'A', f_imp: '10', f_click: '2', f_spend: '3.000000001', v_imp: null, v_click: '2', v_spend: '3', m_imp: '9', m_click: '2', m_spend: '3' }]);
+  assert.deepEqual(r, {
+    platform: 'D', accountId: '1', accountName: 'A',
+    fact: { imp: 10, click: 2, spend: 3 }, device: { imp: 0, click: 2, spend: 3 }, media: { imp: 9, click: 2, spend: 3 },
+  });
 });
 
 await ok('吻合率：逐帳戶取絕對差，A 多 B 少不會互相抵銷；取三指標最差', () => {
@@ -764,6 +770,142 @@ await ok('BQ 衝突重試：衝突就等一下重送、成功就停；非衝突�
   calls = 0;
   await assert.rejects(retryOnBqConflict(async () => { calls++; throw new Error('concurrent update'); }, { sleep, attempts: 4 }), /concurrent update/);
   assert.equal(calls, 4);
+});
+
+// ────────────────────────────── 媒體表（2026-10-08） ──────────────────────────────
+
+await ok('媒體列：四平台欄位＝schema、media／placement 對到各平台原始欄、同 key 加總成一列', () => {
+  const d = toDMediaRows({ id: '32265', name: '帳D' }, [
+    { date: '2026-10-06', campaign_id: '3636982', campaign_name: 'C', site_id: '61887744', site_name: 'www.storm.mg', impression: 27422, click: 1529, spend: 7908.82 },
+    { date: '2026-10-06', campaign_id: '3636982', campaign_name: 'C', site_id: '61887744', site_name: 'www.storm.mg', impression: 1, click: 0, spend: 0.1000000001 },
+  ], T);
+  assert.equal(d.length, 1);
+  assert.deepEqual(Object.keys(d[0]).sort(), keysOf(MEDIA_SCHEMA));
+  assert.deepEqual({ ...d[0], synced_at: undefined }, {
+    date: '2026-10-06', platform: 'D', account_id: '32265', account_name: '帳D', campaign_id: '3636982', campaign_name: 'C',
+    media: 'www.storm.mg', placement: '61887744', imp: 27423, click: 1529, spend: 7908.92, synced_at: undefined,
+  });
+
+  const rs = toRMediaRows([
+    { day: '2026-10-06', user_id: 10089, user_name: '4A_艾比傑', bundle: 'www.news.ebc.net.tw', impression: 202151, click: 538, payment_revenue: 2528.5 },
+    { day: '2026-10-06', user_id: 10089, user_name: '4A_艾比傑', bundle: 'supertv.ebc.net.tw', impression: 0, click: 0, payment_revenue: 0 },
+  ], T);
+  assert.equal(rs.length, 1); // 全 0 的列丟掉
+  const [r] = rs;
+  assert.equal(r.platform, 'R');
+  assert.equal(r.account_id, '10089');
+  assert.equal(r.media, 'www.news.ebc.net.tw');
+  assert.equal(r.campaign_id, null);
+  assert.equal(r.placement, null);
+  assert.equal(r.spend, 2528.5);
+
+  const [m] = toMMediaRows({ id: '875796', name: '福穀樂' }, [
+    { date: '2026-10-06', source: 'MSN New Tab River Cards', imp: 10, click: 1, spend: 2.5, conv_interest: 0, conv_decision: 0, conv_buy: 0 },
+  ], T);
+  assert.equal(m.media, 'MSN New Tab River Cards');
+  assert.equal(m.account_id, '875796');
+
+  const p = toPMediaRows([
+    { date: 'Tue, 06 Oct 2026 00:00:00 GMT', advertiser: '464-144-2909', advertiser_name: '安達人壽', campaign_id: 7, domain: 'tsna.com', slot: 'tsna_prism_hot', impressions: 4, clicks: 0, spend: 0.6 },
+    { date: '2026-10-06', advertiser: '', domain: 'x.com', slot: 's', impressions: 1, clicks: 0, spend: 0 },
+  ], T);
+  assert.equal(p[0].date, '2026-10-06');
+  assert.equal(p[0].media, 'tsna.com');
+  assert.equal(p[0].placement, 'tsna_prism_hot');
+  assert.equal(p[0].campaign_id, '7');
+  assert.equal(p[1].account_id, P_UNATTRIBUTED); // 沒 advertiser 的事件跟事實表一樣歸虛擬帳戶
+});
+
+await ok('媒體列：日期壞掉 → 丟錯（不寫進錯的分區）；缺帳戶 → 丟錯', () => {
+  assert.throws(() => toDMediaRows({ id: '1', name: 'a' }, [{ date: 'n/a', site_name: 'x' }], T), /無法解析的日期/);
+  assert.throws(() => toRMediaRows([{ day: '2026-10-06', bundle: 'x' }], T), /缺帳戶/);
+});
+
+await ok('R 媒體分批：每批 5 帳戶；截斷就對半拆重抓（丟掉截斷那批）；單一帳戶仍截斷 → 丟錯', async () => {
+  const ids = ['1', '2', '3', '4', '5', '6', '7'];
+  const calls: string[] = [];
+  // 帳戶 1~5 一起查會截斷，拆成 [1,2,3]、[4,5] 就不會
+  const rows = await fetchRMediaRaw(ids, async (batch) => {
+    calls.push(batch.join(','));
+    const truncated = batch.length === 5;
+    return { rows: batch.map((u) => ({ user_id: u, partial: truncated })), truncated };
+  });
+  assert.deepEqual(calls, ['1,2,3,4,5', '1,2,3', '4,5', '6,7']);
+  assert.deepEqual(rows.map((r) => r.user_id), ids);
+  assert.ok(rows.every((r) => !r.partial)); // 截斷那批的半套列不能混進來
+
+  await assert.rejects(fetchRMediaRaw(['9'], async () => ({ rows: [], truncated: true })), /帳戶 9 .*截斷/);
+  assert.deepEqual(await fetchRMediaRaw([], async () => { throw new Error('不該呼叫'); }), []);
+});
+
+await ok('取代 SQL：both／facts 一併取代媒體表同平台同帳戶這段；裝置類模式不碰；沒給媒體表就不碰', () => {
+  const base = {
+    factTable: 'F', factCols: ['a'], factStage: 'SF', deviceTable: 'V', deviceCols: ['a'], deviceStage: 'SV',
+    mediaTable: 'MT', mediaCols: ['date', 'media'], mediaStage: 'SM', platform: 'D' as const, accountId: '100', sd: '2026-10-05', ed: '2026-10-06',
+  };
+  const both = buildReplaceSql(base);
+  assert.match(both, /DELETE FROM `MT` WHERE date BETWEEN DATE '2026-10-05' AND DATE '2026-10-06' AND platform = 'D' AND account_id = '100';/);
+  assert.match(both, /INSERT INTO `MT` \(date, media\) SELECT date, media FROM `SM`;/);
+  assert.ok(both.indexOf('`MT`') < both.indexOf('COMMIT')); // 同一個交易
+  assert.match(buildReplaceSql({ ...base, platform: 'M', tables: 'facts' }), /DELETE FROM `MT`.*platform = 'M'/);
+  assert.doesNotMatch(buildReplaceSql({ ...base, tables: 'device_orphans' }), /`MT`/);
+  assert.doesNotMatch(buildReplaceSql({ ...base, tables: 'device' }), /`MT`/);
+  // 媒體這段抓回 0 列：照樣刪（真的沒投放），但沒有 INSERT
+  const empty = buildReplaceSql({ ...base, mediaStage: null });
+  assert.match(empty, /DELETE FROM `MT`/);
+  assert.doesNotMatch(empty, /INSERT INTO `MT`/);
+  const { mediaTable: _t, mediaCols: _c, mediaStage: _s, ...noMedia } = base;
+  assert.doesNotMatch(buildReplaceSql(noMedia), /`MT`/);
+});
+
+await ok('job：素材層有點擊、媒體層 0 列 → 失敗不寫；只有零點擊曝光就照寫；媒體列一起交給 writeSlice', async () => {
+  const fact = { account_id: '100', account_name: 'a', date: '2026-09-22', imp: 50, click: 3, charge: 1 };
+  const bad = fakeDeps({ facts: [fact] });
+  bad.deps.fetch = async () => ({ facts: [fact], device: [], media: [], warnings: [] });
+  await assert.rejects(runNexusJob(job, () => {}, bad.deps), /媒體報表卻回 0 列/);
+  assert.deepEqual(bad.calls, []);
+
+  const zeroClick = fakeDeps({});
+  zeroClick.deps.fetch = async () => ({ facts: [{ ...fact, click: 0 }], device: [], media: [], warnings: [] });
+  await runNexusJob(job, () => {}, zeroClick.deps);
+  assert.deepEqual(zeroClick.calls, ['write:D:100:1', 'cov:D:100:1']);
+
+  let seen: unknown;
+  const good = fakeDeps({});
+  good.deps.fetch = async () => ({ facts: [fact], device: [], media: [{ date: '2026-09-22', account_id: '100' }], warnings: [] });
+  good.deps.writeSlice = async (s) => { seen = s.media; };
+  const r = await runNexusJob(job, () => {}, good.deps);
+  assert.deepEqual(seen, [{ date: '2026-09-22', account_id: '100' }]);
+  assert.match(r.message, /媒體 1 列/);
+});
+
+await ok('媒體層吻合：只比點擊／花費（曝光差不算）；M 不亮燈；client: 墊底帳戶與舊比對結果不列入', () => {
+  const mr = (platform: any, accountId: string, f: [number, number, number], m?: [number, number, number]): NexusReconRow => ({
+    ...rr(platform, accountId, f, f), ...(m ? { media: { imp: m[0], click: m[1], spend: m[2] } } : {}),
+  });
+  // D 曝光少 0.3% 但點擊、花費一致 ⇒ 100%
+  assert.equal(summarizeMediaRecon('D', [mr('D', 'a', [1000, 10, 100], [997, 10, 100])]).match, 1);
+  const r = summarizeMediaRecon('R', [mr('R', 'a', [100, 10, 100], [100, 10, 90]), mr('R', 'b', [100, 10, 100], [100, 10, 100])]);
+  assert.equal(r.match, 1 - 10 / 200);
+  assert.equal(r.graded, true);
+  assert.equal(summarizeMediaRecon('M', [mr('M', '1', [1, 1, 1], [1, 1, 1])]).graded, false);
+  assert.equal(summarizeMediaRecon('M', [mr('M', `${M_UNMAPPED_PREFIX}9`, [100, 10, 100], [0, 0, 0])]).match, null);
+  assert.equal(summarizeMediaRecon('D', [mr('D', 'a', [100, 10, 100])]).match, null); // 舊結果沒有媒體層
+});
+
+await ok('健檢：媒體層吻合寫進結論；D 媒體層落差亮燈，M 落差只列數字', () => {
+  const inp = healthBase();
+  inp.recon = {
+    checkedAt: '2026-09-24 04:40:00',
+    rows: [
+      { ...rr('D', 'a', [100, 10, 100], [100, 10, 100]), media: { imp: 100, click: 5, spend: 50 } },
+      { ...rr('M', 'm', [100, 10, 100], [100, 10, 100]), media: { imp: 100, click: 5, spend: 50 } },
+    ],
+  };
+  const h = evaluateHealth(inp);
+  assert.ok(h.summary.some((s) => s.startsWith('媒體層吻合 D 50.0%／M 50.0%')), h.summary.join(' | '));
+  assert.ok(h.items.some((i) => i.level === 'alert' && /D（Discovery）.*媒體層/.test(i.text)));
+  assert.ok(!h.items.some((i) => /M（MGID）.*媒體層/.test(i.text)));
 });
 
 console.log(`\n全部 ${n} 項通過`);

@@ -14,7 +14,7 @@ import {
 } from '../../core/store.js';
 import { fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, M_UNMAPPED_PREFIX, type Row, type FetchResult } from './fetch.js';
 import {
-  FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX,
+  FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, MEDIA_TABLE, MEDIA_SCHEMA, TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX,
   integratedViewSql,
 } from './schema.js';
 
@@ -146,13 +146,16 @@ export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId
 /**
  * 寫哪幾張表：M 的事實表（各帳戶 job）與裝置表（Redash 全平台 job）分開寫，其餘平台一起寫。
  * 'device_orphans'＝M Redash 全平台 job：整段裝置表＋事實表裡 client: 開頭的墊底列（只動這些，正式帳戶的事實列碰不到）。
+ * 媒體表跟著事實表走：'both'／'facts' 會一併取代媒體表這段（同平台＋同帳戶），裝置類模式不碰。
  */
 export type SliceTables = 'both' | 'facts' | 'device' | 'device_orphans';
 
-/** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表與／或裝置表的這段切片刪掉再寫回。 */
+/** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表、裝置表、媒體表的這段切片刪掉再寫回。 */
 export function buildReplaceSql(o: {
   factTable: string; factCols: string[]; factStage: string | null;
   deviceTable: string; deviceCols: string[]; deviceStage: string | null;
+  /** 不給就不動媒體表 */
+  mediaTable?: string; mediaCols?: string[]; mediaStage?: string | null;
   platform: NexusPlatform; accountId: string | null; sd: string; ed: string; tables?: SliceTables;
 }): string {
   const tables = o.tables ?? 'both';
@@ -171,6 +174,10 @@ export function buildReplaceSql(o: {
   if (tables !== 'facts') {
     lines.push(`DELETE FROM \`${o.deviceTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
     if (o.deviceStage) lines.push(`INSERT INTO \`${o.deviceTable}\` (${cols(o.deviceCols)}) SELECT ${cols(o.deviceCols)} FROM \`${o.deviceStage}\`;`);
+  }
+  if (o.mediaTable && o.mediaCols && (tables === 'both' || tables === 'facts')) {
+    lines.push(`DELETE FROM \`${o.mediaTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
+    if (o.mediaStage) lines.push(`INSERT INTO \`${o.mediaTable}\` (${cols(o.mediaCols)}) SELECT ${cols(o.mediaCols)} FROM \`${o.mediaStage}\`;`);
   }
   lines.push('COMMIT TRANSACTION;');
   return lines.join('\n');
@@ -210,13 +217,14 @@ export async function retryOnBqConflict<T>(
   }
 }
 
-/** 把一個切片寫進 BQ（整段取代）。 */
+/** 把一個切片寫進 BQ（整段取代）。media 不給（undefined）＝這次沒抓媒體層，媒體表原封不動；給空陣列＝這段真的沒有、照樣清掉。 */
 export async function writeSlice(o: {
-  platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; tables?: SliceTables;
+  platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; media?: Row[]; tables?: SliceTables;
 }): Promise<void> {
   // 防呆先做、再碰 BQ
   assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`);
   assertRowsInSlice(o.device, o.sd, o.ed, o.accountId, `${o.platform} 裝置表`);
+  if (o.media) assertRowsInSlice(o.media, o.sd, o.ed, o.accountId, `${o.platform} 媒體表`);
   if (o.tables === 'device_orphans') {
     const bad = o.facts.find((r) => !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX));
     if (bad) throw new Error(`M 墊底列的帳戶 ${String(bad.account_id)} 不是 ${M_UNMAPPED_PREFIX} 開頭，拒絕寫入（會跟正式帳戶重複）`);
@@ -229,9 +237,12 @@ export async function writeSlice(o: {
     if (factStage) stages.push(factStage);
     const deviceStage = await loadStage(DEVICE_SCHEMA, o.device, `${tag}_d`);
     if (deviceStage) stages.push(deviceStage);
+    const mediaStage = o.media ? await loadStage(MEDIA_SCHEMA, o.media, `${tag}_m`) : null;
+    if (mediaStage) stages.push(mediaStage);
     const sql = buildReplaceSql({
       factTable: FACT_TABLE[o.platform], factCols: FACT_SCHEMA[o.platform].map((f) => f.name), factStage,
       deviceTable: DEVICE_TABLE, deviceCols: DEVICE_SCHEMA.map((f) => f.name), deviceStage,
+      ...(o.media ? { mediaTable: MEDIA_TABLE, mediaCols: MEDIA_SCHEMA.map((f) => f.name), mediaStage } : {}),
       platform: o.platform, accountId: o.accountId, sd: o.sd, ed: o.ed, tables: o.tables,
     });
     // 四個平台各自一條線同時跑，但都要改共用的裝置表 ⇒ 只有這一步排隊（抓 API、載暫存表照樣平行）
@@ -244,6 +255,7 @@ export async function writeSlice(o: {
 // 覆蓋紀錄用：各平台的曝光／花費欄名
 const IMP_KEY: Record<NexusPlatform, string> = { D: 'imp', R: 'impression', M: 'imp', P: 'impressions' };
 const SPEND_KEY: Record<NexusPlatform, string> = { D: 'charge', R: 'payment_revenue', M: 'spend', P: 'spend' };
+const CLICK_KEY: Record<NexusPlatform, string> = { D: 'click', R: 'click', M: 'click', P: 'clicks' };
 
 /** 事實列 → 每帳戶每天一筆覆蓋紀錄。純函式。 */
 export function coverageEntries(platform: NexusPlatform, facts: Row[]): NexusCoverageEntry[] {
@@ -333,13 +345,21 @@ export async function runNexusJob(
     return { facts: 0, device: 0, skipped: true, message: `${label}：無投放` };
   }
 
-  onPhase(`寫入 BQ（${res.facts.length} 列＋裝置 ${res.device.length} 列）`);
-  await deps.writeSlice({ platform: job.platform, accountId, sd: job.sd, ed: job.ed, facts: res.facts, device: res.device, tables });
+  // 媒體層防呆：素材層有點擊、媒體層卻 0 列＝媒體報表出狀況，整個 job 失敗重試（不能把媒體表這段清空）。
+  // 用點擊不用曝光：M 的媒體報表整支排除生涯零點擊 campaign，只有零點擊曝光的帳戶本來就可能 0 列。
+  if (res.media && !res.media.length) {
+    const clicks = res.facts.reduce((s, r) => s + (Number(r[CLICK_KEY[job.platform]]) || 0), 0);
+    if (clicks > 0) throw new Error(`${label}：素材層有 ${clicks} 次點擊，媒體報表卻回 0 列，疑似 API 異常，不寫入`);
+  }
+
+  onPhase(`寫入 BQ（${res.facts.length} 列＋裝置 ${res.device.length} 列${res.media ? `＋媒體 ${res.media.length} 列` : ''}）`);
+  await deps.writeSlice({ platform: job.platform, accountId, sd: job.sd, ed: job.ed, facts: res.facts, device: res.device, media: res.media, tables });
   // 覆蓋紀錄只記事實表；裝置 job 不動它（accountId=null 會把 M 各帳戶的紀錄整段清掉）
   if (!deviceOnly) await deps.replaceCoverage(job.platform, accountId, job.sd, job.ed, coverageEntries(job.platform, res.facts));
   const warn = res.warnings.length ? `；⚠️ ${res.warnings.join('；')}` : '';
+  const media = res.media ? `、媒體 ${res.media.length} 列` : '';
   return {
     facts: res.facts.length, device: res.device.length, skipped: false,
-    message: `${label}：${deviceOnly ? '' : `${res.facts.length} 列、`}裝置 ${res.device.length} 列${warn}`,
+    message: `${label}：${deviceOnly ? '' : `${res.facts.length} 列、`}裝置 ${res.device.length} 列${media}${warn}`,
   };
 }
