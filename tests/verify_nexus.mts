@@ -829,7 +829,7 @@ await ok('R 媒體分批：每批 5 帳戶；截斷就對半拆重抓（丟掉�
     calls.push(batch.join(','));
     const truncated = batch.length === 5;
     return { rows: batch.map((u) => ({ user_id: u, partial: truncated })), truncated };
-  });
+  }, 5);
   assert.deepEqual(calls, ['1,2,3,4,5', '1,2,3', '4,5', '6,7']);
   assert.deepEqual(rows.map((r) => r.user_id), ids);
   assert.ok(rows.every((r) => !r.partial)); // 截斷那批的半套列不能混進來

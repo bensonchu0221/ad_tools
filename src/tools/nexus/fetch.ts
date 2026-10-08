@@ -308,25 +308,41 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
   // 單日仍超過 R 的單次列數上限＝資料被截斷，寧可整個 job 失敗也不要寫進半套數字
   if (warnings.length) throw new Error(`R 資料被截斷，不寫入：${warnings.join('；')}`);
 
-  // 媒體層：帳戶取自剛抓回的素材列（有數字的才查），不多打一次清單
-  const ids = [...new Set(raw
-    .filter((r: any) => Number(r.impression) || Number(r.click) || Number(r.payment_revenue))
-    .map((r: any) => String(r.user_id ?? '')).filter(Boolean))].sort();
-  onPhase(`R 媒體報表 ${sd}~${ed}（${ids.length} 個帳戶）`);
-  const mediaRaw = await fetchRMediaRaw(ids, async (userIds) => {
-    let truncated = false;
-    const rows = await fetchReport({
-      userType: 'super', userIds, startDate: sd, endDate: ed,
-      dimensions: ['day', 'user_id', 'app_bundle_id'], metrics: ['impression', 'click', 'payment_revenue'],
-      onWarn: () => { truncated = true; },
+  // 媒體層：逐日查、每天只查當天素材層有數字的帳戶（取自剛抓回的素材列，不多打一次清單）。
+  // ⚠️ R 報表 API 有「每 token 每日請求上限」（code 1003，Super token 用完當天就不能再查）。2026-10-08 第一版回補
+  // 每段 30 天先查整週（5 帳戶×7 天必破 10,000 列、白打）再拆單日，一段約 255 次請求，跑三段就把 Super 當天額度打光。
+  // 改成逐日直接查＋大批次：一天約 2 次請求。
+  const idsByDay = new Map<string, Set<string>>();
+  for (const r of raw as any[]) {
+    if (!(Number(r.impression) || Number(r.click) || Number(r.payment_revenue))) continue;
+    const day = ymdDash(r.day), id = String(r.user_id ?? '');
+    if (!day || !id) continue;
+    if (!idsByDay.has(day)) idsByDay.set(day, new Set());
+    idsByDay.get(day)!.add(id);
+  }
+  const mediaRaw: any[] = [];
+  for (const day of [...idsByDay.keys()].sort()) {
+    const ids = [...idsByDay.get(day)!].sort();
+    onPhase(`R 媒體報表 ${day}（${ids.length} 個帳戶）`);
+    const dayRaw = await fetchRMediaRaw(ids, async (userIds) => {
+      let truncated = false;
+      const rows = await fetchReport({
+        userType: 'super', userIds, startDate: day, endDate: day,
+        dimensions: ['day', 'user_id', 'app_bundle_id'], metrics: ['impression', 'click', 'payment_revenue'],
+        onWarn: () => { truncated = true; },
+      });
+      return { rows, truncated };
     });
-    return { rows, truncated };
-  });
+    for (const r of dayRaw) mediaRaw.push(r);
+  }
   return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings };
 }
 
-/** R 媒體報表每批幾個帳戶：2026-10-06 全平台帳戶×bundle 一天 18,098 列（單次上限 10,000），5 帳戶一批單批最大 6,250 列。 */
-export const R_MEDIA_BATCH = 5;
+/**
+ * R 媒體報表（單日）每批幾個帳戶：2026-10-06 全平台 26 帳戶×bundle 一天 18,098 列（單次上限 10,000），
+ * 13 帳戶一批＝一天 2 次請求；某批破上限就對半拆（多 3 次），比固定小批次省請求額度。
+ */
+export const R_MEDIA_BATCH = 13;
 
 /**
  * R 帳戶×媒體分批抓：bundle 長尾很長（一天 7 千多個），全平台一次查會破單次 10,000 列上限而被截斷。
