@@ -835,6 +835,9 @@ await ok('R 媒體分批：每批 5 帳戶；截斷就對半拆重抓（丟掉�
   assert.ok(rows.every((r) => !r.partial)); // 截斷那批的半套列不能混進來
 
   await assert.rejects(fetchRMediaRaw(['9'], async () => ({ rows: [], truncated: true })), /帳戶 9 .*截斷/);
+  // 回補一段就有數十萬列：不能用展開參數 push（2026-10-08 實際 stack overflow）
+  const big = Array.from({ length: 300_000 }, () => ({ user_id: '1' }));
+  assert.equal((await fetchRMediaRaw(['1'], async () => ({ rows: big, truncated: false }))).length, 300_000);
   assert.deepEqual(await fetchRMediaRaw([], async () => { throw new Error('不該呼叫'); }), []);
 });
 

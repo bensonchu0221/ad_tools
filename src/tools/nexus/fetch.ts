@@ -341,7 +341,8 @@ export async function fetchRMediaRaw(
   const out: any[] = [];
   const run = async (ids: string[]): Promise<void> => {
     const { rows, truncated } = await fetchBatch(ids);
-    if (!truncated) { out.push(...rows); return; }
+    // 不能 out.push(...rows)：回補 30 天一段、5 帳戶一批可達數十萬列，展開成函式參數會 stack overflow（2026-10-08 回補實際炸過）
+    if (!truncated) { for (const r of rows) out.push(r); return; }
     if (ids.length === 1) throw new Error(`R 媒體報表帳戶 ${ids[0]} 單日仍超過單次列數上限，資料被截斷，不寫入`);
     const half = Math.ceil(ids.length / 2);
     await run(ids.slice(0, half));
