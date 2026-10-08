@@ -226,28 +226,32 @@ async function get(url: string, token: string, maxRetries = 4): Promise<any> {
 
 const LIST_PAGE = 500; // campaigns/teasers 單頁上限
 
-// campaigns/teasers 的 start 是「1-based 頁碼」（start=0 回 ERROR_MIN_PAGE_NUMBER_1），非 row offset。
+// ⚠️ 兩支清單端點的 start 語意不同（2026-10-08 實測 877419／868612）：
+//   campaigns：start＝1-based 頁碼（start=0 回 400 ERROR_MIN_PAGE_NUMBER_1；limit=5&start=2 是第 2 頁）
+//   teasers  ：start＝0-based 筆數 offset（start=1 從第 2 筆開始）
+// 曾把 teasers 也當頁碼帶 start=1 → 每個帳戶的第一支 teaser 永遠漏抓，零點擊 campaign 因此救不回 teaser 級
+// （OSIM 12507750 teaser 28099347 少 12 曝光 → 整支落到 ZERO_CLICK_BLANK_NOTE）。
 // 逐頁撈齊：一次一物件 map，直到某頁未滿 LIST_PAGE 為止。
 async function fetchListPaged<T>(
-  client: MgidClient, path: string, take: (v: any) => T
+  client: MgidClient, path: string, paging: 'page' | 'offset', take: (v: any) => T
 ): Promise<Record<string, T>> {
   const map: Record<string, T> = {};
-  let page = 1;
+  let start = paging === 'page' ? 1 : 0;
   while (true) {
-    const j = await get(`${BASE}/goodhits/clients/${client.apiClientId}/${path}?limit=${LIST_PAGE}&start=${page}`, client.token);
+    const j = await get(`${BASE}/goodhits/clients/${client.apiClientId}/${path}?limit=${LIST_PAGE}&start=${start}`, client.token);
     if (!j || typeof j !== 'object') break;
     const entries = Object.entries<any>(j);
     if (!entries.length) break;
     for (const [id, v] of entries) map[String(id)] = take(v);
     if (entries.length < LIST_PAGE) break; // 最後一頁
-    page += 1;
+    start += paging === 'page' ? 1 : LIST_PAGE;
   }
   return map;
 }
 
 /** 取 client 的 campaignId→name 對照（分頁把全部撈齊）。 */
 export async function fetchCampaignNameMap(client: MgidClient): Promise<Record<string, string>> {
-  return fetchListPaged(client, 'campaigns', (c) => c?.name ?? '');
+  return fetchListPaged(client, 'campaigns', 'page', (c) => c?.name ?? '');
 }
 
 /**
@@ -260,7 +264,7 @@ export async function fetchTeaserIndex(client: MgidClient): Promise<{
   meta: Record<string, { title: string; url: string; image: string }>;
   byCampaign: Record<string, string[]>;
 }> {
-  const raw = await fetchListPaged(client, 'teasers', (t) => ({
+  const raw = await fetchListPaged(client, 'teasers', 'offset', (t) => ({
     title: t?.title ?? '', url: t?.url ?? '', image: t?.imageLink ?? '', campaignId: String(t?.campaignId ?? ''),
   }));
   const meta: Record<string, { title: string; url: string; image: string }> = {};
