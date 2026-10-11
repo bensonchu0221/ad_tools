@@ -84,15 +84,13 @@ export interface ReportOptions {
   onRequests?: (n: number) => void; // 這次送出幾個 HTTP 請求（R 每 token 有每日請求上限，呼叫端拿來記帳）
 }
 
-/** 取得 rixbee 報表原始資料列（跨日期合併）。欄位對應留給呼叫端處理。 */
-export async function fetchReport(opts: ReportOptions): Promise<any[]> {
+/** 組 R 報表請求、解析回應（fetchReport／fetchReportPaged 共用）。 */
+function reportClient(opts: ReportOptions) {
   const { userId, token } = cred(opts.userType);
   if (!token) throw new Error(`缺少 rixbee ${opts.userType} token（設定 env RIXBEE_*_TOKEN）`);
 
   const dimensions = opts.dimensions ?? ['day', 'cpg_id', 'cr_id'];
   const metrics = opts.metrics ?? ['impression', 'click'];
-  // probe 只要 1 列即可判存在性；一般查詢拿滿 PAGE_LIMIT（預設 end=500 會靜默截斷，實測一週就破 500）
-  const end = opts.maxRows ?? PAGE_LIMIT;
 
   // 改用 POST：token 放 header、參數放 JSON body。避免 GET 把 user_id[] 全塞進 query 造成 URL 過長。
   const headers = {
@@ -100,7 +98,7 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
     'x-authorization': token,
     'Content-Type': 'application/json',
   };
-  const buildReq = (from: string, to: string) => ({
+  const buildReq = (from: string, to: string, start: number, end: number, extra: Record<string, unknown> = {}) => ({
     url: BASE,
     init: {
       method: 'POST',
@@ -113,8 +111,9 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
         dimensions,
         metrics,
         user_id: opts.userIds,
-        start: 0,
+        start,
         end,
+        ...extra,
       }),
     } as RequestInit,
   });
@@ -135,6 +134,15 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
     const data = json?.data?.data;
     return { rows: Array.isArray(data) ? data : [], total: Number(json?.data?.total) || 0 };
   };
+  return { buildReq, parse };
+}
+
+/** 取得 rixbee 報表原始資料列（跨日期合併）。欄位對應留給呼叫端處理。 */
+export async function fetchReport(opts: ReportOptions): Promise<any[]> {
+  const { buildReq: req, parse } = reportClient(opts);
+  // probe 只要 1 列即可判存在性；一般查詢拿滿 PAGE_LIMIT（預設 end=500 會靜默截斷，實測一週就破 500）
+  const end = opts.maxRows ?? PAGE_LIMIT;
+  const buildReq = (from: string, to: string) => req(from, to, 0, end);
 
   const chunks = weekChunks(opts.startDate, opts.endDate);
   opts.onRequests?.(chunks.length);
@@ -168,4 +176,31 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
     }
   }
   return rows;
+}
+
+/**
+ * 單一日期區間、依 orderKey 排序逐頁抓完（每頁 PAGE_LIMIT 列），給單日仍破 10,000 列的查詢用。
+ * R 報表 API 有排序參數 `order_key`（欄位）＋`order`（asc/desc），文件沒寫、2026-10-12 實測：
+ *  - 不帶排序翻頁不穩：帳戶 9763 6/13 共 13,821 列，第二頁 3,821 列有 2,781 列跟第一頁重複，去重後少 14% 曝光。
+ *  - `order_key:'app_bundle_id'` 翻頁：6/13、6/10 兩頁重疊 0、缺 0，曝光／點擊＝帳戶總數。
+ *  - order_key 只能是查詢裡有的維度或指標（1002 "The order key only support ..."），所以只有單帳戶單日時 bundle 才唯一。
+ * 回傳的列呼叫端仍要用排序鍵去重、再拿帳戶總數驗。任一頁不是合法回應就丟錯（不能把空頁當成沒資料）。
+ */
+export async function fetchReportPaged(opts: ReportOptions & { orderKey: string }): Promise<{ rows: any[]; total: number }> {
+  const { buildReq, parse } = reportClient(opts);
+  const extra = { order_key: opts.orderKey, order: 'asc' };
+  const page = async (start: number) => {
+    opts.onRequests?.(1);
+    const [text] = await batchFetch([buildReq(opts.startDate, opts.endDate, start, start + PAGE_LIMIT, extra)]);
+    if (!text.trim().startsWith('{')) throw new Error(`R 報表分頁 start=${start} 沒拿到回應`);
+    return parse(text);
+  };
+  const first = await page(0);
+  const rows = [...first.rows];
+  for (let start = PAGE_LIMIT; start < first.total; start += PAGE_LIMIT) {
+    const p = await page(start);
+    if (p.total !== first.total) throw new Error(`R 報表分頁期間總列數變了（${first.total} → ${p.total}），不寫入`);
+    for (const r of p.rows) rows.push(r);
+  }
+  return { rows, total: first.total };
 }

@@ -4,7 +4,7 @@
 import {
   getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getCampaignDeviceReports, getSiteReports, normalizePopinImage,
 } from '../../core/popin.js';
-import { fetchReport } from '../../core/rixbee.js';
+import { fetchReport, fetchReportPaged } from '../../core/rixbee.js';
 import {
   fetchMgidReport, fetchMgidSourceReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex, getClientCurrency, getClientTimezone,
   type MgidClient, type MgidReportRow, type MgidSourceRow,
@@ -338,10 +338,55 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
         onWarn: () => { truncated = true; }, onRequests,
       });
       return { rows, truncated };
+    }, R_MEDIA_BATCH, async (id) => {
+      // 單帳戶單日仍破 10,000 列：依 bundle 排序逐頁抓完，再拿帳戶當日總數驗（每個帳戶日多 2~3 次請求）
+      onPhase(`R 媒體報表 ${day} 帳戶 ${id} 超過單次上限，排序分頁抓`);
+      const metrics = ['impression', 'click', 'payment_revenue'];
+      const { rows } = await fetchReportPaged({
+        userType: 'super', userIds: [id], startDate: day, endDate: day,
+        dimensions: ['day', 'user_id', 'app_bundle_id'], metrics, orderKey: 'app_bundle_id', onRequests,
+      });
+      const acct = await fetchReport({
+        userType: 'super', userIds: [id], startDate: day, endDate: day, dimensions: ['day', 'user_id'], metrics, onRequests,
+      });
+      return reconcileRMediaPaged(id, day, rows, acct, (m) => warnings.push(m));
     });
     for (const r of dayRaw) mediaRaw.push(r);
   }
   return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings, requests };
+}
+
+/**
+ * 排序分頁抓回的單帳戶單日媒體列：以 bundle 去重，再跟帳戶當日總數（dimensions day×user_id）對帳。純函式。
+ *  - 曝光、點擊一致，花費差在逐列四捨五入範圍內 ⇒ 照寫（實測 6/13 花費差 0.15、6/10 差 0.07，都是捨入）。
+ *  - 媒體列加總比總數少 ⇒ 差額寫成一列 media＝Others（倉庫不捨棄資料，總數一定對），並記 warning。
+ *  - 媒體列加總比總數多 ⇒ 資料自相矛盾，丟錯不寫。
+ */
+export function reconcileRMediaPaged(userId: string, day: string, rows: any[], acctRows: any[], onWarn: (m: string) => void): any[] {
+  const seen = new Map<string, any>();
+  for (const r of rows) {
+    const k = String(r.bundle ?? '');
+    if (!seen.has(k)) seen.set(k, r);
+  }
+  const out = [...seen.values()];
+  const sum = (rs: any[], f: string) => rs.reduce((a, r) => a + (Number(r[f]) || 0), 0);
+  const acct = acctRows.filter((r) => String(r.user_id) === userId);
+  if (!acct.length) throw new Error(`R 媒體報表帳戶 ${userId} ${day} 分頁抓完但查不到帳戶總數，不寫入`);
+  const diff = {
+    imp: sum(acct, 'impression') - sum(out, 'impression'),
+    click: sum(acct, 'click') - sum(out, 'click'),
+    spend: Math.round((sum(acct, 'payment_revenue') - sum(out, 'payment_revenue')) * 100) / 100,
+  };
+  const spendTol = 0.005 * (out.length + 1); // 每列 payment_revenue 都已四捨五入到分
+  if (diff.imp === 0 && diff.click === 0 && Math.abs(diff.spend) <= spendTol) return out;
+  if (diff.imp < 0 || diff.click < 0 || diff.spend < -spendTol) {
+    throw new Error(`R 媒體報表帳戶 ${userId} ${day} 分頁加總大於帳戶總數（曝光 ${diff.imp}、點擊 ${diff.click}、花費 ${diff.spend}），不寫入`);
+  }
+  onWarn(`R 媒體報表帳戶 ${userId} ${day} 分頁後仍差曝光 ${diff.imp}、點擊 ${diff.click}、花費 ${diff.spend}，差額寫成 Others`);
+  const a = acct[0];
+  out.push({ day: a.day ?? day, user_id: a.user_id, user_name: a.user_name, bundle: 'Others',
+    impression: diff.imp, click: diff.click, payment_revenue: Math.max(diff.spend, 0) });
+  return out;
 }
 
 /**
@@ -352,20 +397,26 @@ export const R_MEDIA_BATCH = 13;
 
 /**
  * R 帳戶×媒體分批抓：bundle 長尾很長（一天 7 千多個），全平台一次查會破單次 10,000 列上限而被截斷。
- * 某批回報截斷 ⇒ 丟掉該批、對半拆重抓；拆到單一帳戶仍截斷 ⇒ 丟錯（job 失敗，不寫半套）。
- * fetchBatch 由呼叫端注入（測試用假資料）。
+ * 某批回報截斷 ⇒ 丟掉該批、對半拆重抓；拆到單一帳戶仍截斷 ⇒ 交給 fetchSingle 排序分頁抓完
+ * （2026-10-12：帳戶 9763 4A_實力_Disney 6/10~6/15 單日 10,452~13,821 列）；沒給 fetchSingle 就丟錯（不寫半套）。
+ * fetchBatch／fetchSingle 由呼叫端注入（測試用假資料）。
  */
 export async function fetchRMediaRaw(
   userIds: string[],
   fetchBatch: (userIds: string[]) => Promise<{ rows: any[]; truncated: boolean }>,
   batchSize = R_MEDIA_BATCH,
+  fetchSingle?: (userId: string) => Promise<any[]>,
 ): Promise<any[]> {
   const out: any[] = [];
   const run = async (ids: string[]): Promise<void> => {
     const { rows, truncated } = await fetchBatch(ids);
     // 不能 out.push(...rows)：回補 30 天一段、5 帳戶一批可達數十萬列，展開成函式參數會 stack overflow（2026-10-08 回補實際炸過）
     if (!truncated) { for (const r of rows) out.push(r); return; }
-    if (ids.length === 1) throw new Error(`R 媒體報表帳戶 ${ids[0]} 單日仍超過單次列數上限，資料被截斷，不寫入`);
+    if (ids.length === 1) {
+      if (!fetchSingle) throw new Error(`R 媒體報表帳戶 ${ids[0]} 單日仍超過單次列數上限，資料被截斷，不寫入`);
+      for (const r of await fetchSingle(ids[0])) out.push(r);
+      return;
+    }
     const half = Math.ceil(ids.length / 2);
     await run(ids.slice(0, half));
     await run(ids.slice(half));

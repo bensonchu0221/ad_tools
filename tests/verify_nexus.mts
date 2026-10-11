@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
-  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw,
+  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -18,7 +18,7 @@ import { reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, reconLevel,
 import { statusPage } from '../src/tools/nexus/page.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
-import { fetchReport, isRDailyLimit } from '../src/core/rixbee.js';
+import { fetchReport, fetchReportPaged, isRDailyLimit } from '../src/core/rixbee.js';
 
 const T = '2026-09-23T00:00:00.000Z';
 let n = 0;
@@ -431,6 +431,67 @@ await ok('R fetchReport：onRequests 回報實際送出的請求數（含破上�
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+await ok('R fetchReportPaged：帶 order_key／order、依 total 逐頁抓完；空回應或總數變動就丟錯', async () => {
+  const realFetch = globalThis.fetch;
+  process.env.RIXBEE_SUPER_TOKEN ||= 'test';
+  const bodies: any[] = [];
+  let mode: 'ok' | 'empty' | 'drift' = 'ok';
+  globalThis.fetch = (async (_u: any, init: any) => {
+    const b = JSON.parse(init.body);
+    bodies.push(b);
+    if (mode === 'empty' && b.start === 10000) return new Response('');
+    const total = mode === 'drift' && b.start === 10000 ? 22000 : 23000;
+    const n = Math.max(0, Math.min(b.end, total) - b.start);
+    return new Response(JSON.stringify({ status: { code: 0 }, data: { data: Array.from({ length: n }, (_, i) => ({ bundle: `b${b.start + i}` })), total } }));
+  }) as any;
+  const opts = { userType: 'super' as const, userIds: ['9763'], startDate: '2026-06-13', endDate: '2026-06-13', orderKey: 'app_bundle_id' };
+  try {
+    let n = 0;
+    const { rows, total } = await fetchReportPaged({ ...opts, onRequests: (k) => { n += k; } });
+    assert.equal(total, 23000);
+    assert.equal(rows.length, 23000);
+    assert.equal(n, 3);
+    assert.deepEqual(bodies.map((b) => [b.start, b.end, b.order_key, b.order]), [[0, 10000, 'app_bundle_id', 'asc'], [10000, 20000, 'app_bundle_id', 'asc'], [20000, 30000, 'app_bundle_id', 'asc']]);
+    mode = 'empty';
+    await assert.rejects(fetchReportPaged(opts), /start=10000 沒拿到回應/);
+    mode = 'drift';
+    await assert.rejects(fetchReportPaged(opts), /總列數變了/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await ok('R 媒體分頁對帳：去重後等於帳戶總數照寫；少了補 Others；多了丟錯', () => {
+  const acct = [{ day: '2026-06-13', user_id: 9763, user_name: 'Disney', impression: 100, click: 5, payment_revenue: 10.01 }];
+  const rows = [
+    { day: '2026-06-13', user_id: 9763, bundle: 'a', impression: 60, click: 3, payment_revenue: 6.004 },
+    { day: '2026-06-13', user_id: 9763, bundle: 'a', impression: 60, click: 3, payment_revenue: 6.004 }, // 分頁重複
+    { day: '2026-06-13', user_id: 9763, bundle: 'b', impression: 40, click: 2, payment_revenue: 4.004 },
+  ];
+  const warns: string[] = [];
+  const exact = reconcileRMediaPaged('9763', '2026-06-13', rows, acct, (m) => warns.push(m));
+  assert.deepEqual(exact.map((r) => r.bundle), ['a', 'b']); // 花費差 0.002 在捨入範圍內
+  assert.equal(warns.length, 0);
+
+  const short = reconcileRMediaPaged('9763', '2026-06-13', rows.slice(0, 1), acct, (m) => warns.push(m));
+  const others = short.find((r) => r.bundle === 'Others');
+  assert.deepEqual([others.impression, others.click, others.payment_revenue, others.user_name], [40, 2, 4.01, 'Disney']);
+  assert.match(warns[0], /差曝光 40.*Others/);
+  // 轉成倉庫列後帳戶加總＝帳戶總數
+  assert.equal(toRMediaRows(short, T).reduce((a, r: any) => a + r.imp, 0), 100);
+
+  assert.throws(() => reconcileRMediaPaged('9763', '2026-06-13', [...rows, { user_id: 9763, bundle: 'c', impression: 1, click: 0, payment_revenue: 0 }], acct, () => {}), /大於帳戶總數/);
+  assert.throws(() => reconcileRMediaPaged('9763', '2026-06-13', rows, [], () => {}), /查不到帳戶總數/);
+});
+
+await ok('R 媒體分批：單一帳戶仍截斷且有 fetchSingle → 改用分頁結果，不丟錯', async () => {
+  const calls: string[] = [];
+  const rows = await fetchRMediaRaw(['1', '2'], async (batch) => ({ rows: batch.map((u) => ({ user_id: u })), truncated: batch.includes('2') }), 13,
+    async (id) => { calls.push(id); return [{ user_id: id, paged: true }]; });
+  assert.deepEqual(calls, ['2']);
+  assert.deepEqual(rows, [{ user_id: '1' }, { user_id: '2', paged: true }]);
 });
 
 await ok('view SQL：四平台 UNION＋customer 對照先收斂成一帳一列', () => {
