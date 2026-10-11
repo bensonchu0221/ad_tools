@@ -6,6 +6,7 @@
 //  - 以「平台 × 帳戶 × 日期區間」為取代單位：某個 D 帳號這次抓失敗，只有它這段不動，其他帳號照寫；
 //    隔天重抓 T-1/T-2 會自動補回（每日排程重疊兩天就是為了這個，也順帶修好 MGID 洛杉磯時區帳戶的半天數字）
 import { randomBytes } from 'node:crypto';
+import { isRDailyLimit } from '../../core/rixbee.js';
 import { bqEnsureTable, bqLoadRows, bqQuery, bqDeleteTable, bqUpsertView, sqlString, type BqField } from '../../core/bigquery.js';
 import {
   getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts,
@@ -81,6 +82,36 @@ export const isSkipped = (t: { platform: NexusPlatform; accountId: string }) => 
 export class NexusNoRetryError extends Error {}
 /** 前置 job 還沒跑完，晚點再來（不算失敗、不消耗重試次數）。 */
 export class NexusDeferError extends Error {}
+/**
+ * R 平台 API 回 1003（這把 token 今天的請求額度用完）：放回佇列、隔一段時間再試，不消耗重試次數。
+ * 以前照一般失敗走「10 分鐘後重試、最多 3 次」，三次都落在額度還沒恢復的時間裡，job 必定作廢
+ * （2026-10-08 回補 5 段＋10-09 每日 R 全這樣掛掉）。重置時間不明（10-09 04:21 還被擋、10-10 04:01 已恢復），
+ * 所以用固定間隔一直試；每試一次只多花一個請求。卡著的每日 job 健檢會報「每日批次還有 job 沒跑完」。
+ */
+export class NexusQuotaError extends Error {
+  constructor(message: string, readonly retryMinutes = R_QUOTA_RETRY_MIN) { super(message); }
+}
+/** 1003 之後多久再試一次（分鐘）。 */
+export const R_QUOTA_RETRY_MIN = 120;
+
+/**
+ * R 回補節流（2026-10-11）：R 全平台共用 Super token，回補一入列 5 段連著跑會把當天額度打光，
+ * 連帶隔天早上 nexus 每日 R 與 Report Hub 用 Super 的設定一起失敗（10-09 Report Hub 11 個設定 R 失敗）。
+ * 規則：台北 R_BACKFILL_FROM 之後、今天每日 R 已成功、Report Hub 沒有排隊／執行中的設定、
+ * 今天還沒跑過任何 R 回補 job ⇒ 才放行一段（30 天一段約 70 次請求）。回傳 null＝放行，否則回傳原因。純函式。
+ */
+export const R_BACKFILL_FROM = '07:00';
+export function rBackfillBlock(s: { hhmm: string; dailyROk: boolean; reportHubBusy: boolean; ranToday: number }): string | null {
+  if (s.hhmm < R_BACKFILL_FROM) return `R 回補 ${R_BACKFILL_FROM} 以後才跑（讓每日批次與 Report Hub 先用額度）`;
+  if (!s.dailyROk) return '今天的每日 R 還沒成功，R 回補先不跑';
+  if (s.reportHubBusy) return 'Report Hub 還在跑，R 回補先不跑';
+  if (s.ranToday > 0) return 'R 回補一天只跑一段，今天已經跑過';
+  return null;
+}
+/** 台北現在的 HH:MM。 */
+export function twHhmm(now = new Date()): string {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now);
+}
 /** 失敗訊息的前綴：健檢靠它把「拿不到、但本來就沒數字」的帳戶降成黃燈。 */
 export const UNREACHABLE_TAG = '[無法取得]';
 /** D 平台 API 拿不到這個帳戶（token 失效、或帳戶已移到 MediaGo）的錯誤訊息特徵。 */
@@ -335,6 +366,9 @@ export async function runNexusJob(
       const ever = await deps.coveredRows('D', accountId, '2000-01-01', '2999-12-31');
       if (ever === 0) throw new NexusNoRetryError(`${UNREACHABLE_TAG} ${label}：D 平台 API 拿不到這個帳戶，倉庫也從未有它的數字，不重試（${msg.slice(0, 160)}）`);
     }
+    if (job.platform === 'R' && isRDailyLimit(msg)) {
+      throw new NexusQuotaError(`${label}：R 平台 API 今天的請求額度用完（1003），${R_QUOTA_RETRY_MIN / 60} 小時後再試，不算失敗`);
+    }
     throw e;
   }
 
@@ -358,8 +392,9 @@ export async function runNexusJob(
   if (!deviceOnly) await deps.replaceCoverage(job.platform, accountId, job.sd, job.ed, coverageEntries(job.platform, res.facts));
   const warn = res.warnings.length ? `；⚠️ ${res.warnings.join('；')}` : '';
   const media = res.media ? `、媒體 ${res.media.length} 列` : '';
+  const reqs = res.requests !== undefined ? `、API 請求 ${res.requests} 次` : '';
   return {
     facts: res.facts.length, device: res.device.length, skipped: false,
-    message: `${label}：${deviceOnly ? '' : `${res.facts.length} 列、`}裝置 ${res.device.length} 列${media}${warn}`,
+    message: `${label}：${deviceOnly ? '' : `${res.facts.length} 列、`}裝置 ${res.device.length} 列${media}${reqs}${warn}`,
   };
 }

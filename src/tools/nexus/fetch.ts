@@ -19,7 +19,11 @@ import { D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE
 
 export type Row = Record<string, unknown>;
 /** media＝媒體表列（2026-10-08）；沒有媒體層的 job（M 裝置 job）省略。 */
-export interface FetchResult { facts: Row[]; device: Row[]; media?: Row[]; warnings: string[] }
+export interface FetchResult {
+  facts: Row[]; device: Row[]; media?: Row[]; warnings: string[];
+  /** 這個 job 打了幾次平台 API（目前只有 R 記：R 每 token 有每日請求上限，記下來才知道回補一段吃多少額度） */
+  requests?: number;
+}
 
 const compact = (ymd: string) => ymd.replace(/-/g, '');
 /** 各平台日期格式不一（YYYYMMDD／YYYY-MM-DD／YYYY/MM/DD）→ YYYY-MM-DD */
@@ -294,16 +298,18 @@ export function toRDeviceRows(raw: any[], syncedAt: string): Row[] {
 /** R 全平台（Super token、user_id 不帶＝全部帳戶）。 */
 export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
   const warnings: string[] = [];
+  let requests = 0;
+  const onRequests = (n: number) => { requests += n; };
   onPhase(`R 全平台素材報表 ${sd}~${ed}`);
   const raw = await fetchReport({
     userType: 'super', userIds: [], startDate: sd, endDate: ed,
-    dimensions: [...R_DIMENSIONS], metrics: [...R_METRICS], onWarn: (m) => warnings.push(m),
+    dimensions: [...R_DIMENSIONS], metrics: [...R_METRICS], onWarn: (m) => warnings.push(m), onRequests,
   });
   onPhase(`R 全平台裝置報表 ${sd}~${ed}`);
   const dev = await fetchReport({
     userType: 'super', userIds: [], startDate: sd, endDate: ed,
     dimensions: ['day', 'user_id', 'cpg_id', 'device_type'],
-    metrics: ['impression', 'click', 'payment_revenue', ...R_DEVICE_EVENTS], onWarn: (m) => warnings.push(m),
+    metrics: ['impression', 'click', 'payment_revenue', ...R_DEVICE_EVENTS], onWarn: (m) => warnings.push(m), onRequests,
   });
   // 單日仍超過 R 的單次列數上限＝資料被截斷，寧可整個 job 失敗也不要寫進半套數字
   if (warnings.length) throw new Error(`R 資料被截斷，不寫入：${warnings.join('；')}`);
@@ -329,13 +335,13 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
       const rows = await fetchReport({
         userType: 'super', userIds, startDate: day, endDate: day,
         dimensions: ['day', 'user_id', 'app_bundle_id'], metrics: ['impression', 'click', 'payment_revenue'],
-        onWarn: () => { truncated = true; },
+        onWarn: () => { truncated = true; }, onRequests,
       });
       return { rows, truncated };
     });
     for (const r of dayRaw) mediaRaw.push(r);
   }
-  return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings };
+  return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings, requests };
 }
 
 /**

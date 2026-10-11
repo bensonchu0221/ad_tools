@@ -12,9 +12,11 @@ import { bqDryRun } from '../../core/bigquery.js';
 import {
   dbAvailable, enqueueNexusJobs, claimNextNexusJob, markNexusJobPhase, markNexusJobDone, markNexusJobFailed, deferNexusJob,
   listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock, nexusReconFor, nexusBatchJobs, nexusJobsCovering,
+  nexusRBackfillState,
 } from '../../core/store.js';
 import {
   BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError, NexusDeferError,
+  NexusQuotaError, rBackfillBlock, twHhmm,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
 import { runRecon, reconSql, reconDue } from './recon.js';
@@ -86,7 +88,10 @@ export function registerNexus(app: FastifyInstance): void {
     // 拿不到鎖＝那條線上一分鐘的 worker 還在跑，這次跳過那條。
     const lane = (platform: NexusPlatform) => withNexusWorkerLock(platform, async () => {
       while (Date.now() - started < WORKER_BUDGET_MS) {
-        const job = await claimNextNexusJob(platform);
+        // R 回補節流：條件不合就只認領每日 job（回補留在佇列，條件合了下一分鐘的 worker 自然會接）
+        const dailyOnly = platform === 'R'
+          && rBackfillBlock({ hhmm: twHhmm(), ...(await nexusRBackfillState(twToday())) }) !== null;
+        const job = await claimNextNexusJob(platform, { dailyOnly });
         if (!job) break;
         try {
           const r = await runNexusJob(job, (p) => { void markNexusJobPhase(job.id, p).catch(() => {}); });
@@ -98,6 +103,12 @@ export function registerNexus(app: FastifyInstance): void {
             await deferNexusJob(job.id, msg);
             done.push({ id: job.id, platform, ok: true, message: `延後：${msg}` });
             continue;
+          }
+          if (e instanceof NexusQuotaError) {
+            await deferNexusJob(job.id, msg, e.retryMinutes);
+            app.log.warn({ jobId: job.id, platform: job.platform, error: msg }, 'nexus job deferred: R daily quota');
+            done.push({ id: job.id, platform, ok: true, message: `延後：${msg}` });
+            break; // 額度用完，這條線這一輪別再認領別的 R job
           }
           const gaveUp = await markNexusJobFailed(job.id, msg, { noRetry: e instanceof NexusNoRetryError });
           app.log.error({ jobId: job.id, platform: job.platform, account: job.accountId, gaveUp, error: msg }, 'nexus job failed');

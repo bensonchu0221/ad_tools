@@ -2347,7 +2347,7 @@ const NEXUS_JOB_COLS = `id, batch, kind, platform, account_id, account_name,
  * 認領某平台的下一筆（每日優先於回補，同類先進先出）。呼叫端須持有該平台的 withNexusWorkerLock，這裡就不必再防並發。
  * 順手把該平台心跳停太久的 running 收掉：還有重試額度就放回佇列，沒有就標失敗。
  */
-export async function claimNextNexusJob(platform: NexusPlatform): Promise<NexusJobRow | null> {
+export async function claimNextNexusJob(platform: NexusPlatform, opts: { dailyOnly?: boolean } = {}): Promise<NexusJobRow | null> {
   const p = await nexusPool();
   await p.query(
     `UPDATE nexus_jobs
@@ -2359,6 +2359,7 @@ export async function claimNextNexusJob(platform: NexusPlatform): Promise<NexusJ
   );
   const [rows] = await p.query(
     `SELECT id FROM nexus_jobs WHERE status = 'queued' AND platform = ? AND (retry_after IS NULL OR retry_after <= NOW())
+        ${opts.dailyOnly ? `AND kind = 'daily'` : ''}
       ORDER BY kind = 'daily' DESC, id ASC LIMIT 1`, [platform]
   );
   const id = (rows as any[])[0]?.id;
@@ -2408,6 +2409,27 @@ export async function deferNexusJob(id: number, reason: string, minutes = 5): Pr
        started_at=NULL, finished_at=NULL, retry_after=NOW() + INTERVAL ? MINUTE WHERE id=?`,
     [`等待中：${reason}`.slice(0, 255), reason.slice(0, 4000), minutes, id]
   );
+}
+
+/**
+ * R 回補節流要看的狀態（判斷規則在 nexus run.ts rBackfillBlock）：
+ *  - dailyROk：今天（台北）的每日批次 R job 已成功
+ *  - ranToday：今天跑過（認領過）的 R 回補 job 數。用 heartbeat_at：認領時寫入、失敗或延後都不清，跑過就算數
+ *  - reportHubBusy：Report Hub（adstream_jobs）有排隊或執行中的設定（它有些設定也用 Super token 查 R）
+ */
+export async function nexusRBackfillState(today: string): Promise<{ dailyROk: boolean; ranToday: number; reportHubBusy: boolean }> {
+  const p = await nexusPool();
+  const [[d], [b], [a]] = await Promise.all([
+    p.query(`SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = 'R' AND status = 'success'`, [`daily:${today}`]),
+    p.query(`SELECT COUNT(*) AS n FROM nexus_jobs WHERE platform = 'R' AND kind = 'backfill'
+               AND heartbeat_at IS NOT NULL AND CONVERT_TZ(heartbeat_at,'+00:00','+08:00') >= ?`, [`${today} 00:00:00`]),
+    p.query(`SELECT COUNT(*) AS n FROM adstream_jobs WHERE status IN ('queued','running')`),
+  ]);
+  return {
+    dailyROk: Number((d as any[])[0]?.n ?? 0) > 0,
+    ranToday: Number((b as any[])[0]?.n ?? 0),
+    reportHubBusy: Number((a as any[])[0]?.n ?? 0) > 0,
+  };
 }
 
 /** 同批次、某平台還沒跑完（排隊或執行中）的 job 數，可排除某個帳戶（通常是自己）。 */

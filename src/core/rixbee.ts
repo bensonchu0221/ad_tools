@@ -40,6 +40,12 @@ const R_ERROR_MAP: Record<string, string> = {
   '1006': '系統資料異常，請截圖通知你的 IT',
 };
 
+/**
+ * R API 回 1003＝這把 token 今天的請求額度用完（只鎖那一把，agency／direct 照常）。
+ * 錯誤訊息格式見 fetchReport parse：`…（1003 The number of requests…）`。
+ */
+export const isRDailyLimit = (msg: string) => msg.includes('（1003 ');
+
 const fmtDate = (d: Date) => d.toISOString().slice(0, 10);
 
 /** 照舊 rixbee.php：日期範圍切成 7 天一段（含頭尾），減少請求數 */
@@ -75,6 +81,7 @@ export interface ReportOptions {
   metrics?: string[];
   maxRows?: number; // 只取前 N 列（型別偵測 probe 用，只需判斷有無資料）；省略＝拿滿 PAGE_LIMIT
   onWarn?: (msg: string) => void; // 單段 total 超過上限（資料被截斷）時通知，呼叫端可收進 warnings
+  onRequests?: (n: number) => void; // 這次送出幾個 HTTP 請求（R 每 token 有每日請求上限，呼叫端拿來記帳）
 }
 
 /** 取得 rixbee 報表原始資料列（跨日期合併）。欄位對應留給呼叫端處理。 */
@@ -130,6 +137,7 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
   };
 
   const chunks = weekChunks(opts.startDate, opts.endDate);
+  opts.onRequests?.(chunks.length);
   const texts = await batchFetch(chunks.map((c) => buildReq(c.from, c.to)));
 
   const rows: any[] = [];
@@ -146,6 +154,7 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
   }
 
   if (splitDays.length) {
+    opts.onRequests?.(splitDays.length);
     const dayTexts = await batchFetch(splitDays.map((d) => buildReq(d, d)));
     for (let i = 0; i < dayTexts.length; i++) {
       const { rows: dayRows, total } = parse(dayTexts[i]);

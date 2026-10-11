@@ -8,6 +8,7 @@ import {
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
+  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
@@ -17,6 +18,7 @@ import { reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, reconLevel,
 import { statusPage } from '../src/tools/nexus/page.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
+import { fetchReport, isRDailyLimit } from '../src/core/rixbee.js';
 
 const T = '2026-09-23T00:00:00.000Z';
 let n = 0;
@@ -363,6 +365,72 @@ await ok('job：BQ 寫入失敗就不寫覆蓋紀錄（否則覆蓋紀錄會說�
   deps.writeSlice = async () => { throw new Error('BQ boom'); };
   await assert.rejects(runNexusJob(job, () => {}, deps), /BQ boom/);
   assert.deepEqual(calls, []);
+});
+
+// ── R 每日請求上限（1003）與回補節流 ──
+const R1003 = 'R API 每日使用到達上限，明天再試（或通知你的 IT）（1003 The number of requests for the day has reached the upper limit）';
+
+await ok('job：R 回 1003 → NexusQuotaError（延後、不算失敗）；別的平台訊息剛好含 1003 不受影響', async () => {
+  assert.equal(isRDailyLimit(R1003), true);
+  assert.equal(isRDailyLimit('HTTP 1003 bytes'), false);
+  const { deps, calls } = fakeDeps({});
+  deps.fetch = async () => { throw new Error(R1003); };
+  const err: any = await runNexusJob({ ...job, platform: 'R', accountId: '*' }, () => {}, deps).catch((e) => e);
+  assert.ok(err instanceof NexusQuotaError, String(err));
+  assert.equal(err.retryMinutes, R_QUOTA_RETRY_MIN);
+  assert.match(err.message, /額度用完.*不算失敗/);
+  assert.deepEqual(calls, []);
+  const d: any = await runNexusJob(job, () => {}, deps).catch((e) => e);
+  assert.ok(!(d instanceof NexusQuotaError));
+});
+
+await ok('job：有 requests 就寫進完成訊息（R 記帳用）', async () => {
+  const r = fakeDeps({ facts: [{ account_id: '9', account_name: 'r', date: '2026-09-22', impression: 1, payment_revenue: 1 }] });
+  const f = r.deps.fetch;
+  r.deps.fetch = async (...a) => ({ ...(await f(...a)), requests: 72 });
+  const res = await runNexusJob({ ...job, platform: 'R', accountId: '*' }, () => {}, r.deps);
+  assert.match(res.message, /API 請求 72 次/);
+  const d = fakeDeps({ facts: [{ account_id: '100', date: '2026-09-22' }] });
+  assert.doesNotMatch((await runNexusJob(job, () => {}, d.deps)).message, /API 請求/);
+});
+
+await ok('R 回補節流：07:00 前、每日 R 未成功、Report Hub 在跑、今天已跑過任一段 → 擋；全部合格才放行', () => {
+  const go = { hhmm: '07:30', dailyROk: true, reportHubBusy: false, ranToday: 0 };
+  assert.equal(R_BACKFILL_FROM, '07:00');
+  assert.equal(rBackfillBlock(go), null);
+  assert.equal(rBackfillBlock({ ...go, hhmm: '07:00' }), null);
+  assert.match(rBackfillBlock({ ...go, hhmm: '06:59' })!, /07:00 以後/);
+  assert.match(rBackfillBlock({ ...go, dailyROk: false })!, /每日 R/);
+  assert.match(rBackfillBlock({ ...go, reportHubBusy: true })!, /Report Hub/);
+  assert.match(rBackfillBlock({ ...go, ranToday: 1 })!, /一天只跑一段/);
+  assert.equal(rBackfillBlock({ ...go, hhmm: '23:59' }), null);
+});
+
+await ok('twHhmm：台北時間、24 小時制', () => {
+  assert.equal(twHhmm(new Date('2026-10-11T23:05:00Z')), '07:05');
+  assert.equal(twHhmm(new Date('2026-10-11T16:00:00Z')), '00:00');
+});
+
+await ok('R fetchReport：onRequests 回報實際送出的請求數（含破上限改單日補抓）', async () => {
+  const realFetch = globalThis.fetch;
+  process.env.RIXBEE_SUPER_TOKEN ||= 'test';
+  const bodies: any[] = [];
+  globalThis.fetch = (async (_u: any, init: any) => {
+    const b = JSON.parse(init.body);
+    bodies.push(b);
+    // 第一段 7 天回報 total 比回傳多（＝截斷）→ 那 7 天改單日抓
+    const truncated = b.start_date === '2026-09-01' && b.end_date === '2026-09-07';
+    return new Response(JSON.stringify({ status: { code: 0 }, data: { data: [{ day: b.start_date }], total: truncated ? 99999 : 1 } }));
+  }) as any;
+  try {
+    let n = 0;
+    const rows = await fetchReport({ userType: 'super', userIds: [], startDate: '2026-09-01', endDate: '2026-09-14', onRequests: (k) => { n += k; } });
+    assert.equal(n, 2 + 7);
+    assert.equal(bodies.length, 9);
+    assert.equal(rows.length, 1 + 7);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 await ok('view SQL：四平台 UNION＋customer 對照先收斂成一帳一列', () => {
