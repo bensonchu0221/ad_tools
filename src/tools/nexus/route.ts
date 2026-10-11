@@ -11,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { bqDryRun } from '../../core/bigquery.js';
 import {
   dbAvailable, enqueueNexusJobs, claimNextNexusJob, markNexusJobPhase, markNexusJobDone, markNexusJobFailed, deferNexusJob,
-  listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock, nexusReconFor, nexusBatchJobs, nexusJobsCovering,
+  listNexusJobs, nexusJobCounts, nexusCoverageSummary, withNexusWorkerLock, nexusReconFor, nexusBatchJobs, nexusReconCandidates,
   nexusRBackfillState,
 } from '../../core/store.js';
 import {
@@ -19,7 +19,7 @@ import {
   NexusQuotaError, rBackfillBlock, twHhmm,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
-import { runRecon, reconSql, reconDue } from './recon.js';
+import { runRecon, reconSql, reconDueDates } from './recon.js';
 import { statusPage } from './page.js';
 import type { NexusPlatform } from '../../core/store.js';
 
@@ -36,15 +36,14 @@ const keyOk = (req: any) => !!process.env.DIAG_KEY && (req.query as any)?.key ==
 const PAGE_URL = 'https://ad-tools-439393162392.asia-east1.run.app/tools/nexus';
 
 /**
- * T-1 的資料有 job 寫過、那些 job 全跑完，且最後一筆成功晚於上次比對 ⇒ 跑一次比對（reconDue）。
- * 涵蓋每日批次、失敗重試成功、回補與手動重寫同一天。
- * worker 每分鐘都會叫，所以條件不成立時必須是零 BQ 查詢（只查 Cloud SQL）。回傳比對了幾個帳戶，沒跑回 null。
+ * 有成功 job 寫過、涵蓋它的 job 都跑完、且最後一筆成功晚於上次比對的日期 ⇒ 比對（新到舊，一輪最多 RECON_PER_TICK 天）。
+ * 涵蓋每日批次（T-1、T-2）、失敗重試成功、回補與手動重寫。2026-10-12 以前只看 T-1，10-08 R（隔天才補回）就從沒比對過。
+ * worker 每分鐘都會叫，所以沒有到期日期時必須是零 BQ 查詢（只查 Cloud SQL）。回傳比對了哪些日期。
  */
-async function reconIfDue(today: string): Promise<number | null> {
-  const dt = addDays(today, -1);
-  const [cov, { checkedAt }] = await Promise.all([nexusJobsCovering(dt), nexusReconFor(dt)]);
-  if (!reconDue({ ...cov, checkedAt })) return null;
-  return runRecon(dt);
+async function reconIfDue(today: string): Promise<string[]> {
+  const dates = reconDueDates(await nexusReconCandidates(addDays(today, -1)));
+  for (const dt of dates) await runRecon(dt);
+  return dates;
 }
 
 export function registerNexus(app: FastifyInstance): void {
@@ -122,8 +121,8 @@ export function registerNexus(app: FastifyInstance): void {
     // 批次剛跑完就接著比對（自己一把鎖，免得兩個 worker 同時比對；比對失敗不影響 worker，下一分鐘會再試）
     await withNexusWorkerLock('recon', async () => {
       try {
-        const n = await reconIfDue(twToday());
-        if (n !== null) app.log.info({ accounts: n }, 'nexus recon done');
+        const dates = await reconIfDue(twToday());
+        if (dates.length) app.log.info({ dates }, 'nexus recon done');
       } catch (e: any) {
         app.log.error({ error: String(e?.message ?? e) }, 'nexus recon failed');
       }

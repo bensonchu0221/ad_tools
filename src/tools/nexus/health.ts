@@ -5,7 +5,7 @@
 // **每天都發一則**（正常時一行綠燈）：健檢自己壞掉時「沒收到訊息」本身就是警訊；只在異常才發的話，
 // 壞掉跟一切正常看起來一模一樣。
 import {
-  nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows, nexusReconFor,
+  nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows, nexusReconFor, nexusReconRecent,
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
@@ -24,6 +24,8 @@ export interface HealthInput {
   coverage: { platform: NexusPlatform; accountId: string; accountName: string; dt: string; rows: number; imp: number; spend: number }[];
   /** T-1 的正確性比對（recon.ts）；checkedAt=null＝還沒比對 */
   recon?: { checkedAt: string | null; rows: NexusReconRow[] };
+  /** 近 24 小時重新比對過的更早日期（T-2 重抓、失敗補回、回補）；2026-10-12 起比對不只看 T-1 */
+  rechecked?: { dt: string; rows: NexusReconRow[] }[];
 }
 
 /** 門檻（寫成常數方便之後調）。 */
@@ -195,6 +197,28 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     if (covered.length) summary.push(`M 用 Redash 墊底 ${covered.length} 帳（無 token；無素材圖文、花費為換算值）：${names(covered)}`);
   }
 
+  // ⑤-2 重新比對過的更早日期：吻合率不足就列出（只看近 24 小時比對過的，報過一次就不再重複報）
+  if (inp.rechecked?.length) {
+    const bad: { text: string; alert: boolean }[] = [];
+    for (const { dt, rows } of inp.rechecked) {
+      for (const p of PLATFORMS) {
+        const s = summarizeRecon(p, rows);
+        if (s.match !== null && s.match < RECON.ok) bad.push({ text: `${p} ${dt.slice(5)} ${fmtMatch(s.match)}`, alert: s.match < RECON.warn });
+        const m = summarizeMediaRecon(p, rows);
+        if (m.graded && m.match !== null && m.match < RECON.ok) bad.push({ text: `${p} ${dt.slice(5)} 媒體層 ${fmtMatch(m.match)}`, alert: m.match < RECON.warn });
+      }
+    }
+    const days = inp.rechecked.length;
+    if (bad.length) {
+      items.push({
+        level: bad.some((b) => b.alert) ? 'alert' : 'warn',
+        text: `重新比對 ${days} 個較早日期（T-2 重抓／補回／回補），${bad.length} 項吻合不足：${bad.slice(0, 10).map((b) => b.text).join('、')}${bad.length > 10 ? '…' : ''}`,
+      });
+    } else {
+      summary.push(`重新比對 ${days} 個較早日期全部吻合`);
+    }
+  }
+
   // ⑥ 回補進度（有在跑才報）
   const bf = inp.backfill;
   if (bf.queued + bf.running > 0) summary.push(`回補進行中：剩 ${fmt(bf.queued + bf.running)} 個 job、已完成 ${fmt(bf.success)}`);
@@ -205,14 +229,15 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
 
 /** 從 Cloud SQL 收集健檢要的資料。 */
 export async function gatherHealth(today = twToday()): Promise<HealthInput> {
-  const [batch, failures, backfill, coverage, recon] = await Promise.all([
+  const [batch, failures, backfill, coverage, recon, rechecked] = await Promise.all([
     nexusBatchStats(`daily:${today}`),
     nexusRecentFailures(24, 200),
     nexusBackfillStats(),
     nexusCoverageRows(addDays(today, -8), addDays(today, -1)),
     nexusReconFor(addDays(today, -1)),
+    nexusReconRecent(24, addDays(today, -1)),
   ]);
-  return { today, batch, failures, backfill, coverage, recon };
+  return { today, batch, failures, backfill, coverage, recon, rechecked };
 }
 
 /** Google Chat 訊息（純文字＋Chat 支援的 *粗體*）。 */

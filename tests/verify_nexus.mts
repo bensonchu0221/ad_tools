@@ -14,7 +14,7 @@ import {
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
 import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
-import { reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, reconLevel, fmtMatch, reconDue } from '../src/tools/nexus/recon.js';
+import { reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, reconLevel, fmtMatch, reconDue, reconDueDates } from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
@@ -698,7 +698,7 @@ await ok('比對 SQL：四張事實表＋裝置表＋媒體表都只查單一日
 });
 
 await ok('比對列轉換：BQ 字串轉數字、金額去浮點尾數、缺值當 0', () => {
-  const [r] = toReconRows([{ platform: 'D', account_id: '1', account_name: 'A', f_imp: '10', f_click: '2', f_spend: '3.000000001', v_imp: null, v_click: '2', v_spend: '3', m_imp: '9', m_click: '2', m_spend: '3' }]);
+  const [r] = toReconRows([{ platform: 'D', account_id: '1', account_name: 'A', f_imp: '10', f_click: '2', f_spend: '3.000000001', v_imp: null, v_click: '2', v_spend: '3', m_imp: '9', m_click: '2', m_spend: '3', m_has: 'true' }]);
   assert.deepEqual(r, {
     platform: 'D', accountId: '1', accountName: 'A',
     fact: { imp: 10, click: 2, spend: 3 }, device: { imp: 0, click: 2, spend: 3 }, media: { imp: 9, click: 2, spend: 3 },
@@ -825,6 +825,49 @@ await ok('比對時機：涵蓋那天的 job 全跑完且有新完成的才比�
   assert.equal(reconDue({ pending: 0, lastFinished: '2026-09-24 17:15:10', checkedAt: '2026-09-24 11:36:16' }), true);
   // 回補還在跑 → 等它跑完再比，不要每分鐘比一次
   assert.equal(reconDue({ pending: 30, lastFinished: '2026-09-24 17:15:10', checkedAt: '2026-09-24 11:36:16' }), false);
+});
+
+await ok('比對日期：不只 T-1，回補／隔天補回寫過的日子也比；新到舊、一輪最多 5 天', () => {
+  const c = (dt: string, pending: number, lastFinished: string | null, checkedAt: string | null) => ({ dt, pending, lastFinished, checkedAt });
+  const cands = [
+    c('2026-10-10', 0, '2026-10-11 04:20:00', '2026-10-11 04:24:00'), // T-1 比過了
+    c('2026-10-09', 0, '2026-10-11 04:20:00', '2026-10-10 04:28:00'), // T-2 隔天重抓 → 重比
+    c('2026-10-08', 0, '2026-10-10 04:18:00', '2026-10-09 04:23:00'), // 10-08 R 隔天才補回（實際漏比的那天）
+    c('2026-06-25', 1, '2026-10-08 12:00:00', null), // 回補段還在佇列 → 等
+    c('2026-06-10', 0, '2026-10-12 08:00:00', null), // 回補寫過、從沒比過
+    c('2026-06-09', 0, null, null), // 只有失敗 job
+  ];
+  assert.deepEqual(reconDueDates(cands), ['2026-10-09', '2026-10-08', '2026-06-10']);
+  const many = Array.from({ length: 8 }, (_, i) => c(`2026-06-0${i + 1}`, 0, '2026-10-12 08:00:00', null));
+  assert.deepEqual(reconDueDates(many), ['2026-06-08', '2026-06-07', '2026-06-06', '2026-06-05', '2026-06-04']);
+});
+
+await ok('比對列：某平台那天媒體表整個沒列（還沒回補）→ 不給 media；有列只是某帳戶缺 → 當 0', () => {
+  const base = { account_name: 'A', f_imp: '10', f_click: '2', f_spend: '3', v_imp: '10', v_click: '2', v_spend: '3', m_imp: '0', m_click: '0', m_spend: '0' };
+  const rows = toReconRows([
+    { ...base, platform: 'R', account_id: '1', m_has: false as any },
+    { ...base, platform: 'R', account_id: '2', m_has: false as any },
+    { ...base, platform: 'D', account_id: '3', m_has: true as any, m_click: '2', m_spend: '3' },
+    { ...base, platform: 'D', account_id: '4', m_has: false as any },
+  ]);
+  assert.deepEqual(rows.map((r) => r.media?.click ?? null), [null, null, 2, 0]);
+  assert.equal(summarizeMediaRecon('R', rows).match, null);
+  assert.ok(summarizeMediaRecon('D', rows).match! < 1);
+});
+
+await ok('健檢：重新比對過的較早日期吻合不足 → 亮燈列出；全部吻合 → 只在摘要講一句', () => {
+  const good = { dt: '2026-09-22', rows: [rr('D', 'a', [1000, 10, 100], [1000, 10, 100])] };
+  const warn = { dt: '2026-06-10', rows: [rr('R', 'x', [1000, 10, 100], [990, 10, 100])] }; // 99.0%
+  const bad = { dt: '2026-06-11', rows: [{ ...rr('D', 'b', [1000, 10, 100], [1000, 10, 100]), media: { imp: 0, click: 5, spend: 50 } }] }; // 媒體層 50%
+  const ok1 = evaluateHealth({ ...healthBase(), rechecked: [good] });
+  assert.equal(ok1.level, 'ok');
+  assert.ok(ok1.summary.some((x) => x.includes('重新比對 1 個較早日期全部吻合')));
+  const w = evaluateHealth({ ...healthBase(), rechecked: [good, warn] });
+  assert.equal(w.level, 'warn');
+  assert.match(w.items[0].text, /重新比對 2 個較早日期.*R 06-10 99\.0/);
+  const a = evaluateHealth({ ...healthBase(), rechecked: [warn, bad] });
+  assert.equal(a.level, 'alert');
+  assert.match(a.items[0].text, /D 06-11 媒體層/);
 });
 
 await ok('BQ 交易被取消：認得衝突訊息，其他錯誤不算', () => {

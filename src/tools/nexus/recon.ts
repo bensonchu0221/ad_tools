@@ -59,21 +59,31 @@ WITH f AS (
 SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name) AS account_name,
   IFNULL(f.imp, 0) AS f_imp, IFNULL(f.click, 0) AS f_click, IFNULL(f.spend, 0) AS f_spend,
   IFNULL(v.imp, 0) AS v_imp, IFNULL(v.click, 0) AS v_click, IFNULL(v.spend, 0) AS v_spend,
-  IFNULL(m.imp, 0) AS m_imp, IFNULL(m.click, 0) AS m_click, IFNULL(m.spend, 0) AS m_spend
+  IFNULL(m.imp, 0) AS m_imp, IFNULL(m.click, 0) AS m_click, IFNULL(m.spend, 0) AS m_spend,
+  m.account_id IS NOT NULL AS m_has
 FROM f FULL OUTER JOIN v USING (platform, account_id) FULL OUTER JOIN m USING (platform, account_id)`;
 }
 
-/** BQ 結果列 → 比對列。純函式。 */
+/**
+ * BQ 結果列 → 比對列。純函式。
+ * 某平台那天媒體表**整個沒有列**（媒體表 2026-10-08 才建、歷史日期還沒回補）⇒ 那個平台不給 media（存 NULL、不算媒體層吻合），
+ * 不然重新比對舊日期會把「還沒回補」當成 0% 吻合。平台有媒體列、只是某帳戶沒有 ⇒ 照樣當 0（那才是真的漏）。
+ */
 export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow[] {
   const n = (v: string | null | undefined) => Number(v ?? 0) || 0;
   const money = (v: string | null | undefined) => Math.round(n(v) * 10000) / 10000;
+  const has = (v: unknown) => v === true || v === 'true' || v === '1' || v === 1;
+  const withMedia = new Set(raw.filter((r) => has(r.m_has)).map((r) => r.platform));
   return raw.map((r) => ({
     platform: r.platform as NexusPlatform, accountId: String(r.account_id ?? ''), accountName: String(r.account_name ?? ''),
     fact: { imp: n(r.f_imp), click: n(r.f_click), spend: money(r.f_spend) },
     device: { imp: n(r.v_imp), click: n(r.v_click), spend: money(r.v_spend) },
-    media: { imp: n(r.m_imp), click: n(r.m_click), spend: money(r.m_spend) },
+    ...(withMedia.has(r.platform) ? { media: { imp: n(r.m_imp), click: n(r.m_click), spend: money(r.m_spend) } } : {}),
   }));
 }
+
+/** worker 每一輪最多比對幾天（新到舊，T-1 先）。一天一次 BQ 查詢約 2~3 秒、計費最低 10MB；第一次上線補比對歷史會分好幾輪。 */
+export const RECON_PER_TICK = 5;
 
 /** 跑一次比對並存進 Cloud SQL。回傳比對了幾個帳戶。 */
 export async function runRecon(dt: string): Promise<number> {
@@ -171,6 +181,11 @@ export const reconLevel = (match: number | null): 'ok' | 'warn' | 'alert' | 'non
 export function reconDue(o: { pending: number; lastFinished: string | null; checkedAt: string | null }): boolean {
   if (o.pending > 0 || !o.lastFinished) return false;
   return !o.checkedAt || o.checkedAt < o.lastFinished;
+}
+
+/** 從各日期的狀態挑出這一輪要比對的日期：reconDue 成立的，新到舊、最多 limit 天。純函式。 */
+export function reconDueDates(cands: { dt: string; pending: number; lastFinished: string | null; checkedAt: string | null }[], limit = RECON_PER_TICK): string[] {
+  return cands.filter(reconDue).map((c) => c.dt).sort().reverse().slice(0, limit);
 }
 
 export function fmtMatch(match: number | null): string {

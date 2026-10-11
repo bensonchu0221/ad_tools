@@ -2569,16 +2569,51 @@ export async function nexusBatchStats(batch: string): Promise<NexusBatchStats> {
   };
 }
 
-/** 所有涵蓋某天（sd ≤ dt ≤ ed）的 job：還有幾筆在排隊／執行，以及最後一筆成功的完成時間（台北）。比對時機用。 */
-export async function nexusJobsCovering(dt: string): Promise<{ pending: number; lastFinished: string | null }> {
+/**
+ * 每個「有 job 寫過」的日期（maxDt 往前到最早的 job）：涵蓋它的 job 還有幾筆在排隊／執行、最後一筆成功的完成時間、
+ * 上次比對時間（都是台北 'YYYY-MM-DD HH:mm:ss'）。要不要比對交給 recon.ts reconDue 判斷。
+ * 以前只查 T-1：T-2 重抓、失敗隔天補回、回補寫過的日子都不會重比（2026-10-12 發現 10-08 R 沒有比對紀錄）。
+ * 只查 Cloud SQL；worker 每分鐘叫。
+ */
+export async function nexusReconCandidates(maxDt: string): Promise<{ dt: string; pending: number; lastFinished: string | null; checkedAt: string | null }[]> {
+  const p = await nexusPool();
+  const [mins] = await p.query(`SELECT DATE_FORMAT(MIN(sd),'%Y-%m-%d') AS min_sd FROM nexus_jobs`);
+  const minSd: string | null = (mins as any[])[0]?.min_sd ?? null;
+  if (!minSd || minSd > maxDt) return [];
+  const tw = (col: string) => `DATE_FORMAT(CONVERT_TZ(${col},'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s')`;
+  const [rows] = await p.query(
+    `WITH RECURSIVE days AS (
+       SELECT CAST(? AS DATE) AS dt
+       UNION ALL SELECT dt - INTERVAL 1 DAY FROM days WHERE dt > CAST(? AS DATE)
+     )
+     SELECT DATE_FORMAT(d.dt,'%Y-%m-%d') AS dt, SUM(j.status IN ('queued','running')) AS pending,
+            ${tw("MAX(IF(j.status = 'success', j.finished_at, NULL))")} AS last_finished, ${tw('r.checked_at')} AS checked_at
+       FROM days d
+       JOIN nexus_jobs j ON j.sd <= d.dt AND j.ed >= d.dt
+       LEFT JOIN nexus_recon r ON r.dt = d.dt AND r.platform = '*' AND r.account_id = '*'
+      GROUP BY d.dt, r.checked_at
+      ORDER BY d.dt DESC`, [maxDt, minSd]
+  );
+  return (rows as any[]).map((r) => ({ dt: String(r.dt), pending: Number(r.pending ?? 0), lastFinished: r.last_finished ?? null, checkedAt: r.checked_at ?? null }));
+}
+
+/** 最近 N 小時內重新比對過、早於 beforeDt 的日期的比對結果（健檢報回補／重寫後的落差用）。 */
+export async function nexusReconRecent(hours: number, beforeDt: string): Promise<{ dt: string; rows: NexusReconRow[] }[]> {
   const p = await nexusPool();
   const [rows] = await p.query(
-    `SELECT SUM(status IN ('queued','running')) AS pending,
-            DATE_FORMAT(CONVERT_TZ(MAX(IF(status='success', finished_at, NULL)),'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS last_finished
-       FROM nexus_jobs WHERE sd <= ? AND ed >= ?`, [dt, dt]
+    `SELECT DATE_FORMAT(r.dt,'%Y-%m-%d') AS dt, r.platform, r.account_id, r.account_name, r.f_imp, r.f_click, r.f_spend,
+            r.d_imp, r.d_click, r.d_spend, r.m_imp, r.m_click, r.m_spend
+       FROM nexus_recon r
+       JOIN nexus_recon k ON k.dt = r.dt AND k.platform = '*' AND k.account_id = '*'
+      WHERE k.checked_at >= NOW() - INTERVAL ? HOUR AND r.dt < ? AND r.platform <> '*'
+      ORDER BY r.dt`, [hours, beforeDt]
   );
-  const r = (rows as any[])[0] ?? {};
-  return { pending: Number(r.pending ?? 0), lastFinished: r.last_finished ?? null };
+  const by = new Map<string, NexusReconRow[]>();
+  for (const r of rows as any[]) {
+    if (!by.has(r.dt)) by.set(r.dt, []);
+    by.get(r.dt)!.push(mapNexusReconRow(r));
+  }
+  return [...by].map(([dt, rs]) => ({ dt, rows: rs }));
 }
 
 /** 最近 N 小時內放棄重試（最終 failed）的 job。 */
@@ -2635,7 +2670,7 @@ export interface NexusReconRow {
   fact: NexusReconTotals;
   /** 裝置表加總 */
   device: NexusReconTotals;
-  /** 媒體表加總（2026-10-08 起；更早的比對結果沒有＝undefined） */
+  /** 媒體表加總（2026-10-08 起；更早的比對結果、或那天該平台媒體表整個沒資料＝undefined） */
   media?: NexusReconTotals;
 }
 
@@ -2680,13 +2715,17 @@ export async function nexusReconFor(dt: string): Promise<{ checkedAt: string | n
   const mark = list.find((r) => r.platform === '*');
   return {
     checkedAt: mark?.checked_at ?? null,
-    rows: list.filter((r) => r.platform !== '*').map((r) => ({
-      platform: r.platform, accountId: String(r.account_id), accountName: r.account_name,
-      fact: { imp: Number(r.f_imp), click: Number(r.f_click), spend: Number(r.f_spend) },
-      device: { imp: Number(r.d_imp), click: Number(r.d_click), spend: Number(r.d_spend) },
-      // m_* 是 NULL＝那次比對還沒有媒體層（2026-10-08 以前）
-      ...(r.m_imp === null ? {} : { media: { imp: Number(r.m_imp), click: Number(r.m_click), spend: Number(r.m_spend) } }),
-    })),
+    rows: list.filter((r) => r.platform !== '*').map(mapNexusReconRow),
+  };
+}
+
+function mapNexusReconRow(r: any): NexusReconRow {
+  return {
+    platform: r.platform, accountId: String(r.account_id), accountName: r.account_name,
+    fact: { imp: Number(r.f_imp), click: Number(r.f_click), spend: Number(r.f_spend) },
+    device: { imp: Number(r.d_imp), click: Number(r.d_click), spend: Number(r.d_spend) },
+    // m_* 是 NULL＝那次比對沒有媒體層（2026-10-08 以前的比對，或那天該平台媒體表還沒回補）
+    ...(r.m_imp === null ? {} : { media: { imp: Number(r.m_imp), click: Number(r.m_click), spend: Number(r.m_spend) } }),
   };
 }
 
