@@ -163,8 +163,8 @@ export function registerNexus(app: FastifyInstance): void {
   app.get(BASE_PATH, async (_req, reply) => {
     if (!dbAvailable()) return reply.type('text/html').send('DB 未設定');
     const today = twToday();
-    const [input, batchJobs, jobs] = await Promise.all([gatherHealth(today), nexusBatchJobs(`daily:${today}`), listNexusJobs(100)]);
-    reply.type('text/html').send(statusPage({ input, health: evaluateHealth(input), batchJobs, jobs }));
+    const [input, batchJobs, jobs, trend] = await Promise.all([gatherHealth(today), nexusBatchJobs(`daily:${today}`), listNexusJobs(100), nexusCoverageSummary()]);
+    reply.type('text/html').send(statusPage({ input, health: evaluateHealth(input), batchJobs, jobs, trend }));
   });
 }
 

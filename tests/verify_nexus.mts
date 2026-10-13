@@ -779,7 +779,28 @@ await ok('狀態頁：刻度一帳一格、R/P 畫整圈、吻合按鈕與明細
   assert.match(html, /sessionStorage\.getItem\('nexus-auto'\)/);
   assert.ok(!html.includes('nexus-intro'), '舊的「每分頁只播一次」規則已拿掉');
   assert.ok(!html.includes('<帳'), '帳戶名要跳脫');
-  assert.ok(!html.includes('近 14 天'), '寫入量表已移除');
+  assert.ok(!html.includes('寫入量'), '寫入量表已移除');
+});
+
+await ok('狀態頁：浮窗近 14 天收益柱狀圖（T-1 實色、0 留短柱、週末點、不標數字；沒資料不畫）', () => {
+  const input = healthBase();
+  const t1 = addDays(input.today, -1);
+  input.recon = { checkedAt: '2026-09-24 04:32:00', rows: [rr('D', '1', [1000, 10, 100], [1000, 10, 100]), rr('P', '9', [10, 1, 5], [10, 1, 5])] };
+  const trend = [
+    { platform: 'D', dt: t1, spend: 200 }, { platform: 'D', dt: addDays(t1, -1), spend: 100 },
+    { platform: 'D', dt: addDays(t1, -14), spend: 99999 }, // 第 15 天前：不畫、也不能拿來當滿格
+  ];
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs: [], jobs: [], trend });
+  const fig = html.match(/<figure class="sb sb-d"[\s\S]*?<\/figure>/)?.[0] ?? '';
+  assert.equal((fig.match(/class="sb-c/g) ?? []).length, 14);
+  assert.match(fig, /class="sb-c[^"]* last"[^>]*><i style="height:100\.0%"/); // T-1 是最大值＝滿格
+  assert.match(fig, /height:50\.0%/);
+  assert.equal((fig.match(/ zero"/g) ?? []).length, 12);
+  assert.equal((fig.match(/sb-c we/g) ?? []).length, 4); // 兩週剛好 4 個週末日
+  assert.ok(!/99,999/.test(fig));
+  assert.match(fig, new RegExp(`${addDays(t1, -13).slice(5)}<\\/span><span>${t1.slice(5)}`));
+  assert.ok(!html.includes('sb sb-p'), 'P 14 天都沒收益 → 不畫');
+  assert.ok(!statusPage({ input, health: evaluateHealth(input), batchJobs: [], jobs: [] }).includes('<figure class="sb'), '沒給 trend 不畫');
 });
 
 await ok('狀態頁：今天還沒入列、還沒比對也能畫', () => {

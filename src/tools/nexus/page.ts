@@ -91,17 +91,45 @@ function platformTitle(p: NexusPlatform): string {
 
 // ────────────────────────────── 比對明細 ──────────────────────────────
 
-function reconPanel(p: NexusPlatform, r: PlatformRecon, dt: string): string {
+/** 近幾天收益柱狀圖畫幾天：兩週，看得出週末規律。資料來自 Cloud SQL nexus_coverage，不查 BQ。 */
+export const TREND_DAYS = 14;
+const WD = '日一二三四五六';
+
+/**
+ * 浮窗裡的近 14 天收益（＝倉庫花費，全帳戶台幣）小柱狀圖：只看形狀，不標數字、不畫 Y 軸。
+ * 每個平台以自己 14 天的最大值當滿格；最右一根（T-1）實色、其餘淡一階；0 留 2px 短柱（分得出「沒有」跟「圖壞了」）；
+ * 週末在柱子下方點一個小點。滑鼠移上去用原生 title 看日期與金額。
+ * 不含 M 的 Redash 墊底帳戶（client:，不寫 nexus_coverage）。
+ */
+function spendBars(p: NexusPlatform, trend: TrendRow[], t1: string): string {
+  const by = new Map(trend.filter((r) => r.platform === p).map((r) => [r.dt, r.spend]));
+  const days = Array.from({ length: TREND_DAYS }, (_, i) => addDays(t1, i - (TREND_DAYS - 1)));
+  const vals = days.map((d) => by.get(d) ?? 0);
+  const max = Math.max(...vals);
+  if (!max) return '';
+  const cols = days.map((d, i) => {
+    const wd = new Date(`${d}T00:00:00Z`).getUTCDay();
+    const h = (vals[i] / max) * 100;
+    return `<span class="sb-c${wd === 0 || wd === 6 ? ' we' : ''}${i === days.length - 1 ? ' last' : ''}${vals[i] ? '' : ' zero'}"
+      title="${d.slice(5)}（${WD[wd]}）${num(vals[i])}"><i style="height:${h.toFixed(1)}%"></i></span>`;
+  }).join('');
+  return `<figure class="sb sb-${p.toLowerCase()}" aria-label="${PNAME[p]} 近 ${TREND_DAYS} 天每日收益">
+      <figcaption>近 ${TREND_DAYS} 天收益</figcaption>
+      <div class="sb-bars">${cols}</div>
+      <div class="sb-ax"><span>${days[0].slice(5)}</span><span>${t1.slice(5)}</span></div></figure>`;
+}
+
+function reconPanel(p: NexusPlatform, r: PlatformRecon, dt: string, chart = ''): string {
   const m = r.byMetric;
   const head = `<div class="rp-head">
       <h3 id="rp-${p}-h">${PNAME[p]}：${dt} 素材層與裝置層加總</h3>
       <p class="rp-note">兩邊都是同一次抓取、平台不同的報表查法（素材層＝倉庫事實表；裝置層＝campaign／帳戶層的裝置報表），
         正常應該一致。吻合率低於 ${fmtMatch(RECON.ok)} 會出現在上面的健檢。下表列出任一指標差超過 ${pct(RECON.accountDiff)} 的帳戶。</p>
-      <dl class="rp-metrics">
+      <div class="rp-row"><dl class="rp-metrics">
         <div><dt>曝光</dt><dd>${fmtMatch(m.imp)}</dd></div>
         <div><dt>點擊</dt><dd>${fmtMatch(m.click)}</dd></div>
         <div><dt>花費</dt><dd>${fmtMatch(m.spend)}</dd></div>
-      </dl>
+      </dl>${chart}</div>
     </div>`;
   if (!r.diffs.length) return `${head}<p class="rp-empty">${num(r.accounts)} 個有投放的帳戶，每一個三項都在 ${pct(RECON.accountDiff)} 以內。</p>`;
   const cell = (f: number, d: number, diff: number, money = false) => {
@@ -129,9 +157,12 @@ export interface StatusPageData {
   batchJobs: NexusJobRow[];
   /** 最近 100 筆 job（含回補） */
   jobs: NexusJobRow[];
+  /** 平台×日收益加總（nexusCoverageSummary，近 14 天），浮窗柱狀圖用；沒給就不畫 */
+  trend?: TrendRow[];
 }
+export interface TrendRow { platform: string; dt: string; spend: number }
 
-export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): string {
+export function statusPage({ input, health, batchJobs, jobs, trend = [] }: StatusPageData): string {
   const t1 = addDays(input.today, -1);
   const b = input.batch;
   const recon = input.recon;
@@ -176,7 +207,7 @@ export function statusPage({ input, health, batchJobs, jobs }: StatusPageData): 
           <span>吻合</span><b>${fmtMatch(r.match)}</b><em>${r.diffs.length ? `${r.diffs.length} 帳戶有落差` : '看明細'}</em><i class="chev" aria-hidden="true"></i></button>`;
       // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面。開關動畫要從按鈕長出／縮回，所以關閉全交給 JS（不用 closedby）
       // 叉叉掛在浮窗上、不放進 .rp-in：內容捲動時它固定在右上角
-      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><button type="button" class="rp-x" aria-label="關閉"></button><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1)}</div></dialog>`);
+      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><button type="button" class="rp-x" aria-label="關閉"></button><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1, spendBars(p, trend, t1))}</div></dialog>`);
       // 媒體層 vs 素材層（點擊／花費）：一行小字。M 天生有小落差（零點擊 campaign 不在媒體報表）⇒ 不上色
       const mr = summarizeMediaRecon(p, reconRows);
       if (mr.match !== null) {
@@ -437,6 +468,18 @@ const STYLE = `
   .rp-metrics dt{font-size:11.5px;color:var(--mut)}
   .rp-metrics dd{margin:0;font-family:var(--disp);font-weight:600;font-size:18px;font-variant-numeric:tabular-nums}
   .rp-empty{font-size:13px;color:var(--mut);margin:14px 0 0}
+  /* 近 14 天收益小柱狀圖：放在吻合三指標右邊，只看形狀（不標數字、無 Y 軸），平台色、T-1 實色其餘淡一階 */
+  .rp-row{display:flex;align-items:flex-end;justify-content:space-between;gap:16px 40px;flex-wrap:wrap}
+  .sb-d{--pc:var(--ink)} .sb-r{--pc:var(--slate)} .sb-m{--pc:#5B54D6} .sb-p{--pc:#0F766E}
+  .sb{margin:14px 0 4px;width:min(100%,340px)}
+  .sb figcaption{font-size:11.5px;color:var(--mut);margin-bottom:6px}
+  .sb-bars{display:flex;align-items:flex-end;gap:5px;height:52px;border-bottom:1px solid rgba(20,22,26,.18)}
+  .sb-c{position:relative;flex:1;height:100%;display:flex;align-items:flex-end}
+  .sb-c i{display:block;width:100%;min-height:2px;border-radius:2.5px 2.5px 0 0;background:var(--pc);opacity:.4}
+  .sb-c.last i{opacity:1}
+  .sb-c.zero i{opacity:.25}
+  .sb-c.we::after{content:"";position:absolute;left:50%;bottom:-6px;width:3px;height:3px;margin-left:-1.5px;border-radius:50%;background:var(--mut);opacity:.6}
+  .sb-ax{display:flex;justify-content:space-between;margin-top:8px;font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
   .rp-scroll,.tscroll{overflow-x:auto}
   /* 浮窗裡不要原生捲軸（灰色粗條壓在玻璃上很突兀）：藏掉，改用 .rp-bar 仿 iOS 的細指示條——
      捲動時才浮出、停手淡掉。表格橫捲也藏，觸控板／手機照樣能滑 */
