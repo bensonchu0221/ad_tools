@@ -8,7 +8,7 @@ import {
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
-  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm,
+  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm, isValidAccountId,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
@@ -313,6 +313,19 @@ await ok('寫入前檢查：日期超出區間或帳戶不符都拒寫', () => {
   assertRowsInSlice([{ date: '2026-09-22', account_id: '2' }], '2026-09-21', '2026-09-22', null, 'x');
 });
 
+await ok('帳戶 ID 格式：D/R 純數字、M 可帶 client:、P 為 xxx-xxx-xxxx 或 (unattributed)；nan／空字串一律不合法', () => {
+  for (const [p, id] of [['D', '37975'], ['R', '10208'], ['M', '866244'], ['M', `${M_UNMAPPED_PREFIX}991479`], ['P', '686-552-3336'], ['P', P_UNATTRIBUTED]] as const) {
+    assert.ok(isValidAccountId(p, id), `${p} ${id}`);
+  }
+  for (const [p, id] of [['D', 'nan'], ['D', 'NaN'], ['D', ''], ['D', '37975.0'], ['D', 'None'], ['R', 'null'], ['M', 'client:'], ['P', '6865523336'], ['D', `${M_UNMAPPED_PREFIX}1`]] as const) {
+    assert.ok(!isValidAccountId(p, id), `${p} ${id}`);
+  }
+  // 2026-10-14 實例：BH Excel AccID 空白 → pandas NaN → 'nan' 寫進 nexus.d_tokens，nexus 抓了一份 37975 的數字掛在 'nan' 底下
+  assert.throws(() => assertRowsInSlice([{ date: '2026-10-04', account_id: 'nan' }], '2026-10-04', '2026-10-05', null, 'D 事實表', 'D'), /帳戶 ID「nan」不合法/);
+  assert.throws(() => assertRowsInSlice([{ date: '2026-10-04' }], '2026-10-04', '2026-10-05', null, 'R 事實表', 'R'), /帳戶 ID「」不合法/);
+  assertRowsInSlice([{ date: '2026-10-04', account_id: '9' }], '2026-10-04', '2026-10-05', null, 'R 事實表', 'R');
+});
+
 await ok('覆蓋紀錄：每帳戶每天一筆、曝光與花費依平台欄名加總', () => {
   const e = coverageEntries('R', [
     { account_id: '1', account_name: 'a', date: '2026-09-22', impression: 10, payment_revenue: 0.1 },
@@ -358,6 +371,20 @@ await ok('job：有資料 → 先寫 BQ 再寫覆蓋紀錄；R/P 的 * 轉成整
   const r = fakeDeps({ facts: [{ account_id: '9', account_name: 'r', date: '2026-09-22', impression: 1, payment_revenue: 1 }] });
   await runNexusJob({ ...job, platform: 'R', accountId: '*' }, () => {}, r.deps);
   assert.deepEqual(r.calls, ['write:R:null:1', 'cov:R:null:1']);
+});
+
+await ok('job：帳戶 ID 不合法（token 表的 nan／空字串）→ 不打 API、不寫 BQ，直接失敗不重試（健檢紅燈）', async () => {
+  for (const bad of ['nan', '']) {
+    let fetched = false;
+    const { deps, calls } = fakeDeps({ facts: [{ account_id: bad, date: '2026-10-04', imp: 1, charge: 1 }] });
+    deps.fetch = async () => { fetched = true; return { facts: [], device: [], warnings: [] }; };
+    const err = await runNexusJob({ ...job, accountId: bad, accountName: '直客_仙桃牌' }, () => {}, deps).catch((e) => e);
+    assert.ok(err instanceof NexusNoRetryError, String(err));
+    assert.match(err.message, /帳戶 ID.*不合法/);
+    assert.ok(!err.message.startsWith(UNREACHABLE_TAG), '不能被健檢降成黃燈');
+    assert.equal(fetched, false);
+    assert.deepEqual(calls, []);
+  }
 });
 
 await ok('job：BQ 寫入失敗就不寫覆蓋紀錄（否則覆蓋紀錄會說有寫）', async () => {
@@ -529,6 +556,26 @@ await ok('健檢：一切正常 → 綠燈、摘要含各平台', () => {
   assert.match(formatChat(r, 'URL'), /🟢/);
 });
 
+
+await ok('健檢：同平台同一天兩個帳戶列數／曝光／花費完全一樣 → 紅燈（同一份數字掛在兩個帳戶 ID 下）', () => {
+  const a = healthBase();
+  // 2026-10-04~05 實例：'nan' 跟 37975 一模一樣
+  for (const dt of ['2026-09-22', '2026-09-23']) {
+    a.coverage.push({ platform: 'D', accountId: '37975', accountName: '直客_仙桃牌', dt, rows: 20, imp: 202476, spend: 2584.5523 });
+    a.coverage.push({ platform: 'D', accountId: 'nan', accountName: '直客_仙桃牌', dt, rows: 20, imp: 202476, spend: 2584.5523 });
+  }
+  const r = evaluateHealth(a);
+  const it = r.items.find((i) => /重複/.test(i.text));
+  assert.ok(it, JSON.stringify(r.items));
+  assert.equal(it!.level, 'alert');
+  assert.match(it!.text, /37975.*nan|nan.*37975/);
+  assert.match(it!.text, /09-22.*09-23|2 天/);
+  // 小量巧合（曝光個位數、花費 0；P 實際出現過）不算
+  const b = healthBase();
+  b.coverage.push({ platform: 'P', accountId: '485-677-5038', accountName: 'x', dt: '2026-09-23', rows: 1, imp: 9, spend: 0 });
+  b.coverage.push({ platform: 'P', accountId: '686-552-3336', accountName: 'y', dt: '2026-09-23', rows: 1, imp: 9, spend: 0 });
+  assert.ok(!evaluateHealth(b).items.some((i) => /重複/.test(i.text)));
+});
 await ok('健檢：批次沒入列／沒跑完 → 紅燈；跑太晚 → 黃燈', () => {
   const a = healthBase(); a.batch = { total: 0, queued: 0, running: 0, success: 0, failed: 0, lastFinished: null };
   assert.equal(evaluateHealth(a).level, 'alert');

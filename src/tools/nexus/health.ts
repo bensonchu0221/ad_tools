@@ -38,6 +38,8 @@ export const HEALTH = {
   spikeRatio: 3,
   /** 帳戶連續幾天有花費、T-1 突然沒有 ⇒ 列出來（黃燈；多半是暫停投放，但也可能是 token 壞掉） */
   steadyDays: 3,
+  /** 同平台同一天兩個帳戶列數／曝光／花費完全一樣 ⇒ 紅燈。曝光至少這麼多、花費 > 0 才算（P 有過曝光個位數、花費 0 的巧合） */
+  dupMinImp: 1000,
 };
 
 const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P'];
@@ -147,6 +149,32 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     items.push({
       level: 'warn',
       text: `${vanished.length} 個帳戶前 ${HEALTH.steadyDays} 天天天有花費、${t1} 突然沒有（暫停投放？token 失效？）：${vanished.slice(0, 10).join('、')}${vanished.length > 10 ? '…' : ''}`,
+    });
+  }
+
+  // ④-2 同一份數字掛在兩個帳戶 ID 下（2026-10-14：token 表多一列 'nan'，抓到的是 37975 的數字，10/4、10/5 D 花費算兩次）。
+  //    正確性比對抓不到：它比的是同帳戶的素材層 vs 裝置層，兩邊都重複就兩邊都吻合；量也只多一成內、不到 ③ 的 3 倍。
+  //    D 的數字由 token 決定，同 token 登記在兩個帳戶 ID 下也會這樣，所以不只看 ID 格式，直接比數字。
+  const sameDay = new Map<string, typeof inp.coverage>();
+  for (const c of inp.coverage) {
+    if (c.imp < HEALTH.dupMinImp || !(c.spend > 0)) continue;
+    const k = `${c.platform}|${c.dt}|${c.rows}|${c.imp}|${c.spend}`;
+    sameDay.set(k, [...(sameDay.get(k) ?? []), c]);
+  }
+  const dupPairs = new Map<string, { label: string; days: string[] }>();
+  for (const g of sameDay.values()) {
+    if (g.length < 2) continue;
+    const ids = [...new Set(g.map((c) => c.accountId))].sort();
+    const k = `${g[0].platform}|${ids.join(',')}`;
+    const e = dupPairs.get(k) ?? { label: `${g[0].platform} ${ids.map((id) => `${g.find((c) => c.accountId === id)!.accountName}（${id}）`).join(' ＝ ')}`, days: [] };
+    e.days.push(g[0].dt);
+    dupPairs.set(k, e);
+  }
+  if (dupPairs.size) {
+    const lines = [...dupPairs.values()].map((e) => `  · ${e.label}：${e.days.length} 天（${e.days.sort().map((d) => d.slice(5)).join('、')}）`);
+    items.push({
+      level: 'alert',
+      text: `${dupPairs.size} 組帳戶同一天列數／曝光／花費完全一樣，疑似同一份數字重複寫入（token 表多一列壞 ID、或同一把 token 登記在兩個帳戶下）：\n${lines.join('\n')}`,
     });
   }
 

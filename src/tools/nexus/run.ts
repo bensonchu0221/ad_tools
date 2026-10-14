@@ -117,10 +117,27 @@ export const UNREACHABLE_TAG = '[無法取得]';
 /** D 平台 API 拿不到這個帳戶（token 失效、或帳戶已移到 MediaGo）的錯誤訊息特徵。 */
 export const isDUnreachable = (msg: string) => /invalid api token|認證失敗|Please use Mediago/i.test(msg);
 
-/** 目前要抓的帳戶：D／M 各自 token 表裡的全部帳戶（M 排除 98 開頭的壞資料），R／P 一個 '*' 代表全平台。 */
+/**
+ * 帳戶 ID 格式（各平台實際值：D／R 純數字、M api_client_id 純數字＋Redash 墊底 client:<Client ID>、
+ * P advertiser xxx-xxx-xxxx＋無 advertiser 事件的 (unattributed)；2026-10-14 全庫掃過只有下面那批不符）。
+ * 起因：BH 上傳 Excel 的 AccID 空白 → pandas 讀成 NaN → str() 成 'nan' 寫進 nexus.d_tokens（token 是直客_仙桃牌的），
+ * 10-06 每日批次把它當成新帳戶又抓一份 37975 的數字 ⇒ 10/4、10/5 D 花費多算 6,560。
+ * D 的數字其實是 token 決定的、account_id 只是標籤，所以壞 ID 不能當成「另一個帳戶」寫進倉庫。
+ */
+const ACCOUNT_ID_RE: Record<NexusPlatform, RegExp> = {
+  D: /^\d+$/,
+  R: /^\d+$/,
+  M: /^(client:)?\d+$/,
+  P: /^(\d{3}-\d{3}-\d{4}|\(unattributed\))$/,
+};
+export const isValidAccountId = (platform: NexusPlatform, id: unknown): boolean => ACCOUNT_ID_RE[platform].test(String(id ?? ''));
+
+/**
+ * 目前要抓的帳戶：D／M 各自 token 表裡的全部帳戶（M 排除 98 開頭的壞資料），R／P 一個 '*' 代表全平台。
+ * account_id 空白／格式不對的也照排 job（不在這裡默默濾掉）：job 一開始就會失敗不重試，健檢紅燈點名，才有人去修 token 表。
+ */
 export async function listTargets(): Promise<AccountRef[]> {
   const d = (await listDAccounts())
-    .filter((a) => a.accountId)
     .map((a) => ({ platform: 'D' as const, accountId: String(a.accountId), accountName: a.accountName }));
   const m = (await listMgidAccounts())
     .filter((a) => !/^98/.test(a.apiClientId))
@@ -163,11 +180,17 @@ export async function ensureNexusBq(): Promise<string[]> {
   return created;
 }
 
-/** 列必須都落在 [sd,ed]、帳戶對得上，否則 DELETE 的範圍會跟寫入的內容對不齊。純函式。 */
-export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId: string | null, what: string): void {
+/**
+ * 列必須都落在 [sd,ed]、帳戶對得上，否則 DELETE 的範圍會跟寫入的內容對不齊。
+ * 給 platform 時另檢查每列帳戶 ID 格式（R／P 整平台 job 的帳戶來自 API，不經過 job 層的檢查）。純函式。
+ */
+export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId: string | null, what: string, platform?: NexusPlatform): void {
   for (const r of rows) {
     const d = String(r.date ?? '');
     if (d < sd || d > ed) throw new Error(`${what} 有一列日期 ${d} 超出 ${sd}~${ed}，拒絕寫入`);
+    if (platform && !isValidAccountId(platform, r.account_id)) {
+      throw new Error(`${what} 有一列帳戶 ID「${String(r.account_id ?? '')}」不合法，拒絕寫入`);
+    }
     if (accountId !== null && String(r.account_id) !== accountId) {
       throw new Error(`${what} 有一列帳戶 ${String(r.account_id)} 不是本 job 的 ${accountId}，拒絕寫入`);
     }
@@ -253,9 +276,9 @@ export async function writeSlice(o: {
   platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; media?: Row[]; tables?: SliceTables;
 }): Promise<void> {
   // 防呆先做、再碰 BQ
-  assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`);
-  assertRowsInSlice(o.device, o.sd, o.ed, o.accountId, `${o.platform} 裝置表`);
-  if (o.media) assertRowsInSlice(o.media, o.sd, o.ed, o.accountId, `${o.platform} 媒體表`);
+  assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`, o.platform);
+  assertRowsInSlice(o.device, o.sd, o.ed, o.accountId, `${o.platform} 裝置表`, o.platform);
+  if (o.media) assertRowsInSlice(o.media, o.sd, o.ed, o.accountId, `${o.platform} 媒體表`, o.platform);
   if (o.tables === 'device_orphans') {
     const bad = o.facts.find((r) => !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX));
     if (bad) throw new Error(`M 墊底列的帳戶 ${String(bad.account_id)} 不是 ${M_UNMAPPED_PREFIX} 開頭，拒絕寫入（會跟正式帳戶重複）`);
@@ -355,6 +378,11 @@ export async function runNexusJob(
   // M：各帳戶 job 只寫事實表，裝置表＋沒 token 帳戶的墊底事實列交給 Redash 全平台 job（兩邊不會互刪）
   const tables: SliceTables = deviceOnly ? 'device_orphans' : job.platform === 'M' ? 'facts' : 'both';
   const label = `${job.platform} ${job.accountName} ${job.sd}~${job.ed}`;
+  // token 表的壞 ID（'nan'、空字串）：不打 API、不寫 BQ，直接失敗不重試（不帶 UNREACHABLE_TAG ⇒ 健檢紅燈）
+  if (accountId !== null && !isValidAccountId(job.platform, accountId)) {
+    const table = job.platform === 'M' ? 'nexus.mgid_tokens' : 'nexus.d_tokens';
+    throw new NexusNoRetryError(`${label}：帳戶 ID「${accountId}」不合法，不抓也不寫（${table} 有壞資料，例如 BH Excel AccID 空白被讀成 'nan'；改成正確 ID 或刪掉那列）`);
+  }
   let res: FetchResult;
   try {
     res = await deps.fetch(job, syncedAt, onPhase);
