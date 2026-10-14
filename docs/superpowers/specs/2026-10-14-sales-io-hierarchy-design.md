@@ -127,7 +127,7 @@ CREATE TABLE sales_aliases (
 CREATE TABLE sales_billing_parties (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(150) NOT NULL UNIQUE,          -- 財務表「公司」
-  tax_id VARCHAR(10) NULL UNIQUE,             -- 統編
+  tax_id VARCHAR(10) NULL,                    -- 統編（不設 UNIQUE：客戶資料表有同名公司兩個統編、也可能兩個開票名共用統編）
   payment_terms VARCHAR(20) NOT NULL DEFAULT '',  -- 預付制/後付制
   source, source_ref, updated_by, updated_at
 );
@@ -156,7 +156,7 @@ CREATE TABLE sales_ios (
 
 -- 請款期數（財務表一列＝一期）。只有 finance 來源的 IO 有。
 CREATE TABLE sales_io_periods (
-  io_id INT NOT NULL, period_no VARCHAR(10) NOT NULL,   -- 期數原文（01、3…）；空白用列號
+  io_id INT NOT NULL, period_no VARCHAR(20) NOT NULL,   -- 期數原文（01、3…）；空白用 r<列號>，同期重複加 #<列號>
   account_name_raw VARCHAR(150) NOT NULL DEFAULT '',
   ad_amount DECIMAL(14,2) NULL, service_fee_pct DECIMAL(5,2) NULL, service_fee DECIMAL(14,2) NULL,
   setup_fee DECIMAL(14,2) NULL, other_fee DECIMAL(14,2) NULL,
@@ -227,7 +227,7 @@ CREATE TABLE sales_io_assignments (
 
 ### 6.3 經銷商
 
-- 月表 202609、202610 的（代理商, 客戶屬性）→ `sales_agencies`，`attr` 照填。202605~202608 出現、但 202609 起沒再出現的代理商 → `attr = NULL`。
+- 月表 202609、202610 的（代理商, 客戶屬性）→ `sales_agencies`，`attr` 照填。月表代理商「直客代操Meta」併成「直客」（是否 Meta 由廣告形式欄表示）。202608 分頁的「客戶屬性」欄內容其實是代理商名，當代理商欄讀、不當屬性。202605~202608 出現、但 202609 起沒再出現的代理商 → `attr = NULL`。
 - 財務表：備註寫「微型代理商」的公司（庫客、邁格、尚友）→ 屬性 `微型代理商`；財務表直客 IO 一律掛 `直客`；上辰、香港虎鯨掛 `陸客`（上辰有月表「陸客／阿丹哥，帳戶名＝上辰」佐證；香港虎鯨沒有帳戶名、月表也查不到，報告列出待確認）；有禾布可（月表＝其他經銷商）、創異數位（外貿協會那張 IO 掛月表的「台北數位創意」，並把「創異數位」加為台北數位創意的別名）。
 
 ### 6.4 付款方與 client
@@ -247,19 +247,19 @@ CREATE TABLE sales_io_assignments (
 
 ### 6.6 預算拆分
 
-- 月表每列的 D／R／MGID／P 預估預算 → `sales_io_allocations`（平台代碼 D／R／M／P，月份＝分頁月份）；廣告形式是 Meta 的列 → `META`、新聞稿 → `PR`。P 欄是剩餘公式：只寫 >0 的值，並在 note 標「P 為月表剩餘公式」。
+- 月表每列的 D／R／MGID／P 預估預算 → `sales_io_allocations`（202605~06 只有 R 欄、202607~08 有 R／MGID、202609 起四欄齊；沒有的欄就不寫）（平台代碼 D／R／M／P，月份＝分頁月份）；廣告形式是 Meta 的列 → `META`、新聞稿 → `PR`。P 欄是剩餘公式：只寫 >0 的值，並在 note 標「P 為月表剩餘公式」。
 - 財務 IO 沒有併到月表列的：帳戶名含「關鍵字」→ `GOOGLE`、含「Mata／Meta 代操」→ `META`，每一期寫一筆：金額＝該期廣告金額，月份＝該期「(預計)發票申請日」所在月（空白時用 IO 起始月），同平台同月多期就加總；其他沒有平台資訊的 IO 不寫 allocation（預算只在 IO 層，等介面補）。
 
 ### 6.7 歸屬規則
 
 - 每張 IO 的帳戶名（月表 U 欄／財務表帳戶名）正規化後，對照「倉庫帳戶 ∪ BH 帳戶」的帳戶名，**完全相同**才寫一條帳戶層規則（`campaign_id=''`、`campaign_keyword=''`）。一個名字對到多個帳戶（例：同名 D／M／R／P 各一個、新素簡多個 D 帳戶）就全寫，因為 IO 本來就跨帳戶。
-- 比對三級，任一級對到就寫一條帳戶層規則：①正規化後完全相同 ②去掉前綴（`<數字>_`、`直客_`、`台客_`、`4A_`、`經銷商_`、`CPM_`）後相同 ③互相包含，短的一方去前綴後至少 3 個字（沿用走速 tool#10 的門檻）。三級都對不到就略過，不寫。
+- 比對三級：①正規化後完全相同 ②去掉前綴（`<數字>_`、`直客_`、`台客_`、`4A_`、`經銷商_`、`CPM_`，可疊多層）後相同 ③互相包含，短的一方去前綴後至少 3 個字（沿用走速 tool#10 的門檻）。**①②命中的帳戶一起收**（例：月表 `4A_艾比傑_美商默沙東` ＝R 10003 完全相同＋D `34196_4A_艾比傑_美商默沙東` 去前綴相同，兩個都要）；③只在①②都沒有時才用，免得 `…美商默沙東` 也吃到 `…美商默沙東_PCV`。每個命中帳戶寫一條帳戶層規則；都對不到就略過，不寫。
 - 不記錄是哪一級對到的；之後要整理就清空重寫。這次不自動產生 campaign 層規則。
 - 2026-10-14 實測（倉庫 217 帳戶）：月表 202605~10 的 81 個帳戶名＝完全相同 63／去前綴 2／互相包含 3／對不到 13；財務表（走期 2025-06 後）66 個＝15／3／8／40（財務對不到多是 IO 在倉庫起始日 2026-05-21 前就結束）。非完全相同的 16 組人工看過，13 組正確；有風險的 3 組：`…固力伸_影音廣告` → Native 帳戶 `…固力伸`（影音 IO 會跟 Native IO 衝突）、`4A_貝立德_白蘭氏` → `…白蘭氏葉黃素`（全品項對到單品帳戶）、`4A_星傳_BMW` → `BMW 1系列`。
 
 ### 6.8 重跑
 
-- 重跑＝在同一個交易裡清空全部 `sales_` 表再寫入（id 會重編）。管理介面上線前沒有人工資料，清空不會丟東西；介面上線後就不再跑這支種子。
+- 重跑＝在同一個交易裡清空全部 `sales_` 表再寫入（id 會換新）。管理介面上線前沒有人工資料，清空不會丟東西；介面上線後就不再跑這支種子。
 
 ### 6.9 種子報告（腳本輸出，寫到 `poc/`）
 
