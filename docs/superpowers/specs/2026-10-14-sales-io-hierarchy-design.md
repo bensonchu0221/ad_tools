@@ -50,7 +50,7 @@ nexus 倉庫已有 D／R／M／P 四平台每日數據，但只到「平台帳�
 
 ## 4. 資料表（Cloud SQL `ad_tools` 庫，前綴 `sales_`）
 
-沿用 `pacing_merges` 做法：store 第一次使用時 `CREATE TABLE IF NOT EXISTS`。金額一律 `DECIMAL(14,2)`、台幣未稅。所有主檔列都有 `source`、`source_ref`、`review_status`，讓種子可以重跑、又不會蓋掉人工確認過的資料。下方 DDL 裡簡寫成 `source, source_ref, review_status, updated_by, updated_at` 的，欄位定義與 `sales_agencies` 相同。
+沿用 `pacing_merges` 做法：store 第一次使用時 `CREATE TABLE IF NOT EXISTS`。金額一律 `DECIMAL(14,2)`、台幣未稅。所有主檔列都有 `source`、`source_ref`，追得到每筆資料從哪份表哪一列來。下方 DDL 裡簡寫成 `source, source_ref, updated_by, updated_at` 的，欄位定義與 `sales_agencies` 相同。
 
 ```sql
 -- 經銷商／代理商。直客、陸客也各是一列（對齊月表「代理商」欄的寫法），IO 一律掛得到經銷商。
@@ -60,7 +60,6 @@ CREATE TABLE sales_agencies (
   attr VARCHAR(20) NULL,                      -- 直客/4A/陸客/其他經銷商/日系經銷商/微型代理商；NULL＝未分類
   note VARCHAR(255) NOT NULL DEFAULT '',
   source VARCHAR(16) NOT NULL, source_ref VARCHAR(255) NOT NULL DEFAULT '',
-  review_status VARCHAR(10) NOT NULL DEFAULT 'auto',   -- auto＝種子推得的、confirmed＝人確認過
   updated_by VARCHAR(255) NOT NULL DEFAULT '', updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
@@ -68,7 +67,7 @@ CREATE TABLE sales_agencies (
 CREATE TABLE sales_clients (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) NOT NULL UNIQUE,
-  note, source, source_ref, review_status, updated_by, updated_at  -- 同上
+  note, source, source_ref, updated_by, updated_at  -- 同上
 );
 
 -- 別名：帳戶名、月表廣告主、財務公司名等各種寫法 → 經銷商／client。種子比對與之後自動帶入都靠它。
@@ -86,7 +85,7 @@ CREATE TABLE sales_billing_parties (
   name VARCHAR(150) NOT NULL UNIQUE,          -- 財務表「公司」
   tax_id VARCHAR(10) NULL UNIQUE,             -- 統編
   payment_terms VARCHAR(20) NOT NULL DEFAULT '',  -- 預付制/後付制
-  source, source_ref, review_status, updated_by, updated_at
+  source, source_ref, updated_by, updated_at
 );
 
 -- IO（委刊單）
@@ -106,7 +105,7 @@ CREATE TABLE sales_ios (
   note TEXT,
   source VARCHAR(16) NOT NULL,                -- finance / deliver / manual
   source_ref VARCHAR(255) NOT NULL,           -- finance：公司|委刊單|起始日；deliver：見 §5.5
-  review_status, updated_by, updated_at,
+  updated_by, updated_at,
   UNIQUE KEY uq_src (source, source_ref),
   INDEX idx_client (client_id), INDEX idx_agency (agency_id), INDEX idx_period (start_date, end_date)
 );
@@ -145,7 +144,7 @@ CREATE TABLE sales_io_assignments (
   campaign_id VARCHAR(64) NOT NULL DEFAULT '',       -- '' ＝不限
   campaign_keyword VARCHAR(100) NOT NULL DEFAULT '', -- '' ＝不限；campaign 名稱包含此字（不分大小寫）
   valid_from DATE NULL, valid_to DATE NULL,          -- NULL＝跟 IO 走期
-  source VARCHAR(16) NOT NULL, review_status, updated_by, updated_at,
+  source VARCHAR(16) NOT NULL, updated_by, updated_at,
   UNIQUE KEY uq_rule (io_id, platform, account_id, campaign_id, campaign_keyword),
   INDEX idx_acct (platform, account_id)
 );
@@ -168,7 +167,9 @@ CREATE TABLE sales_io_assignments (
 
 因為每條規則都限定在 IO 走期內，同一帳戶前後接續的 IO（例：貸霸 6/9~7/8、9/9~10/8）不會互相衝突。
 
-## 6. 種子寫入（一次性腳本，可重跑）
+## 6. 種子寫入（一次性腳本）
+
+第一次寫入的目的是「有資料」，讓之後的前端 demo 表格有東西顯示；比對不完美可以接受，之後整理好再整個清空重寫。
 
 ### 6.1 讀取
 
@@ -183,7 +184,7 @@ CREATE TABLE sales_io_assignments (
 ### 6.3 經銷商
 
 - 月表 202609、202610 的（代理商, 客戶屬性）→ `sales_agencies`，`attr` 照填。202605~202608 出現、但 202609 起沒再出現的代理商 → `attr = NULL`。
-- 財務表：備註寫「微型代理商」的公司（庫客、邁格、尚友）→ 屬性 `微型代理商`；財務表直客 IO 一律掛 `直客`；上辰、香港虎鯨掛 `陸客`（上辰有月表「陸客／阿丹哥，帳戶名＝上辰」佐證；香港虎鯨沒有帳戶名、月表也查不到，`review_status='auto'` 並在報告列出待確認）；有禾布可（月表＝其他經銷商）、創異數位（外貿協會那張 IO 掛月表的「台北數位創意」，並把「創異數位」加為台北數位創意的別名）。
+- 財務表：備註寫「微型代理商」的公司（庫客、邁格、尚友）→ 屬性 `微型代理商`；財務表直客 IO 一律掛 `直客`；上辰、香港虎鯨掛 `陸客`（上辰有月表「陸客／阿丹哥，帳戶名＝上辰」佐證；香港虎鯨沒有帳戶名、月表也查不到，報告列出待確認）；有禾布可（月表＝其他經銷商）、創異數位（外貿協會那張 IO 掛月表的「台北數位創意」，並把「創異數位」加為台北數位創意的別名）。
 
 ### 6.4 付款方與 client
 
@@ -192,7 +193,6 @@ CREATE TABLE sales_io_assignments (
   - 財務表：付款方不是經銷商時，client 名稱＝公司名去掉「股份有限公司／有限公司／商行／診所…」後綴（例：沃醫學股份有限公司 → 沃醫學）；付款方是經銷商時，client 取帳戶名。
   - 月表：帳戶名符合 `4A_<代理商>_<品牌>[_產品]` 或 `直客_<品牌>`、`台客_<品牌>`、`經銷商_<經銷商>_<品牌>` 時取品牌段；不符合就取「廣告主」。
   - 同一品牌的不同寫法若正規化後相同就併；併不起來的保留成兩個 client，等管理介面合併。所有原始寫法都寫進 `sales_aliases`。
-- 全部 `review_status='auto'`。
 
 ### 6.5 IO
 
@@ -200,7 +200,6 @@ CREATE TABLE sales_io_assignments (
 - **月表來源**：
   1. 先嘗試併入財務 IO：同 client（或帳戶名相同），且月表走期落在財務 IO 走期內 ⇒ 不另建 IO，只把這列的平台預算寫進該 IO 的 allocation。
   2. 併不進去的：同（代理商, 帳戶名, 廣告主）正規化後相同、月份相連的列併成一張 IO（月表把跨月檔期每月拆一列），`source_ref = deliver|代理商|帳戶名|廣告主|首月`；起訖＝各月最早／最晚，`budget_net`＝各月預算加總，狀態取最後一個月。走期 TBC 的保留 NULL。
-- 全部 `review_status='auto'`。
 
 ### 6.6 預算拆分
 
@@ -210,23 +209,24 @@ CREATE TABLE sales_io_assignments (
 ### 6.7 歸屬規則
 
 - 每張 IO 的帳戶名（月表 U 欄／財務表帳戶名）正規化後，對照「倉庫帳戶 ∪ BH 帳戶」的帳戶名，**完全相同**才寫一條帳戶層規則（`campaign_id=''`、`campaign_keyword=''`）。一個名字對到多個帳戶（例：同名 D／M／R／P 各一個、新素簡多個 D 帳戶）就全寫，因為 IO 本來就跨帳戶。
-- 名字只靠子字串才對得到的（例：OK忠訓 → `直客_OK忠訓國際`）**不自動寫入**，列進報告由人確認。這次不自動產生 campaign 層規則。
+- 比對三級，任一級對到就寫一條帳戶層規則：①正規化後完全相同 ②去掉前綴（`<數字>_`、`直客_`、`台客_`、`4A_`、`經銷商_`、`CPM_`）後相同 ③互相包含，短的一方去前綴後至少 3 個字（沿用走速 tool#10 的門檻）。三級都對不到就略過，不寫。
+- 不記錄是哪一級對到的；之後要整理就清空重寫。這次不自動產生 campaign 層規則。
+- 2026-10-14 實測（倉庫 217 帳戶）：月表 202605~10 的 81 個帳戶名＝完全相同 63／去前綴 2／互相包含 3／對不到 13；財務表（走期 2025-06 後）66 個＝15／3／8／40（財務對不到多是 IO 在倉庫起始日 2026-05-21 前就結束）。非完全相同的 16 組人工看過，13 組正確；有風險的 3 組：`…固力伸_影音廣告` → Native 帳戶 `…固力伸`（影音 IO 會跟 Native IO 衝突）、`4A_貝立德_白蘭氏` → `…白蘭氏葉黃素`（全品項對到單品帳戶）、`4A_星傳_BMW` → `BMW 1系列`。
 
-### 6.8 重跑規則
+### 6.8 重跑
 
-- 以 `(source, source_ref)` upsert；目標列 `review_status='confirmed'` 時整列跳過，人工改過的不會被蓋。
-- 種子寫入的歸屬規則與 allocation 在重跑時先刪除該 IO 下 `source` 相同的列再寫；`source='manual'` 的不動。
+- 重跑＝在同一個交易裡清空全部 `sales_` 表再寫入（id 會重編）。管理介面上線前沒有人工資料，清空不會丟東西；介面上線後就不再跑這支種子。
 
 ### 6.9 種子報告（腳本輸出，寫到 `poc/`）
 
 1. 各表筆數；各屬性的 IO 數與預算合計。
 2. **歸屬覆蓋率**：以 `nexus_coverage`（帳戶×日，免費）2026-05-21 至今，用帳戶層規則算出四平台花費「已歸屬／衝突／未歸屬」各多少、佔比。
 3. 衝突清單（同帳戶同日被兩張以上 IO 認領，預期會看到 仙桃牌、默沙東 PCV、CHiC）→ 之後補 campaign 規則的待辦。
-4. 未歸屬花費前 30 大帳戶、子字串候選配對、屬性 NULL 的經銷商、待確認項目（香港虎鯨等）。
+4. 未歸屬花費前 30 大帳戶、對不到帳戶的名字清單、屬性 NULL 的經銷商、待確認項目（香港虎鯨等）。
 
 ## 7. 驗證
 
-- 單元測試（`tests/verify_sales_seed.mts`，全假資料手算）：名稱正規化、品牌段解析、財務分組（委刊單空白、前後空白 ` B12`、同 IO 多帳戶名）、月表跨月併 IO、併入財務 IO 的條件、P 欄只收 >0、歸屬優先序與衝突判定（§5 每條規則一個案例）、重跑不蓋 confirmed。
+- 單元測試（`tests/verify_sales_seed.mts`，全假資料手算）：名稱正規化、品牌段解析、財務分組（委刊單空白、前後空白 ` B12`、同 IO 多帳戶名）、月表跨月併 IO、併入財務 IO 的條件、P 欄只收 >0、三級帳戶名比對（含 3 字門檻、前綴不能自己構成命中）、重跑清空後筆數相同。§5 的歸屬計算這次不實作，不在測試範圍。
 - 真資料：本機寫入後跑 §6.9 報告，人工抽查：①鮮味帖 A12 是一張 IO、兩個帳戶名、allocation 有 GOOGLE ②仙桃牌 10 月三張 IO 共用 D 37975 → 出現在衝突清單 ③默沙東 HPV 的 D 34196＋R 10003 都歸到同一張 IO ④財務表 349 列全部寫進 `sales_io_periods`，加總等於試算表。
 
 ## 8. 之後（不在本 spec）
