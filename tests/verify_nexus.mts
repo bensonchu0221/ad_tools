@@ -1194,6 +1194,11 @@ await ok('取代 SQL：M 帳戶 job（facts）一併取代裝置轉換表同帳�
   const { mconvTable: _t, mconvCols: _c, mconvStage: _s, ...none } = base;
   assert.doesNotMatch(buildReplaceSql(none), /`CT`/);
   assert.throws(() => buildReplaceSql({ ...base, accountId: null }), /只能逐帳戶取代/);
+  // 'mconv'（回補腳本）：只動裝置轉換表，事實表／裝置表／媒體表一句都沒有（不能把 7/15~8/15 的 teaser-stat 值改掉）
+  const only = buildReplaceSql({ ...base, mediaTable: 'MT', mediaCols: ['a'], mediaStage: 'SM', tables: 'mconv' });
+  assert.match(only, /DELETE FROM `CT` WHERE date BETWEEN DATE '2026-10-13' AND DATE '2026-10-14' AND account_id = '868613';/);
+  assert.match(only, /INSERT INTO `CT`/);
+  for (const t of ['`F`', '`V`', '`MT`']) assert.ok(!only.includes(t), `mconv 模式不該碰 ${t}`);
 });
 
 await ok('job：M 素材層有點擊、裝置轉換 0 列 → 失敗不寫；有列就一起交給 writeSlice、訊息帶列數', async () => {
