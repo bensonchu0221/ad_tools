@@ -9,7 +9,7 @@ import {
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
-import { summarizeRecon, summarizeMediaRecon, fmtMatch, RECON } from './recon.js';
+import { summarizeRecon, summarizeMediaRecon, summarizeConvRecon, fmtMatch, RECON } from './recon.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
@@ -209,6 +209,18 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       });
     }
     if (mparts.length) summary.push(`媒體層吻合 ${mparts.join('／')}`);
+    // M 轉換層：事實表 vs 裝置轉換表的點擊＋三段轉換（2026-10-15）。實測 100% 一致 ⇒ 分級亮燈
+    const cv = summarizeConvRecon(inp.recon.rows);
+    if (cv.match !== null) {
+      summary.push(`M 轉換層吻合 ${fmtMatch(cv.match)}`);
+      if (cv.match < RECON.ok) {
+        const top = cv.diffs.slice(0, 3).map((d) => d.row.accountName || d.row.accountId).join('、');
+        items.push({
+          level: cv.match < RECON.warn ? 'alert' : 'warn',
+          text: `${PNAME.M} ${t1} 素材層與裝置轉換的點擊／轉換只吻合 ${fmtMatch(cv.match)}（${cv.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}；整合週報裝置分析的 goal1／goal2 會不準）`,
+        });
+      }
+    }
     // M：Redash（MGID 內部全帳戶）有投放、token 表卻沒有的帳戶。素材層會用 Redash 墊底（2026-10-05 起）。
     // AM 主管給 Redash 就是為了「沒填 token 也不漏」⇒ 墊底是正規路徑，綠燈只在結論區列名單（2026-10-06 使用者拍板）；
     // 墊底沒寫進去（素材層仍是 0）才是真的缺數字 ⇒ 紅燈。
@@ -235,6 +247,8 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
         const m = summarizeMediaRecon(p, rows);
         if (m.graded && m.match !== null && m.match < RECON.ok) bad.push({ text: `${p} ${dt.slice(5)} 媒體層 ${fmtMatch(m.match)}`, alert: m.match < RECON.warn });
       }
+      const c = summarizeConvRecon(rows);
+      if (c.match !== null && c.match < RECON.ok) bad.push({ text: `M ${dt.slice(5)} 轉換層 ${fmtMatch(c.match)}`, alert: c.match < RECON.warn });
     }
     const days = inp.rechecked.length;
     if (bad.length) {

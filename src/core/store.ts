@@ -2273,6 +2273,16 @@ async function nexusPool(): Promise<mysql.Pool> {
   if (!(((mcol as any[])[0]?.c ?? 0) > 0)) {
     await p.query(`ALTER TABLE nexus_recon ADD COLUMN m_imp BIGINT NULL, ADD COLUMN m_click BIGINT NULL, ADD COLUMN m_spend DECIMAL(18,4) NULL`);
   }
+  // 2026-10-15 M 轉換層比對：cf_*＝事實表、cd_*＝M 裝置轉換表；NULL＝那次比對沒有轉換層（非 M、舊結果、那天還沒回補）
+  const [ccol] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = 'nexus_recon' AND column_name = 'cf_click'`
+  );
+  if (!(((ccol as any[])[0]?.c ?? 0) > 0)) {
+    await p.query(`ALTER TABLE nexus_recon
+      ADD COLUMN cf_click BIGINT NULL, ADD COLUMN cf_interest BIGINT NULL, ADD COLUMN cf_decision BIGINT NULL, ADD COLUMN cf_buy BIGINT NULL,
+      ADD COLUMN cd_click BIGINT NULL, ADD COLUMN cd_interest BIGINT NULL, ADD COLUMN cd_decision BIGINT NULL, ADD COLUMN cd_buy BIGINT NULL`);
+  }
   nexusSchemaReady = true;
   return p;
 }
@@ -2602,7 +2612,8 @@ export async function nexusReconRecent(hours: number, beforeDt: string): Promise
   const p = await nexusPool();
   const [rows] = await p.query(
     `SELECT DATE_FORMAT(r.dt,'%Y-%m-%d') AS dt, r.platform, r.account_id, r.account_name, r.f_imp, r.f_click, r.f_spend,
-            r.d_imp, r.d_click, r.d_spend, r.m_imp, r.m_click, r.m_spend
+            r.d_imp, r.d_click, r.d_spend, r.m_imp, r.m_click, r.m_spend,
+            r.cf_click, r.cf_interest, r.cf_decision, r.cf_buy, r.cd_click, r.cd_interest, r.cd_decision, r.cd_buy
        FROM nexus_recon r
        JOIN nexus_recon k ON k.dt = r.dt AND k.platform = '*' AND k.account_id = '*'
       WHERE k.checked_at >= NOW() - INTERVAL ? HOUR AND r.dt < ? AND r.platform <> '*'
@@ -2672,7 +2683,10 @@ export interface NexusReconRow {
   device: NexusReconTotals;
   /** 媒體表加總（2026-10-08 起；更早的比對結果、或那天該平台媒體表整個沒資料＝undefined） */
   media?: NexusReconTotals;
+  /** M 轉換層（2026-10-15 起）：事實表 vs M 裝置轉換表的點擊與三段轉換；非 M、舊結果、那天還沒回補＝undefined */
+  conv?: { fact: NexusConvTotals; device: NexusConvTotals };
 }
+export interface NexusConvTotals { click: number; interest: number; decision: number; buy: number }
 
 /** 整天取代：先刪這天再寫入，外加一列 platform='*' 標記「這天比對過了」（當天四平台都沒數字也照樣標）。 */
 export async function replaceNexusRecon(dt: string, rows: NexusReconRow[]): Promise<void> {
@@ -2687,11 +2701,14 @@ export async function replaceNexusRecon(dt: string, rows: NexusReconRow[]): Prom
     for (let i = 0; i < all.length; i += 500) {
       const chunk = all.slice(i, i + 500);
       await conn.query(
-        `INSERT INTO nexus_recon (dt, platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend, m_imp, m_click, m_spend)
-         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',')}`,
+        `INSERT INTO nexus_recon (dt, platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend, m_imp, m_click, m_spend,
+           cf_click, cf_interest, cf_decision, cf_buy, cd_click, cd_interest, cd_decision, cd_buy)
+         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',')}`,
         chunk.flatMap((r) => [dt, r.platform, r.accountId, r.accountName.slice(0, 255),
           r.fact.imp, r.fact.click, r.fact.spend, r.device.imp, r.device.click, r.device.spend,
-          r.media?.imp ?? null, r.media?.click ?? null, r.media?.spend ?? null])
+          r.media?.imp ?? null, r.media?.click ?? null, r.media?.spend ?? null,
+          r.conv?.fact.click ?? null, r.conv?.fact.interest ?? null, r.conv?.fact.decision ?? null, r.conv?.fact.buy ?? null,
+          r.conv?.device.click ?? null, r.conv?.device.interest ?? null, r.conv?.device.decision ?? null, r.conv?.device.buy ?? null])
       );
     }
     await conn.commit();
@@ -2708,6 +2725,7 @@ export async function nexusReconFor(dt: string): Promise<{ checkedAt: string | n
   const p = await nexusPool();
   const [rows] = await p.query(
     `SELECT platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend, m_imp, m_click, m_spend,
+            ${NEXUS_RECON_CONV_COLS},
             DATE_FORMAT(CONVERT_TZ(checked_at,'+00:00','+08:00'),'%Y-%m-%d %H:%i:%s') AS checked_at
        FROM nexus_recon WHERE dt = ?`, [dt]
   );
@@ -2726,8 +2744,16 @@ function mapNexusReconRow(r: any): NexusReconRow {
     device: { imp: Number(r.d_imp), click: Number(r.d_click), spend: Number(r.d_spend) },
     // m_* 是 NULL＝那次比對沒有媒體層（2026-10-08 以前的比對，或那天該平台媒體表還沒回補）
     ...(r.m_imp === null ? {} : { media: { imp: Number(r.m_imp), click: Number(r.m_click), spend: Number(r.m_spend) } }),
+    // cf_* 是 NULL（或欄位不存在）＝那次比對沒有 M 轉換層
+    ...(r.cf_click === null || r.cf_click === undefined ? {} : {
+      conv: {
+        fact: { click: Number(r.cf_click), interest: Number(r.cf_interest), decision: Number(r.cf_decision), buy: Number(r.cf_buy) },
+        device: { click: Number(r.cd_click), interest: Number(r.cd_interest), decision: Number(r.cd_decision), buy: Number(r.cd_buy) },
+      },
+    }),
   };
 }
+const NEXUS_RECON_CONV_COLS = 'cf_click, cf_interest, cf_decision, cf_buy, cd_click, cd_interest, cd_decision, cd_buy';
 
 // ---------- tool#10 走速（pacing）----------
 // BH（Budget Hunter，repo r_bulk_upload）跟本工具在同一個 Cloud SQL，庫名 budget_hunter；本工具對它只讀不寫。

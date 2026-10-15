@@ -3,18 +3,20 @@
 import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
-  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged,
+  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, toMDeviceConvRows,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
-  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm, isValidAccountId,
+  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm, isValidAccountId, writeSlice,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
-import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
-import { reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, reconLevel, fmtMatch, reconDue, reconDueDates } from '../src/tools/nexus/recon.js';
+import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, M_DEVICE_CONV_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
+import {
+  reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, summarizeConvRecon, reconLevel, fmtMatch, reconDue, reconDueDates, RECON,
+} from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
@@ -732,9 +734,9 @@ const rr = (platform: any, accountId: string, f: [number, number, number], d: [n
   fact: { imp: f[0], click: f[1], spend: f[2] }, device: { imp: d[0], click: d[1], spend: d[2] },
 });
 
-await ok('比對 SQL：四張事實表＋裝置表＋媒體表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
+await ok('比對 SQL：四張事實表＋裝置表＋媒體表＋M 轉換兩邊都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
   const sql = reconSql('2026-09-23');
-  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 6);
+  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 8);
   assert.match(sql, /nexus_media_daily/);
   assert.match(sql, /FULL OUTER JOIN m USING \(platform, account_id\)/);
   assert.match(sql, /SUM\(charge\)/);
@@ -1149,6 +1151,149 @@ await ok('健檢：媒體層吻合寫進結論；D 媒體層落差亮燈，M 落
   assert.ok(h.summary.some((s) => s.startsWith('媒體層吻合 D 50.0%／M 50.0%')), h.summary.join(' | '));
   assert.ok(h.items.some((i) => i.level === 'alert' && /D（Discovery）.*媒體層/.test(i.text)));
   assert.ok(!h.items.some((i) => /M（MGID）.*媒體層/.test(i.text)));
+});
+
+// ────────────── M 裝置轉換（2026-10-15）──────────────
+
+await ok('M 裝置轉換列：欄位＝schema、同天同裝置加總成一列（Others 多代碼）、全 0 丟掉、壞日期丟錯', () => {
+  const acc = { id: '868613', name: '三得利DHA' };
+  const dev = (date: string, device: string, imp: number, click: number, spend: number, i: number, d: number, b: number) =>
+    ({ date, device, imp, click, spend, conv_interest: i, conv_decision: d, conv_buy: b });
+  const rows = toMDeviceConvRows(acc, [
+    dev('2026-10-13', 'Mobile', 100, 5, 1.1, 0, 2, 1),
+    dev('2026-10-13', 'Others', 3, 0, 0.1, 0, 0, 0),
+    dev('2026-10-13', 'Others', 2, 1, 0.2000001, 1, 0, 0),
+    dev('2026-10-13', 'Tablet', 0, 0, 0, 0, 0, 0),
+    dev('2026-10-14', 'PC', 0, 0, 0, 0, 1, 0), // 零點擊也有轉換（864474 9 月實例）⇒ 要留
+  ], T);
+  assert.equal(rows.length, 3);
+  for (const r of rows) assert.deepEqual(Object.keys(r).sort(), keysOf(M_DEVICE_CONV_SCHEMA));
+  const o = rows.find((r) => r.device === 'Others')!;
+  assert.deepEqual([o.imp, o.click, o.spend, o.conv_interest], [5, 1, 0.3, 1]);
+  assert.equal(rows.find((r) => r.device === 'PC')!.conv_decision, 1);
+  assert.ok(rows.every((r) => r.account_id === '868613' && r.synced_at === T));
+  assert.throws(() => toMDeviceConvRows(acc, [dev('garbage', 'PC', 1, 1, 1, 0, 0, 0)], T), /無法解析的日期/);
+});
+
+await ok('取代 SQL：M 帳戶 job（facts）一併取代裝置轉換表同帳戶這段；裝置類模式不碰；沒給不碰；整平台拒絕', () => {
+  const base = {
+    factTable: 'F', factCols: ['a'], factStage: 'SF', deviceTable: 'V', deviceCols: ['a'], deviceStage: 'SV',
+    mconvTable: 'CT', mconvCols: ['date', 'device'], mconvStage: 'SC', platform: 'M' as const, accountId: '868613',
+    sd: '2026-10-13', ed: '2026-10-14', tables: 'facts' as const,
+  };
+  const sql = buildReplaceSql(base);
+  // 表上沒有 platform 欄：刪除範圍＝日期分區＋帳戶
+  assert.match(sql, /DELETE FROM `CT` WHERE date BETWEEN DATE '2026-10-13' AND DATE '2026-10-14' AND account_id = '868613';/);
+  assert.match(sql, /INSERT INTO `CT` \(date, device\) SELECT date, device FROM `SC`;/);
+  assert.ok(sql.indexOf('`CT`') > sql.indexOf('BEGIN') && sql.indexOf('`CT`') < sql.indexOf('COMMIT')); // 同一個交易
+  assert.doesNotMatch(buildReplaceSql({ ...base, tables: 'device' }), /`CT`/);
+  assert.doesNotMatch(buildReplaceSql({ ...base, accountId: null, tables: 'device_orphans' }), /`CT`/);
+  const empty = buildReplaceSql({ ...base, mconvStage: null }); // 真的沒有就照刪、不插
+  assert.match(empty, /DELETE FROM `CT`/);
+  assert.doesNotMatch(empty, /INSERT INTO `CT`/);
+  const { mconvTable: _t, mconvCols: _c, mconvStage: _s, ...none } = base;
+  assert.doesNotMatch(buildReplaceSql(none), /`CT`/);
+  assert.throws(() => buildReplaceSql({ ...base, accountId: null }), /只能逐帳戶取代/);
+});
+
+await ok('job：M 素材層有點擊、裝置轉換 0 列 → 失敗不寫；有列就一起交給 writeSlice、訊息帶列數', async () => {
+  const mjob = { platform: 'M' as const, accountId: '868613', accountName: 'DHA', sd: '2026-10-13', ed: '2026-10-14' };
+  const fact = { account_id: '868613', account_name: 'DHA', date: '2026-10-13', imp: 50, click: 3, spend: 1, conv_decision: 2 };
+  const media = [{ date: '2026-10-13', account_id: '868613' }];
+  const bad = fakeDeps({});
+  bad.deps.fetch = async () => ({ facts: [fact], device: [], media, mDeviceConv: [], warnings: [] });
+  await assert.rejects(runNexusJob(mjob, () => {}, bad.deps), /裝置轉換報表卻回 0 列/);
+  assert.deepEqual(bad.calls, []);
+
+  let seen: unknown, tables: unknown;
+  const good = fakeDeps({});
+  const conv = [{ date: '2026-10-13', account_id: '868613', device: 'Mobile', conv_decision: 2 }];
+  good.deps.fetch = async () => ({ facts: [fact], device: [], media, mDeviceConv: conv, warnings: [] });
+  good.deps.writeSlice = async (s) => { seen = s.mDeviceConv; tables = s.tables; };
+  const r = await runNexusJob(mjob, () => {}, good.deps);
+  assert.deepEqual(seen, conv);
+  assert.equal(tables, 'facts');
+  assert.match(r.message, /裝置轉換 1 列/);
+});
+
+await ok('M 裝置轉換寫入防呆：非 M 或整平台 job 帶裝置轉換列 → 拒寫（不碰 BQ）', async () => {
+  const row = { date: '2026-10-13', account_id: '1' };
+  await assert.rejects(writeSlice({ platform: 'D', accountId: '1', sd: '2026-10-13', ed: '2026-10-13', facts: [], device: [], mDeviceConv: [row] }), /只收 M 單一帳戶/);
+  await assert.rejects(writeSlice({ platform: 'M', accountId: null, sd: '2026-10-13', ed: '2026-10-13', facts: [], device: [], mDeviceConv: [row] }), /只收 M 單一帳戶/);
+  await assert.rejects(writeSlice({ platform: 'M', accountId: '1', sd: '2026-10-13', ed: '2026-10-13', facts: [], device: [], mDeviceConv: [{ ...row, account_id: '2' }] }), /不是本 job 的 1/);
+});
+
+const cvRow = (accountId: string, f: [number, number, number, number], d?: [number, number, number, number], name = `帳${accountId}`): NexusReconRow => ({
+  ...rr('M', accountId, [1000, f[0], 100], [1000, f[0], 100]), accountName: name,
+  ...(d ? {
+    conv: {
+      fact: { click: f[0], interest: f[1], decision: f[2], buy: f[3] },
+      device: { click: d[0], interest: d[1], decision: d[2], buy: d[3] },
+    },
+  } : {}),
+});
+
+await ok('比對 SQL／列：M 轉換兩邊排除 client: 墊底；帳戶在裝置轉換表有列才給 conv（排除清單帳戶的舊事實列不會假落差）', () => {
+  const sql = reconSql('2026-10-13');
+  assert.match(sql, /nexus_m_device_conv_daily/);
+  assert.equal((sql.match(/NOT STARTS_WITH\(account_id, 'client:'\)/g) ?? []).length, 2);
+  assert.match(sql, /FULL OUTER JOIN cd USING \(platform, account_id\)/);
+  const base = { account_name: 'x', f_imp: '1', f_click: '3', f_spend: '1', v_imp: '1', v_click: '3', v_spend: '1' };
+  const cvCols = { cf_click: '3', cf_interest: '0', cf_decision: '2', cf_buy: '1', cd_click: '3', cd_interest: '0', cd_decision: '2', cd_buy: '1' };
+  const rows = toReconRows([
+    { platform: 'M', account_id: '868613', ...base, ...cvCols, c_has: 'true' },
+    { platform: 'M', account_id: '860502', ...base, ...cvCols, cd_click: '0', cd_decision: '0', cd_buy: '0', c_has: 'false' }, // 排除中的帳戶
+    { platform: 'D', account_id: '1', ...base, c_has: 'false' },
+  ]);
+  assert.deepEqual(rows[0].conv, { fact: { click: 3, interest: 0, decision: 2, buy: 1 }, device: { click: 3, interest: 0, decision: 2, buy: 1 } });
+  assert.equal(rows[1].conv, undefined);
+  assert.equal(rows[2].conv, undefined);
+});
+
+await ok('轉換層吻合：逐帳戶絕對差、取四項最差；沒 conv（舊結果／還沒回補）為 null；點擊差 1 次不列明細', () => {
+  assert.equal(summarizeConvRecon([cvRow('1', [10, 0, 5, 1])]).match, null); // 沒有 conv
+  const ok1 = summarizeConvRecon([cvRow('1', [1255, 0, 14, 61], [1254, 0, 14, 61])]); // 2026-10-15 實測 864475
+  assert.ok(ok1.match! > RECON.ok);
+  assert.equal(ok1.diffs.length, 0);
+  const s = summarizeConvRecon([cvRow('1', [100, 0, 10, 2], [100, 0, 5, 2], '貸霸'), cvRow('2', [50, 1, 0, 0], [50, 1, 0, 0])]);
+  assert.equal(s.byMetric.decision, 0.5);
+  assert.equal(s.byMetric.interest, 1);
+  assert.equal(s.byMetric.click, 1);
+  assert.equal(s.match, 0.5);
+  assert.deepEqual(s.diffs.map((d) => d.row.accountName), ['貸霸']);
+  // goal1 全 0（沒有這項）不拉低吻合率
+  assert.equal(summarizeConvRecon([cvRow('1', [10, 0, 0, 0], [10, 0, 0, 0])]).byMetric.decision, null);
+});
+
+await ok('健檢：M 轉換層進結論；落差亮燈並點名帳戶；重新比對的較早日期也報', () => {
+  const inp = healthBase();
+  inp.recon = { checkedAt: '2026-09-24 04:40:00', rows: [cvRow('1', [100, 0, 10, 2], [100, 0, 10, 2])] };
+  let h = evaluateHealth(inp);
+  assert.ok(h.summary.includes('M 轉換層吻合 100%'), h.summary.join(' | '));
+  assert.ok(!h.items.some((i) => /轉換/.test(i.text)));
+
+  inp.recon = { checkedAt: '2026-09-24 04:40:00', rows: [cvRow('1', [100, 0, 10, 2], [100, 0, 5, 2], '貸霸9597')] };
+  h = evaluateHealth(inp);
+  assert.ok(h.items.some((i) => i.level === 'alert' && /M（MGID）.*裝置轉換.*50\.0%.*最大：貸霸9597/.test(i.text)), h.items.map((i) => i.text).join(' | '));
+
+  const re = healthBase();
+  re.rechecked = [{ dt: '2026-06-11', rows: [cvRow('1', [100, 0, 10, 2], [100, 0, 9, 2])] }];
+  assert.match(evaluateHealth(re).items.map((i) => i.text).join('|'), /M 06-11 轉換層 90\.0%/);
+});
+
+await ok('狀態頁：M 卡片多一行「轉換層」並依吻合上色；浮窗下半列落差帳戶；其他平台與沒 conv 時不顯示', () => {
+  const input = healthBase();
+  input.recon = { checkedAt: '2026-09-24 04:32:00', rows: [cvRow('7', [100, 0, 10, 2], [100, 0, 5, 2], '<貸霸>'), rr('D', '1', [10, 1, 1], [10, 1, 1])] };
+  const batchJobs = [bjob(1, 'D', 'success'), bjob(4, 'M', 'success')];
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs, jobs: batchJobs });
+  assert.equal((html.match(/>轉換層 /g) ?? []).length, 1);
+  assert.match(html, /class="pf-media pm-alert"[^>]*>轉換層 50\.0%/);
+  assert.match(html, /<dialog class="rp glass" id="rp-M"[\s\S]*?轉換層：素材層與裝置轉換[\s\S]*?class="acct">&lt;貸霸>[\s\S]*?<\/dialog>/);
+  assert.doesNotMatch(html.match(/<dialog class="rp glass" id="rp-D"[\s\S]*?<\/dialog>/)![0], />轉換層/);
+
+  const none = healthBase();
+  none.recon = { checkedAt: '2026-09-24 04:32:00', rows: [cvRow('7', [100, 0, 10, 2])] }; // 還沒回補
+  assert.doesNotMatch(statusPage({ input: none, health: evaluateHealth(none), batchJobs, jobs: batchJobs }), />轉換層[ ：]/);
 });
 
 console.log(`\n全部 ${n} 項通過`);

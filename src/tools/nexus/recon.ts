@@ -14,7 +14,7 @@
 // 不會每次開頁面就查 BQ。
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { replaceNexusRecon, type NexusPlatform, type NexusReconRow } from '../../core/store.js';
-import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE } from './schema.js';
+import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE, M_DEVICE_CONV_TABLE } from './schema.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 /** 吻合率門檻：≥ ok 綠、≥ warn 黃、其餘紅。先抓寬一點，跑幾天看實際誤差再調。 */
@@ -48,6 +48,10 @@ export function reconSql(dt: string): string {
   const sums = (t: string) => `SELECT platform, account_id, ANY_VALUE(account_name) AS account_name,
     SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
   FROM ${q(t)} WHERE date = ${d} GROUP BY platform, account_id`;
+  // M 轉換層：事實表 vs M 裝置轉換表的點擊＋三段轉換（client: 墊底帳戶沒有裝置轉換，不列入）
+  const conv = (t: string) => `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name,
+    SUM(click) AS click, SUM(conv_interest) AS interest, SUM(conv_decision) AS decision, SUM(conv_buy) AS buy
+  FROM ${q(t)} WHERE date = ${d} AND NOT STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)}) GROUP BY account_id`;
   return `
 WITH f AS (
     ${facts}
@@ -55,13 +59,21 @@ WITH f AS (
   ${sums(DEVICE_TABLE)}
 ), m AS (
   ${sums(MEDIA_TABLE)}
+), cf AS (
+  ${conv(FACT_TABLE.M)}
+), cd AS (
+  ${conv(M_DEVICE_CONV_TABLE)}
 )
-SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name) AS account_name,
+SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name, cf.account_name, cd.account_name) AS account_name,
   IFNULL(f.imp, 0) AS f_imp, IFNULL(f.click, 0) AS f_click, IFNULL(f.spend, 0) AS f_spend,
   IFNULL(v.imp, 0) AS v_imp, IFNULL(v.click, 0) AS v_click, IFNULL(v.spend, 0) AS v_spend,
   IFNULL(m.imp, 0) AS m_imp, IFNULL(m.click, 0) AS m_click, IFNULL(m.spend, 0) AS m_spend,
-  m.account_id IS NOT NULL AS m_has
-FROM f FULL OUTER JOIN v USING (platform, account_id) FULL OUTER JOIN m USING (platform, account_id)`;
+  m.account_id IS NOT NULL AS m_has,
+  IFNULL(cf.click, 0) AS cf_click, IFNULL(cf.interest, 0) AS cf_interest, IFNULL(cf.decision, 0) AS cf_decision, IFNULL(cf.buy, 0) AS cf_buy,
+  IFNULL(cd.click, 0) AS cd_click, IFNULL(cd.interest, 0) AS cd_interest, IFNULL(cd.decision, 0) AS cd_decision, IFNULL(cd.buy, 0) AS cd_buy,
+  cd.account_id IS NOT NULL AS c_has
+FROM f FULL OUTER JOIN v USING (platform, account_id) FULL OUTER JOIN m USING (platform, account_id)
+  FULL OUTER JOIN cf USING (platform, account_id) FULL OUTER JOIN cd USING (platform, account_id)`;
 }
 
 /**
@@ -74,11 +86,21 @@ export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow
   const money = (v: string | null | undefined) => Math.round(n(v) * 10000) / 10000;
   const has = (v: unknown) => v === true || v === 'true' || v === '1' || v === 1;
   const withMedia = new Set(raw.filter((r) => has(r.m_has)).map((r) => r.platform));
+  // M 轉換層逐帳戶判斷：該帳戶那天在 M 裝置轉換表有列才比。不能像媒體層用「整個平台那天有沒有列」：
+  // 排除清單的帳戶（860502 等）6~7 月有事實列，但不會再有 job 補裝置轉換 ⇒ 回補後會永遠假落差。
+  // 「事實寫了、裝置轉換漏了」不靠這裡抓：兩者同一個 job、同一個交易寫入，job 另有「有點擊卻 0 列就失敗」的防呆。
+  // client: 墊底帳戶本來就沒有裝置轉換（SQL 已排除）。
   return raw.map((r) => ({
     platform: r.platform as NexusPlatform, accountId: String(r.account_id ?? ''), accountName: String(r.account_name ?? ''),
     fact: { imp: n(r.f_imp), click: n(r.f_click), spend: money(r.f_spend) },
     device: { imp: n(r.v_imp), click: n(r.v_click), spend: money(r.v_spend) },
     ...(withMedia.has(r.platform) ? { media: { imp: n(r.m_imp), click: n(r.m_click), spend: money(r.m_spend) } } : {}),
+    ...(r.platform === 'M' && has(r.c_has) ? {
+      conv: {
+        fact: { click: n(r.cf_click), interest: n(r.cf_interest), decision: n(r.cf_decision), buy: n(r.cf_buy) },
+        device: { click: n(r.cd_click), interest: n(r.cd_interest), decision: n(r.cd_decision), buy: n(r.cd_buy) },
+      },
+    } : {}),
   }));
 }
 
@@ -167,6 +189,48 @@ export function summarizeMediaRecon(platform: NexusPlatform, rows: NexusReconRow
     if (base > 0) vals.push(1 - diff / base);
   }
   return { platform, match: vals.length ? Math.min(...vals) : null, graded: platform !== 'M' };
+}
+
+// ────────────────────────────── M 轉換層：事實表 vs 裝置轉換表（2026-10-15） ──────────────────────────────
+
+/** 比點擊＋三段轉換。曝光不比：裝置轉換表的曝光是 statistics-reports，事實表是 teaser-stat 校正後的，天生差 0.01~0.1%。 */
+export const CONV_METRICS = ['click', 'interest', 'decision', 'buy'] as const;
+export type ConvMetric = (typeof CONV_METRICS)[number];
+export const CONV_LABEL: Record<ConvMetric, string> = { click: '點擊', interest: 'goal2', decision: 'goal1', buy: 'Main goal' };
+
+export interface ConvRecon {
+  /** 四項裡最差的吻合率；那天沒有轉換層（還沒回補／舊比對）或全都 0 為 null */
+  match: number | null;
+  byMetric: Record<ConvMetric, number | null>;
+  /** 任一項差超過 RECON.accountDiff 的帳戶，影響大的先 */
+  diffs: { row: NexusReconRow; diff: Record<ConvMetric, number> }[];
+}
+
+/**
+ * M 事實表（素材層，三段轉換）vs M 裝置轉換表（statistics-reports day×deviceType）的吻合率，算法同 summarizeRecon。
+ * 2026-10-15 實測 6/05~10/14：轉換逐帳戶逐月 100% 一致，點擊 9/15~10/14 只差 1 次 ⇒ 分級亮燈，門檻同 RECON。
+ */
+export function summarizeConvRecon(rows: NexusReconRow[]): ConvRecon {
+  const mine = rows.filter((r) => r.platform === 'M' && r.conv);
+  const byMetric = {} as Record<ConvMetric, number | null>;
+  const absSum = {} as Record<ConvMetric, number>;
+  for (const m of CONV_METRICS) {
+    let diff = 0, base = 0;
+    for (const r of mine) { diff += Math.abs(r.conv!.fact[m] - r.conv!.device[m]); base += Math.max(r.conv!.fact[m], r.conv!.device[m]); }
+    byMetric[m] = base > 0 ? 1 - diff / base : null;
+    absSum[m] = diff;
+  }
+  const vals = CONV_METRICS.map((m) => byMetric[m]).filter((v): v is number => v !== null);
+  const diffs = mine
+    .map((row) => {
+      const diff = Object.fromEntries(CONV_METRICS.map((m) => [m, rel(row.conv!.fact[m], row.conv!.device[m])])) as Record<ConvMetric, number>;
+      const weight = Math.max(...CONV_METRICS.map((m) => absSum[m] > 0 ? Math.abs(row.conv!.fact[m] - row.conv!.device[m]) / absSum[m] : 0));
+      return { row, diff, weight };
+    })
+    .filter((a) => CONV_METRICS.some((m) => a.diff[m] > RECON.accountDiff))
+    .sort((a, b) => b.weight - a.weight)
+    .map(({ row, diff }) => ({ row, diff }));
+  return { match: vals.length ? Math.min(...vals) : null, byMetric, diffs };
 }
 
 export const reconLevel = (match: number | null): 'ok' | 'warn' | 'alert' | 'none' =>

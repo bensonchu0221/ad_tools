@@ -6,8 +6,9 @@ import {
 } from '../../core/popin.js';
 import { fetchReport, fetchReportPaged } from '../../core/rixbee.js';
 import {
-  fetchMgidReport, fetchMgidSourceReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex, getClientCurrency, getClientTimezone,
-  type MgidClient, type MgidReportRow, type MgidSourceRow,
+  fetchMgidReport, fetchMgidSourceReport, fetchMgidDeviceReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex,
+  getClientCurrency, getClientTimezone,
+  type MgidClient, type MgidReportRow, type MgidSourceRow, type MgidDeviceRow,
 } from '../../core/mgid.js';
 import { fetchRedashDeviceDaily, fetchRedashTeaserDaily, type RedashRow } from '../../core/mgidRedash.js';
 import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../core/store.js';
@@ -18,9 +19,12 @@ import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, type Platform } from './schema.js';
 
 export type Row = Record<string, unknown>;
-/** media＝媒體表列（2026-10-08）；沒有媒體層的 job（M 裝置 job）省略。 */
+/**
+ * media＝媒體表列（2026-10-08）；沒有媒體層的 job（M 裝置 job）省略。
+ * mDeviceConv＝M 裝置轉換表列（2026-10-15）；只有 M 各帳戶 job 有，其他 job 省略＝不動那張表。
+ */
 export interface FetchResult {
-  facts: Row[]; device: Row[]; media?: Row[]; warnings: string[];
+  facts: Row[]; device: Row[]; media?: Row[]; mDeviceConv?: Row[]; warnings: string[];
   /** 這個 job 打了幾次平台 API（目前只有 R 記：R 每 token 有每日請求上限，記下來才知道回補一段吃多少額度） */
   requests?: number;
 }
@@ -543,11 +547,43 @@ export async function fetchMAccount(
   // 媒體層：同一支 statistics-reports 換 day×source 維度（tool#5 同一個函式）。素材層原始列是空的，source 也一定空，省一次。
   // ⚠️ statistics-reports 整支排除生涯零點擊 campaign、也沒走 teaser-stat 校正 ⇒ 總量會比素材層略少（10/6 實測 imp −0.11%）
   let media: Row[] = [];
+  // 裝置轉換：同一支 statistics-reports 換 day×deviceType（週報裝置分析用的那支），補 Redash 裝置表沒有的 goal1／goal2
+  let mDeviceConv: Row[] = [];
   if (raw.length) {
     onPhase(`M ${client.clientName}：媒體報表`);
     media = toMMediaRows(acc, await fetchMgidSourceReport(client, sd, ed), syncedAt);
+    onPhase(`M ${client.clientName}：裝置轉換`);
+    mDeviceConv = toMDeviceConvRows(acc, await fetchMgidDeviceReport(client, sd, ed), syncedAt);
   }
-  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], media, warnings: [] };
+  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], media, mDeviceConv, warnings: [] };
+}
+
+/**
+ * MGID day×deviceType → M 裝置轉換表列。同一天同裝置多列（API 不同 deviceType 歸到同一桶，例如 Others）加總成一列；
+ * 六個數字全 0 的列丟掉（加總不受影響）。純函式。
+ */
+export function toMDeviceConvRows(account: { id: string; name: string }, raw: MgidDeviceRow[], syncedAt: string): Row[] {
+  const byKey = new Map<string, Row>();
+  for (const r of raw) {
+    const date = requireDate(r.date, 'M');
+    const key = `${date}|${r.device}`;
+    let o = byKey.get(key);
+    if (!o) {
+      o = {
+        date, account_id: account.id, account_name: account.name, device: r.device,
+        imp: 0, click: 0, spend: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0, synced_at: syncedAt,
+      };
+      byKey.set(key, o);
+    }
+    o.imp = (o.imp as number) + int(r.imp);
+    o.click = (o.click as number) + int(r.click);
+    o.spend = money((o.spend as number) + money(r.spend));
+    o.conv_interest = (o.conv_interest as number) + int(r.conv_interest);
+    o.conv_decision = (o.conv_decision as number) + int(r.conv_decision);
+    o.conv_buy = (o.conv_buy as number) + int(r.conv_buy);
+  }
+  return [...byKey.values()].filter((o) =>
+    o.imp || o.click || o.spend || o.conv_interest || o.conv_decision || o.conv_buy);
 }
 
 // ── M 裝置表：MGID Redash（全部 Broadciel 帳戶一次撈，含零點擊 campaign） ──

@@ -10,7 +10,10 @@ import type { NexusJobRow, NexusPlatform } from '../../core/store.js';
 import { addDays, isSkipped } from './run.js';
 import { P_UNATTRIBUTED } from './fetch.js';
 import type { HealthInput, HealthReport } from './health.js';
-import { summarizeRecon, summarizeMediaRecon, reconLevel, fmtMatch, RECON, type PlatformRecon } from './recon.js';
+import {
+  summarizeRecon, summarizeMediaRecon, summarizeConvRecon, reconLevel, fmtMatch, RECON, CONV_METRICS, CONV_LABEL,
+  type PlatformRecon, type ConvRecon,
+} from './recon.js';
 
 const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P'];
 const PNAME: Record<NexusPlatform, string> = { D: 'Discovery', R: 'Rixbee', M: 'MGID', P: 'Prism' };
@@ -148,6 +151,25 @@ function reconPanel(p: NexusPlatform, r: PlatformRecon, dt: string, chart = ''):
     ${r.diffs.length > 50 ? `<p class="rp-empty">還有 ${r.diffs.length - 50} 個帳戶沒列出。</p>` : ''}`;
 }
 
+/** M 浮窗下半：轉換層（素材層 vs 裝置轉換表）四項吻合率＋落差帳戶。 */
+function convPanel(cv: ConvRecon): string {
+  const metrics = CONV_METRICS.map((m) => `<div><dt>${CONV_LABEL[m]}</dt><dd>${fmtMatch(cv.byMetric[m])}</dd></div>`).join('');
+  const head = `<div class="rp-head rp-sub">
+      <h3>轉換層：素材層與裝置轉換</h3>
+      <p class="rp-note">裝置轉換表（MGID day×裝置）是整合週報裝置分析 goal1／goal2 的來源，點擊與三段轉換應該跟素材層一致。</p>
+      <dl class="rp-metrics">${metrics}</dl>
+    </div>`;
+  if (!cv.diffs.length) return `${head}<p class="rp-empty">每個帳戶四項都在 ${pct(RECON.accountDiff)} 以內。</p>`;
+  const rows = cv.diffs.slice(0, 50).map(({ row, diff }) => `<tr>
+      <td><span class="acct">${esc(row.accountName || row.accountId)}</span><span class="aid">${esc(row.accountId)}</span></td>
+      ${CONV_METRICS.map((m) => `<td class="ar${diff[m] > RECON.accountDiff ? ' off' : ''}"><span>${num(row.conv!.fact[m])}</span><span class="vs">${num(row.conv!.device[m])}</span></td>`).join('')}</tr>`).join('');
+  return `${head}
+    <div class="rp-scroll"><table class="qtable rp-table">
+      <thead><tr><th>帳戶</th>${CONV_METRICS.map((m) => `<th class="ar">${CONV_LABEL[m]}<small>素材／裝置</small></th>`).join('')}</tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    ${cv.diffs.length > 50 ? `<p class="rp-empty">還有 ${cv.diffs.length - 50} 個帳戶沒列出。</p>` : ''}`;
+}
+
 // ────────────────────────────── 整頁 ──────────────────────────────
 
 export interface StatusPageData {
@@ -207,12 +229,17 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
           <span>吻合</span><b>${fmtMatch(r.match)}</b><em>${r.diffs.length ? `${r.diffs.length} 帳戶有落差` : '看明細'}</em><i class="chev" aria-hidden="true"></i></button>`;
       // 浮動視窗（原生 <dialog>）：點外圍或按 Esc 關閉，不佔版面。開關動畫要從按鈕長出／縮回，所以關閉全交給 JS（不用 closedby）
       // 叉叉掛在浮窗上、不放進 .rp-in：內容捲動時它固定在右上角
-      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><button type="button" class="rp-x" aria-label="關閉"></button><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1, spendBars(p, trend, t1))}</div></dialog>`);
+      const cv = p === 'M' ? summarizeConvRecon(reconRows) : null;
+      panels.push(`<dialog class="rp glass" id="rp-${p}" aria-labelledby="rp-${p}-h"><button type="button" class="rp-x" aria-label="關閉"></button><div class="rp-in" tabindex="-1" autofocus>${reconPanel(p, r, t1, spendBars(p, trend, t1))}${cv && cv.match !== null ? convPanel(cv) : ''}</div></dialog>`);
       // 媒體層 vs 素材層（點擊／花費）：一行小字。M 天生有小落差（零點擊 campaign 不在媒體報表）⇒ 不上色
       const mr = summarizeMediaRecon(p, reconRows);
       if (mr.match !== null) {
         const ml = mr.graded ? reconLevel(mr.match) : 'ok';
         matchBtn += `<p class="pf-media pm-${ml}" title="媒體表與素材表的點擊／花費加總比對${mr.graded ? '' : '（M 的媒體報表不含零點擊 campaign，有小落差屬正常）'}">媒體層 ${fmtMatch(mr.match)}</p>`;
+      }
+      // M 轉換層：素材層 vs 裝置轉換表（點擊＋goal2／goal1／Main goal），分級上色
+      if (cv && cv.match !== null) {
+        matchBtn += `<p class="pf-media pm-${reconLevel(cv.match)}" title="素材表與裝置轉換表（MGID day×裝置）的點擊、goal2、goal1、Main goal 加總比對">轉換層 ${fmtMatch(cv.match)}</p>`;
       }
     }
 
@@ -454,6 +481,8 @@ const STYLE = `
   /* 留白 40px：字要落在漸進模糊已經夠糊的區域（最外 4px 不糊、之後逐層加糊，往內 80px 才疊滿） */
   .rp-in{flex:1;min-width:0;overflow:auto;padding:40px 42px 38px;overscroll-behavior:contain;outline:none}
   .rp-head{position:relative;padding-right:44px}
+  /* M 浮窗第二段（轉換層）：細線隔開，不再留叉叉的位置 */
+  .rp-head.rp-sub{margin-top:30px;padding-top:24px;padding-right:0;border-top:1px solid var(--hair)}
   .rp h3{font-size:16px;font-weight:600;margin:0}
   /* 叉叉固定在浮窗右上角（對齊標題列），捲上來的內容從底下經過時被它自己的小磨砂糊掉 */
   .rp-x{position:absolute;z-index:2;top:30px;right:30px;width:34px;height:34px;border-radius:50%;cursor:pointer;
