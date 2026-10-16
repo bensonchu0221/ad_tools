@@ -2,7 +2,7 @@
 // 全程假資料（手算期望值），不連 DB／Sheets。用法：npx tsx tests/verify_sales.mts
 import assert from 'node:assert/strict';
 import {
-  normName, coreName, matchAccounts, companyCore, brandFromLabel, validAccountId, type Account,
+  normName, coreName, matchAccounts, companyCore, brandFromLabel, validAccountId, mergeAccounts, type Account,
 } from '../src/tools/sales/names.js';
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
 import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
@@ -444,6 +444,23 @@ await ok('swapSql：一段交易內 8 張表各 DELETE＋從暫存表 INSERT（�
   const iBegin = sql.indexOf('BEGIN TRANSACTION;'), iCommit = sql.indexOf('COMMIT TRANSACTION;');
   assert.ok(iBegin >= 0 && iBegin < sql.indexOf('DELETE FROM') && sql.lastIndexOf('INSERT INTO') < iCommit);
   assert.match(sql, /EXCEPTION WHEN ERROR THEN\s+ROLLBACK TRANSACTION;/);
+});
+
+// ---------- accounts ----------
+
+await ok('mergeAccounts：多個來源合併、無效 ID 與空名字略過、正規化後同名只留一個、同帳戶不同名字都留', () => {
+  const got = mergeAccounts([
+    [
+      { platform: 'D', accountId: '37975', name: '直客_仙桃牌' },
+      { platform: 'D', accountId: 'nan', name: '直客_仙桃牌' },
+      { platform: 'R', accountId: '1', name: '' },
+    ],
+    [
+      { platform: 'D', accountId: '37975', name: '直客＿仙桃牌 ' },
+      { platform: 'D', accountId: '37975', name: '仙桃牌D' },
+    ],
+  ]);
+  assert.deepEqual(got.map((a) => `${a.platform}${a.accountId}:${a.name}`), ['D37975:直客_仙桃牌', 'D37975:仙桃牌D']);
 });
 
 // <<後續 Task 的測試接在這裡>>

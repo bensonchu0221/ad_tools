@@ -64,3 +64,15 @@ export function brandFromLabel(label: string): string | null {
   if (parts.length >= 2 && /^(直客|台客)$/.test(parts[0])) return parts[1];
   return null;
 }
+
+/** 多個來源的帳戶清單合併：無效 ID、空名字略過；正規化後同名只留一個；同帳戶不同名字都留（都拿來比對）。 */
+export function mergeAccounts(lists: Account[][]): Account[] {
+  const out = new Map<string, Account>();
+  for (const a of lists.flat()) {
+    const x: Account = { platform: String(a.platform), accountId: String(a.accountId ?? '').trim(), name: String(a.name ?? '').trim() };
+    if (!validAccountId(x.accountId) || !x.name) continue;
+    const k = `${x.platform}|${x.accountId}|${normName(x.name)}`;
+    if (!out.has(k)) out.set(k, x);
+  }
+  return [...out.values()];
+}
