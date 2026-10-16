@@ -2,7 +2,7 @@
 
 - 日期：2026-10-14
 - 所屬：BigQuery `popinpoc1.reporting.nexus_sales_*`（2026-10-16 由 Cloud SQL 改到 BQ，理由見 §2）；寫入程式在 ad_tools，讀取端主要是 audience_center 的 `/ad-performance`（pacplatform.net/ad-performance），之後也給 AM dashboard、走速（tool#10）用
-- 狀態：設計待審（2026-10-16 改版：儲存位置改 BQ）
+- 狀態：已實作；2026-10-16 種子寫入 BQ `popinpoc1.reporting.nexus_sales_*`（IO 342 張、歸屬規則 347 條）。報告 `poc/sales_seed_report.md`（不進 repo）
 
 ## 1. 背景與目的
 
