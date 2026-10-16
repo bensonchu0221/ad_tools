@@ -5,6 +5,7 @@ import {
   normName, coreName, matchAccounts, companyCore, brandFromLabel, validAccountId, type Account,
 } from '../src/tools/sales/names.js';
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
+import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -169,6 +170,141 @@ await ok('月表舊格式：202605 只有代理商與 R 欄；202608 的「客�
 
 await ok('月表：找不到表頭直接報錯', () => {
   assert.throws(() => parseDeliverTab('202610', [['x'], ['y']]), /202610/);
+});
+
+// ---------- build ----------
+
+const CUST = [['  ', '公司名稱', '統一編號', '帳戶名', '付款方式'], ['Sunny', '鮮味帖商行', '12345678', '鮮味帖商行_popIn', '預付制']];
+const ACC2: Account[] = [
+  { platform: 'D', accountId: '37975', name: '直客_仙桃牌' },
+  { platform: 'M', accountId: '866244', name: '直客_仙桃牌' },
+  { platform: 'D', accountId: 'nan', name: '直客_仙桃牌' }, // BH 空白上傳存成 nan
+  { platform: 'R', accountId: '9271', name: '里山十二食' },
+  { platform: 'M', accountId: '872712', name: '經銷商_有禾布可_中悦悦GARDEN' },
+  { platform: 'R', accountId: '10010', name: '4A_迪艾思_三得利_TADAS' },
+];
+const FIN = parseFinance([FIN_HEADER,
+  fin({ company: '鮮味帖商行', account: '鮮味帖商行_popIn', start: '2024/6/1', end: '2025/06/01', code: 'A12', no: '01', amount: '15,000', apply: '2024/06/01' }), // 列 2
+  fin({ company: '鮮味帖商行', account: '鮮味帖商行_關鍵字', start: '2024/6/1', end: '2025/06/01', code: 'A12', no: '01', amount: '15,000', apply: '2024/06/01' }), // 列 3
+  fin({ company: '鮮味帖商行 ', account: '鮮味帖商行_關鍵字', start: '2024/6/1', end: '2025/06/01', code: ' A12', no: '02', amount: '15,000', apply: '2024/07/01' }), // 列 4：前後空白
+  fin({ company: '有禾布可行銷有限公司', account: '中悦悦GARDEN', start: '2026/09/01', end: '2026/09/30', code: 'A1', no: '1', amount: '43,478' }), // 列 5
+  fin({ company: '香港虎鯨國際貿易有限公司', amount: '380,952' }), // 列 6：帳戶名／起始日／委刊單全空
+  fin({ company: '香港虎鯨國際貿易有限公司', amount: '300,000' }), // 列 7
+  fin({ company: '品亨國際整合行銷有限公司', account: '里山十二食', start: '2026/10/01', end: '2026/10/31', code: 'E4', no: '1', amount: '100,000' }), // 列 8
+]);
+const DEL = [
+  ...parseDeliverTab('202609', tab10(
+    { attr: '4A', agency: 'DAC', adv: '三得利TADAS', start: '9/1', end: '9/30', budget: '100,000', r: '60,000', p: '40,000', label: '4A_迪艾思_三得利_TADAS' },
+    { attr: '直客', agency: '直客代操Meta', adv: '里山十二食代操META', format: 'Meta', start: '9/1', end: '9/30', budget: '30,000' },
+  )),
+  ...parseDeliverTab('202610', tab10(
+    { attr: '4A', agency: 'DAC', adv: '三得利TADAS', start: '10/1', end: '10/31', budget: '120,000', r: '120,000', p: '-5', label: '4A_迪艾思_三得利_TADAS' },
+    { attr: '4A', agency: '電通國華', adv: '三得利固力伸正貨', start: '10/1', end: '10/31', budget: '500,000', label: '4A_電通國華_三得利_固力伸' },
+    { attr: '直客', agency: '直客', adv: '里山十二食', start: '10/1', end: '10/31', budget: '100,000', r: '100,000', label: '里山十二食' },
+    { attr: '直客', agency: '直客', adv: '固夏公關_新聞稿', format: '新聞稿', start: '10/12', end: '10/12', budget: '46,800' },
+    { attr: '直客', agency: '直客', adv: '南灣文教', start: 'TBC', end: 'TBC', label: '南灣文教有限公司' },
+    { attr: '直客', agency: '直客', adv: '仙桃牌_通汝飲', start: '10/8', end: '10/31', budget: '38,712', d: '19,356', m: '19,356', label: '直客_仙桃牌' },
+  )),
+  ...parseDeliverTab('202605', [H05, ['一帆數位', '黑松生技UC-II', 'KPI', '', 'Native', 'Kelly', '5/1', '5/31', '50,000', '已上線', '15,000', '30%', '4A_efunad_黑松生技_UC-II']]),
+  ...parseDeliverTab('202607', [H05, ['一帆數位', '黑松生技UC-II', 'KPI', '', 'Native', 'Kelly', '7/1', '7/31', '50,000', '已上線', '15,000', '30%', '4A_efunad_黑松生技_UC-II']]),
+];
+const SEED = buildSeed({ finance: FIN, customers: parseCustomers(CUST), deliver: DEL, accounts: ACC2 });
+const io = (pred: (x: SeedIo) => boolean) => {
+  const xs = SEED.ios.filter(pred);
+  assert.equal(xs.length, 1, `應剛好一張 IO，實際 ${xs.length}`);
+  return xs[0];
+};
+const allocOf = (k: string) => SEED.allocations.filter((a) => a.ioKey === k).map((a) => `${a.platform}:${a.month}:${a.plannedBudget}`).sort();
+const assignOf = (k: string) => SEED.assignments.filter((a) => a.ioKey === k).map((a) => `${a.platform}${a.accountId}`).sort();
+
+await ok('a. 財務 IO 分組：同公司同委刊單同起始日（含前後空白）→ 一張 IO、兩個帳戶名、預算加總、GOOGLE 拆分依請款月', () => {
+  const x = io((i) => i.source === 'finance' && i.ioCode === 'A12');
+  assert.deepEqual([x.name, x.clientName, x.agencyName, x.billingPartyName, x.budgetNet, x.start, x.end],
+    ['鮮味帖商行_popIn A12', '鮮味帖', '直客', '鮮味帖商行', 45000, '2024-06-01', '2025-06-01']);
+  assert.deepEqual(x.labels, ['鮮味帖商行_popIn', '鮮味帖商行_關鍵字']);
+  assert.deepEqual(SEED.periods.filter((p) => p.ioKey === x.key).map((p) => `${p.periodNo}|${p.accountNameRaw}`),
+    ['01|鮮味帖商行_popIn', '01|鮮味帖商行_關鍵字', '02|鮮味帖商行_關鍵字']);
+  assert.deepEqual(allocOf(x.key), ['GOOGLE:2024-06:15000', 'GOOGLE:2024-07:15000']);
+  const bp = SEED.billingParties.find((b) => b.name === '鮮味帖商行')!;
+  assert.deepEqual([bp.taxId, bp.paymentTerms], ['12345678', '預付制']);
+});
+
+await ok('b. 經銷商代付：有禾布可 → 經銷商有禾布可（其他經銷商）、client 取帳戶名、公司名成為經銷商別名', () => {
+  const x = io((i) => i.billingPartyName === '有禾布可行銷有限公司');
+  assert.deepEqual([x.agencyName, x.clientName], ['有禾布可', '中悦悦GARDEN']);
+  assert.equal(SEED.agencies.find((a) => a.name === '有禾布可')!.attr, '其他經銷商');
+  assert.ok(SEED.aliases.some((a) => a.entityType === 'agency' && a.aliasRaw === '有禾布可行銷有限公司' && a.entityName === '有禾布可'));
+  assert.deepEqual(assignOf(x.key), ['M872712']);
+});
+
+await ok('c. 帳戶名／起始日／委刊單全空（香港虎鯨）→ 一張 IO、期數用列號、掛陸客、列入待確認', () => {
+  const x = io((i) => i.billingPartyName === '香港虎鯨國際貿易有限公司');
+  assert.deepEqual([x.agencyName, x.clientName, x.start, x.budgetNet, x.labels], ['陸客', '香港虎鯨國際貿易', null, 680952, []]);
+  assert.deepEqual(SEED.periods.filter((p) => p.ioKey === x.key).map((p) => p.periodNo), ['r6', 'r7']);
+  assert.deepEqual(assignOf(x.key), []);
+  assert.ok(SEED.pending.some((s) => s.includes('香港虎鯨')));
+});
+
+await ok('d. 月表併進財務 IO：里山十二食 10 月那列不另建 IO，R 預算寫進財務 IO', () => {
+  const x = io((i) => i.source === 'finance' && i.ioCode === 'E4');
+  assert.deepEqual(allocOf(x.key), ['R:2026-10:100000']);
+  assert.equal(SEED.ios.filter((i) => i.source === 'deliver' && i.name === '里山十二食').length, 0);
+  assert.deepEqual(assignOf(x.key), ['R9271']);
+});
+
+await ok('e. 月表跨月併 IO：DAC TADAS 9、10 月 → 一張；P 只收 >0 並註記', () => {
+  const x = io((i) => i.source === 'deliver' && i.name === '三得利TADAS');
+  assert.deepEqual([x.agencyName, x.clientName, x.start, x.end, x.budgetNet], ['DAC', '三得利', '2026-09-01', '2026-10-31', 220000]);
+  assert.deepEqual(allocOf(x.key), ['P:2026-09:40000', 'R:2026-09:60000', 'R:2026-10:120000']);
+  assert.equal(SEED.allocations.find((a) => a.ioKey === x.key && a.platform === 'P')!.note, 'P 為月表剩餘公式');
+  assert.deepEqual(assignOf(x.key), ['R10010']);
+});
+
+await ok('f. 中間缺月就拆兩張：黑松 5 月、7 月；只在舊月份出現的代理商屬性為 null', () => {
+  const xs = SEED.ios.filter((i) => i.name === '黑松生技UC-II');
+  assert.deepEqual(xs.map((i) => [i.start, i.end]).sort(), [['2026-05-01', '2026-05-31'], ['2026-07-01', '2026-07-31']]);
+  assert.equal(SEED.agencies.find((a) => a.name === '一帆數位')!.attr, null);
+});
+
+await ok('g. Meta → META、新聞稿 → PR；「直客代操Meta」併成「直客」', () => {
+  const meta = io((i) => i.name === '里山十二食代操META');
+  assert.equal(meta.agencyName, '直客');
+  assert.deepEqual(allocOf(meta.key), ['META:2026-09:30000']);
+  const pr = io((i) => i.name === '固夏公關_新聞稿');
+  assert.deepEqual(allocOf(pr.key), ['PR:2026-10:46800']);
+  assert.ok(!SEED.agencies.some((a) => a.name === '直客代操Meta'));
+});
+
+await ok('h. 同品牌跨經銷商：三得利只有一個 client，兩張 IO 分屬 DAC、電通國華', () => {
+  assert.equal(SEED.clients.filter((c) => normName(c.name) === normName('三得利')).length, 1);
+  const g = io((i) => i.name === '三得利固力伸正貨');
+  assert.deepEqual([g.agencyName, g.clientName, allocOf(g.key)], ['電通國華', '三得利', []]);
+});
+
+await ok('i. 共用帳戶與無效帳戶：仙桃牌掛 D、M 兩個帳戶，不掛 nan', () => {
+  const x = io((i) => i.name === '仙桃牌_通汝飲');
+  assert.deepEqual(assignOf(x.key), ['D37975', 'M866244']);
+  assert.ok(!SEED.assignments.some((a) => a.accountId === 'nan'));
+});
+
+await ok('j. TBC 保留 null；對不到帳戶的帳戶名列出（不寫規則）', () => {
+  const x = io((i) => i.name === '南灣文教');
+  assert.deepEqual([x.start, x.end, x.budgetNet], [null, null, null]);
+  assert.deepEqual(SEED.unmatchedLabels, ['4A_efunad_黑松生技_UC-II', '4A_電通國華_三得利_固力伸', '南灣文教有限公司', '鮮味帖商行_popIn', '鮮味帖商行_關鍵字']);
+});
+
+await ok('k. 參照完整：IO 的經銷商／client／付款方都存在、子表都指得到 IO、別名都指得到實體、source_ref 不重複', () => {
+  assert.equal(SEED.ios.length, 12);
+  const ag = new Set(SEED.agencies.map((a) => a.name)), cl = new Set(SEED.clients.map((c) => c.name));
+  const bp = new Set(SEED.billingParties.map((b) => b.name)), keys = new Set(SEED.ios.map((i) => i.key));
+  for (const i of SEED.ios) {
+    assert.ok(ag.has(i.agencyName), i.agencyName);
+    assert.ok(!i.clientName || cl.has(i.clientName), i.clientName ?? '');
+    assert.ok(!i.billingPartyName || bp.has(i.billingPartyName), i.billingPartyName ?? '');
+  }
+  for (const x of [...SEED.periods, ...SEED.allocations, ...SEED.assignments]) assert.ok(keys.has(x.ioKey), x.ioKey);
+  for (const a of SEED.aliases) assert.ok((a.entityType === 'agency' ? ag : cl).has(a.entityName), a.aliasRaw);
+  assert.equal(new Set(SEED.ios.map((i) => `${i.source}|${i.sourceRef}`)).size, SEED.ios.length);
 });
 
 // <<後續 Task 的測試接在這裡>>
