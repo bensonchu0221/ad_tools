@@ -33,7 +33,7 @@ const SHEETS_EPOCH = Date.UTC(1899, 11, 30); // 試算表日期序號 0 的那�
 const ymd = (y: number, m: number, d: number) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
 /** 日期欄：Sheets API 用 UNFORMATTED_VALUE 讀，日期是序號；手打的文字日期也吃；TBC 等其他字回 null。 */
-function toDate(v: unknown, year: number): string | null {
+export function toDate(v: unknown, year: number): string | null {
   if (typeof v === 'number' && v > 30000 && v < 80000) {
     return new Date(SHEETS_EPOCH + Math.floor(v) * 86400000).toISOString().slice(0, 10);
   }
@@ -45,7 +45,7 @@ function toDate(v: unknown, year: number): string | null {
   return null;
 }
 
-function toNum(v: unknown): number | null {
+export function toNum(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   const s = String(v ?? '').replace(/[,\s$]|NT/gi, '');
   if (!s) return null;

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   normName, coreName, matchAccounts, companyCore, brandFromLabel, validAccountId, type Account,
 } from '../src/tools/sales/names.js';
+import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -83,6 +84,91 @@ await ok('brandFromLabel：依帳戶命名慣例取品牌段，不符合回 null
   assert.equal(brandFromLabel('4A_直客_富蘭克林'), '富蘭克林');
   assert.equal(brandFromLabel('里山十二食'), null);
   assert.equal(brandFromLabel('4A_台北數位'), null);
+});
+
+// ---------- parse ----------
+
+// 財務表「在線委刊走期表」表頭（A、B 欄表頭是「A」與空白，只能用位置取）
+const FIN_HEADER = ['A', '', 'AE', 'AM', '帳戶名', '委刊起始日', '委刊結束日', '委刊單', '期數', '付款類型',
+  '廣告金額(未稅)', '代操%', '代操費(未稅)', '設定費(未稅)', '其他金額(未稅)', '總發票金額(未稅)', '總發票金額(含稅)',
+  '(預計)發票申請日', '發票號碼', '預計匯款日', '實際匯款日', '廣告帳戶加值日\n(AM)', '是否有申請代墊備註', '財務備註發票日', '發票抬頭', '備註'];
+type F = { entity?: string; company: string; account?: string; start?: string; end?: string; code?: string; no?: string; amount?: string; pct?: string; fee?: string; apply?: string; note?: string };
+const fin = (o: F) => [o.entity ?? '博英', o.company, 'ae@broadciel.com', 'am@popin.cc', o.account ?? '', o.start ?? '', o.end ?? '',
+  o.code ?? '', o.no ?? '', '匯款(預付)', o.amount ?? '', o.pct ?? '', o.fee ?? '', '0', '0', '', '', o.apply ?? '', '', '', '', '', '', '', o.company, o.note ?? ''];
+
+// 月表 202609 起的表頭
+const DEL_HEADER = ['客戶屬性', '代理商/經銷商', '廣告主', '主要KPI', 'KPI目標', '廣告形式', '負責AE', '負責AM', '走期(起始日)', '走期(結束日)',
+  '預算', '狀態', 'D預估預算', 'D預算估占比', 'R預估預算', 'R預估占比', 'MGID預估預算', 'MGID預估占比', 'P預估預算', 'P預算估占比', '帳戶名'];
+type D = { attr?: string; agency: string; adv: string; format?: string; start?: string; end?: string; budget?: string; status?: string; d?: string; r?: string; m?: string; p?: string; label?: string };
+const del = (o: D) => [o.attr ?? '', o.agency, o.adv, 'KPI', '', o.format ?? 'Native', 'Jessica', 'Joyce', o.start ?? '', o.end ?? '',
+  o.budget ?? '', o.status ?? '已上線', o.d ?? '', '', o.r ?? '', '', o.m ?? '', '', o.p ?? '', '', o.label ?? ''];
+const tab10 = (...rows: D[]) => [['', '總計'], ['', '小計'], DEL_HEADER, ...rows.map(del)];
+const H05 = ['代理商', '廣告主', '主要KPI', 'KPI目標', '廣告形式', '負責AM', '走期(起始日)', '走期(結束日)', '預算', '狀態', 'R預估預算', '占比', '帳戶名'];
+
+await ok('toPct：「10%」「10」「0」都收、空白 null', () => {
+  assert.equal(toPct('10%'), 10);
+  assert.equal(toPct('10'), 10);
+  assert.equal(toPct('0'), 0);
+  assert.equal(toPct(''), null);
+  assert.equal(toPct('#REF!'), null);
+});
+
+await ok('財務表：欄位依表頭、數字與日期轉換、前後空白、空列略過', () => {
+  const rows = parseFinance([
+    FIN_HEADER,
+    fin({ company: '鮮味帖商行', account: '鮮味帖商行_popIn', start: '2024/6/1', end: '2025/06/01', code: ' A12', no: '01', amount: '15,000', pct: '10%', fee: '1,500', apply: '2024/06/01' }),
+    fin({ company: '', account: '' }),
+    fin({ company: '富好股份有限公司台北分公司', account: 'YOKU MOKU', start: 'TBC', amount: '#REF!', pct: '0' }),
+  ]);
+  assert.equal(rows.length, 2);
+  const [a, b] = rows;
+  assert.deepEqual([a.row, a.entity, a.company, a.ioCode, a.start, a.end], [2, '博英', '鮮味帖商行', 'A12', '2024-06-01', '2025-06-01']);
+  assert.deepEqual([a.adAmount, a.feePct, a.fee, a.invoiceApplyDate], [15000, 10, 1500, '2024-06-01']);
+  assert.deepEqual([b.row, b.start, b.adAmount, b.feePct], [4, null, null, 0]);
+});
+
+await ok('財務表：缺必要欄位直接報錯，不靜默當沒資料', () => {
+  assert.throws(() => parseFinance([FIN_HEADER.filter((h) => h !== '委刊單')]), /委刊單/);
+});
+
+await ok('客戶資料表：7 碼統編補前導 0、空列略過', () => {
+  const rows = parseCustomers([
+    ['  ', '公司名稱', '統一編號', '帳戶名', '付款方式', '付款時間'],
+    ['Sunny', '國立東華大學', '8153719', '國立東華大學', '後付制', '走期結束後付'],
+    ['', '', '', '', '', ''],
+  ]);
+  assert.deepEqual(rows, [{ company: '國立東華大學', taxId: '08153719', account: '國立東華大學', paymentTerms: '後付制' }]);
+});
+
+await ok('月表 202609 起格式：屬性、代理商、四平台預估、各種日期寫法、錯誤值', () => {
+  const rows = parseDeliverTab('202610', tab10(
+    { attr: '4A', agency: 'DAC', adv: '三得利TADAS', start: '10/1', end: '10/31', budget: '265,000', p: '265,000', label: '4A_迪艾思_三得利_TADAS' },
+    { attr: '4A', agency: '喬商', adv: '海昌', start: '10/01', end: '2026/10/7', budget: '30,614', d: '50,000', m: '20,000', p: '-39,386' },
+    { attr: '直客', agency: '直客', adv: '南灣文教', start: 'TBC', end: 'TBC', status: '待上線(確認走期)', p: '#DIV/0!' },
+  ));
+  assert.equal(rows.length, 3);
+  assert.deepEqual([rows[0].tab, rows[0].row, rows[0].attr, rows[0].agency, rows[0].label, rows[0].start, rows[0].end, rows[0].budget],
+    ['202610', 4, '4A', 'DAC', '4A_迪艾思_三得利_TADAS', '2026-10-01', '2026-10-31', 265000]);
+  assert.deepEqual(rows[0].plat, { P: 265000 });
+  assert.deepEqual([rows[1].start, rows[1].end], ['2026-10-01', '2026-10-07']);
+  assert.deepEqual(rows[1].plat, { D: 50000, M: 20000, P: -39386 });
+  assert.deepEqual([rows[2].start, rows[2].end, rows[2].status], [null, null, '待上線(確認走期)']);
+  assert.deepEqual(rows[2].plat, {});
+});
+
+await ok('月表舊格式：202605 只有代理商與 R 欄；202608 的「客戶屬性」欄其實是代理商', () => {
+  const r05 = parseDeliverTab('202605', [['', '總計'], H05,
+    ['電通國華', '三得利固力伸正貨', 'KPI', '', 'Native', 'Tina', '5/1', '5/31', '500,000', '已上線', '0', '0%', '4A_電通國華_三得利_固力伸']]);
+  assert.deepEqual([r05[0].attr, r05[0].agency, r05[0].start, r05[0].plat], ['', '電通國華', '2026-05-01', { R: 0 }]);
+  const h08 = ['客戶屬性', '廣告主', '主要KPI', 'KPI目標', '廣告形式', '負責AM', '走期(起始日)', '走期(結束日)', '預算', '狀態',
+    'R預估預算', 'R預估占比', 'MGID預估預算', 'MGID預估占比', '帳戶名'];
+  const r08 = parseDeliverTab('202608', [h08,
+    ['博崍', '耐斯萌髮', 'KPI', '', 'Native', 'Tina', '8/1', '8/11', '196,429', '已上線', '196,429', '100%', '', '0%', '']]);
+  assert.deepEqual([r08[0].attr, r08[0].agency, r08[0].plat], ['', '博崍', { R: 196429 }]);
+});
+
+await ok('月表：找不到表頭直接報錯', () => {
+  assert.throws(() => parseDeliverTab('202610', [['x'], ['y']]), /202610/);
 });
 
 // <<後續 Task 的測試接在這裡>>
