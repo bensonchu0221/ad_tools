@@ -7,6 +7,8 @@ import {
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
 import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
 import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
+import { SALES_TABLES, SALES_SCHEMA, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
+import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -346,6 +348,102 @@ await ok('報告：筆數、覆蓋率表、未歸屬帳戶、對不到的帳戶�
   assert.match(md, /- D 777 某帳戶：3/);
   assert.match(md, /- 南灣文教有限公司/);
   assert.match(md, /香港虎鯨/);
+});
+
+// ---------- rows（轉成 BQ 列、寫入前檢查、換表交易） ----------
+
+await ok('schema：8 張表都有欄位與唯一鍵、唯一鍵欄位都在 schema 裡、表名與暫存表名', () => {
+  assert.equal(SALES_TABLES.length, 8);
+  for (const t of SALES_TABLES) {
+    assert.ok(SALES_SCHEMA[t].length > 0, t);
+    assert.ok(UNIQUE_KEYS[t].length > 0, t);
+    for (const key of UNIQUE_KEYS[t]) for (const k of key) assert.ok(SALES_SCHEMA[t].some((f) => f.name === k), `${t}.${k}`);
+  }
+  assert.equal(fullTable('nexus_sales_ios'), 'popinpoc1.reporting.nexus_sales_ios');
+  assert.equal(stageTable('nexus_sales_io_periods'), 'popinpoc1.reporting.nexus__stage_sales_io_periods');
+});
+
+await ok('money：2 位小數字串、去掉浮點尾數、負數照收、null 照舊', () => {
+  assert.equal(money(0.1 + 0.2), '0.30');
+  assert.equal(money(45000.000000000004), '45000.00');
+  assert.equal(money(-39386), '-39386.00');
+  assert.equal(money(null), null);
+});
+
+const META = { by: 'seed', at: '2026-10-16T00:00:00.000Z' };
+const ROWS = seedToRows(SEED, META);
+const one = (t: SalesTable, pred: (r: Row) => boolean) => {
+  const xs = ROWS[t].filter(pred);
+  assert.equal(xs.length, 1, `${t} 應剛好一列，實際 ${xs.length}`);
+  return xs[0];
+};
+const clone = (): SalesRows => JSON.parse(JSON.stringify(ROWS));
+
+await ok('seedToRows：筆數與 Seed 相同、id 從 1 連號、名稱換成外鍵 id、金額與月份格式、規則欄位空字串', () => {
+  assert.deepEqual(SALES_TABLES.map((t) => ROWS[t].length), [
+    SEED.agencies.length, SEED.clients.length, SEED.aliases.length, SEED.billingParties.length,
+    SEED.ios.length, SEED.periods.length, SEED.allocations.length, SEED.assignments.length,
+  ]);
+  assert.deepEqual(ROWS.nexus_sales_ios.map((r) => r.id), SEED.ios.map((_, i) => i + 1));
+  const a12 = one('nexus_sales_ios', (r) => r.io_code === 'A12');
+  assert.equal(a12.agency_id, one('nexus_sales_agencies', (r) => r.name === '直客').id);
+  assert.equal(a12.client_id, one('nexus_sales_clients', (r) => r.name === '鮮味帖').id);
+  assert.equal(a12.billing_party_id, one('nexus_sales_billing_parties', (r) => r.name === '鮮味帖商行').id);
+  assert.deepEqual([a12.budget_net, a12.start_date, a12.updated_by, a12.updated_at], ['45000.00', '2024-06-01', 'seed', META.at]);
+  assert.deepEqual(
+    ROWS.nexus_sales_io_allocations.filter((r) => r.io_id === a12.id).map((r) => `${r.platform}:${r.month}:${r.planned_budget}`).sort(),
+    ['GOOGLE:2024-06-01:15000.00', 'GOOGLE:2024-07-01:15000.00'],
+  );
+  const hkBp = one('nexus_sales_billing_parties', (r) => r.name === '香港虎鯨國際貿易有限公司').id;
+  const hk = one('nexus_sales_ios', (r) => r.billing_party_id === hkBp);
+  assert.deepEqual([hk.start_date, hk.end_date, hk.io_code, hk.budget_net], [null, null, '', '680952.00']);
+  assert.ok(ROWS.nexus_sales_io_assignments.every((r) => r.campaign_id === '' && r.campaign_keyword === '' && r.valid_from === null));
+});
+
+await ok('seedToRows：IO 的經銷商名稱找不到就直接報錯', () => {
+  const bad = { ...SEED, ios: [{ ...SEED.ios[0], agencyName: '不存在的經銷商' }] } as Seed;
+  assert.throws(() => seedToRows(bad, META), /不存在的經銷商/);
+});
+
+await ok('checkKeys：正常資料通過', () => {
+  checkKeys(ROWS);
+});
+
+await ok('checkKeys：邏輯唯一鍵重複就擋（同一條歸屬規則寫兩次）', () => {
+  const r = clone();
+  r.nexus_sales_io_assignments.push({ ...r.nexus_sales_io_assignments[0], id: 999 });
+  assert.throws(() => checkKeys(r), /nexus_sales_io_assignments：\(io_id, platform, account_id, campaign_id, campaign_keyword\) 重複/);
+});
+
+await ok('checkKeys：外鍵指不到、必填欄 NULL、多出或缺少欄位都擋', () => {
+  const a = clone();
+  a.nexus_sales_io_periods[0].io_id = 999;
+  assert.throws(() => checkKeys(a), /nexus_sales_io_periods\.io_id=999 在 nexus_sales_ios 找不到/);
+  const b = clone();
+  b.nexus_sales_ios[0].agency_id = null;
+  assert.throws(() => checkKeys(b), /必填欄 agency_id 是 NULL/);
+  const c = clone();
+  c.nexus_sales_clients[0].extra = 'x';
+  assert.throws(() => checkKeys(c), /欄位 extra 不在 schema/);
+  const d = clone();
+  delete d.nexus_sales_agencies[0].note;
+  assert.throws(() => checkKeys(d), /缺欄位 note/);
+});
+
+await ok('swapSql：一段交易內 8 張表各 DELETE＋從暫存表 INSERT（欄位明列），出錯 ROLLBACK', () => {
+  const st = swapStatements();
+  assert.equal(st.length, 16);
+  for (const t of SALES_TABLES) {
+    assert.ok(st.includes(`DELETE FROM \`${fullTable(t)}\` WHERE TRUE`), t);
+    const ins = st.find((s) => s.startsWith(`INSERT INTO \`${fullTable(t)}\` (`));
+    assert.ok(ins, t);
+    assert.ok(ins.endsWith(`FROM \`${stageTable(t)}\``), t);
+    assert.ok(ins.includes(SALES_SCHEMA[t].map((f) => `\`${f.name}\``).join(', ')), t);
+  }
+  const sql = swapSql();
+  const iBegin = sql.indexOf('BEGIN TRANSACTION;'), iCommit = sql.indexOf('COMMIT TRANSACTION;');
+  assert.ok(iBegin >= 0 && iBegin < sql.indexOf('DELETE FROM') && sql.lastIndexOf('INSERT INTO') < iCommit);
+  assert.match(sql, /EXCEPTION WHEN ERROR THEN\s+ROLLBACK TRANSACTION;/);
 });
 
 // <<後續 Task 的測試接在這裡>>
