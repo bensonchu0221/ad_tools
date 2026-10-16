@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 BigQuery `popinpoc1.reporting` 建 8 張 `sales_` 表，並把財務「台客在線_委刊走期&發票明細」與業務「每月deliver」兩份試算表的現有資料整理寫入，讓 `/ad-performance`（audience_center）之後能 JOIN 出 client／經銷商／屬性／IO，前端 demo 有資料可用。
+**Goal:** 在 BigQuery `popinpoc1.reporting` 建 8 張 `nexus_sales_` 表，並把財務「台客在線_委刊走期&發票明細」與業務「每月deliver」兩份試算表的現有資料整理寫入，讓 `/ad-performance`（audience_center）之後能 JOIN 出 client／經銷商／屬性／IO，前端 demo 有資料可用。
 
 **Architecture:** 純函式四層（`names.ts` 名稱比對 → `parse.ts` 試算表列解析 → `build.ts` 組出 `Seed` → `rows.ts` 轉成 BQ 列、寫入前檢查、換表交易 SQL）＋`report.ts` 用 `nexus_coverage` 算帳戶層歸屬覆蓋率。I/O 集中在 `store.ts`：帳戶與花費讀 Cloud SQL（只呼叫 `core/store.ts` 現成 export 的函式），寫入走 BQ 暫存表（load job，免費）＋一段 BQ 交易整批換掉 8 張表。`seed.ts` 串流程，`scripts/sales_seed.mts` 是薄 CLI：預設只產報告，`--write` 才寫 BQ。試算表內容由 Claude 用 Google Sheets MCP 匯出成 JSON 放 `poc/`（gitignored），腳本不連 Sheets API。
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 表放 BigQuery `popinpoc1.reporting`（asia-east1），表名前綴 `sales_`；暫存表 `sales__stage_<名>`（1 天後自動過期，用完即刪）。
+- 表放 BigQuery `popinpoc1.reporting`（asia-east1），表名前綴 `nexus_sales_`；暫存表 `nexus__stage_sales_<名>`（1 天後自動過期，用完即刪）。
 - **不影響現有系統**：不改任何既有 BQ 表／view（含 `nexus_customer_account_map`、`nexus_integrated_daily`），不改 audience_center（`ad_report.py`、`ad_brand_rules.py`、`ad_performance.py` 一行不動）。
 - ad_tools 既有程式**只改一處**：`src/tools/pacing/sheet.ts` 的 `toDate`、`toNum` 加 `export`（行為不變）。`src/core/store.ts` 不改，只呼叫現成 export 的 `pacingKnownAccounts()`、`pacingBhConfigs()`、`pacingWarehouseSpend(sd, ed)`。BH 庫只讀。
 - 帳戶清單與花費讀 Cloud SQL（免費，不查 BQ）。BQ 只有建表、load job、`tabledata.list`（都不計費）與換表交易的 16 句 DML（每句最低計 10 MB，合計 ≈ US$0.001）。交易前逐句 dry-run，預估超過 1 GiB 就停。
@@ -32,7 +32,7 @@
 1. 財務列「帳戶名、委刊起始日、委刊單」全空（香港虎鯨 9 列）→ 應併成一張 IO、期數用 `r<列號>` 不撞唯一鍵，不能噴錯或拆成 9 張。（Task 3 測試 c、Task 5 `seedToRows` 測試）
 2. 月表日期混寫 `10/1`、`10/01`、`2026/10/7`、`TBC` → 依分頁年份轉日期、TBC 為 null；TBC 的 IO 不參與併入財務 IO、也不參與歸屬。（Task 2、Task 3 測試 j、Task 4）
 3. 試算表錯誤值 `#REF!`、`#DIV/0!`、負數 P 預估、JS 浮點加總尾數 → 轉成 null、不寫拆分、或寫成 2 位小數字串，不能變 NaN、寫進負預算或讓 BQ load 因小數位數失敗。（Task 2、Task 3 測試 e、Task 5 `money`）
-4. 寫入中途失敗（某張暫存表 load 失敗、交易中某句失敗）→ 8 張正式表要嘛全換、要嘛全不變，不能出現 `sales_ios` 換新但 `sales_io_assignments` 還是舊 io_id。（Task 5 `swapSql` 測試、Task 6 `writeRowsToBq` 流程）
+4. 寫入中途失敗（某張暫存表 load 失敗、交易中某句失敗）→ 8 張正式表要嘛全換、要嘛全不變，不能出現 `nexus_sales_ios` 換新但 `nexus_sales_io_assignments` 還是舊 io_id。（Task 5 `swapSql` 測試、Task 6 `writeRowsToBq` 流程）
 5. 無效帳戶 ID（`nan`，例：D 直客_仙桃牌）→ 不比對、不歸屬。（Task 1、Task 3 測試 i、Task 6 `mergeAccounts`）
 
 ---
@@ -768,7 +768,7 @@ export type SalesPlatform = (typeof PLATFORMS)[number];
 - [ ] **Step 4: 實作 `src/tools/sales/build.ts`**
 
 ```ts
-// 業績層級資料：兩份試算表＋帳戶清單 → 要寫進 sales_ 各表的資料（純函式，不碰 DB）。
+// 業績層級資料：兩份試算表＋帳戶清單 → 要寫進 nexus_sales_ 各表的資料（純函式，不碰 DB）。
 // 規則見 docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md §6；已知限制見 §9。
 import { normName, companyCore, brandFromLabel, matchAccounts, validAccountId, type Account } from './names.js';
 import type { FinanceRow, CustomerRow, DeliverRow } from './parse.js';
@@ -1125,7 +1125,7 @@ await ok('報告：筆數、覆蓋率表、未歸屬帳戶、對不到的帳戶�
     { platform: 'D', accountId: '777', dt: '2026-10-10', spend: 3 },
   ]);
   const md = renderReport(SEED, at, new Map([['D|777', '某帳戶']]));
-  assert.match(md, /\| sales_ios \| 12 \|/);
+  assert.match(md, /\| nexus_sales_ios \| 12 \|/);
   assert.match(md, /\| D \| 1,000 \| 0 \| 0 \| 3 \| 99\.7% \|/);
   assert.match(md, /- D 777 某帳戶：3/);
   assert.match(md, /- 南灣文教有限公司/);
@@ -1203,9 +1203,9 @@ export function renderReport(seed: Seed, at: Attribution, accountNames: Map<stri
 
   L.push('## 1. 筆數', '', '| 表 | 筆數 |', '|---|---|');
   const counts: [string, number][] = [
-    ['sales_agencies', seed.agencies.length], ['sales_clients', seed.clients.length], ['sales_aliases', seed.aliases.length],
-    ['sales_billing_parties', seed.billingParties.length], ['sales_ios', seed.ios.length], ['sales_io_periods', seed.periods.length],
-    ['sales_io_allocations', seed.allocations.length], ['sales_io_assignments', seed.assignments.length],
+    ['nexus_sales_agencies', seed.agencies.length], ['nexus_sales_clients', seed.clients.length], ['nexus_sales_aliases', seed.aliases.length],
+    ['nexus_sales_billing_parties', seed.billingParties.length], ['nexus_sales_ios', seed.ios.length], ['nexus_sales_io_periods', seed.periods.length],
+    ['nexus_sales_io_allocations', seed.allocations.length], ['nexus_sales_io_assignments', seed.assignments.length],
   ];
   for (const [t, c] of counts) L.push(`| ${t} | ${c} |`);
 
@@ -1279,7 +1279,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces（`schema.ts`）：
   - `SALES_DATASET: string`（預設 `'popinpoc1.reporting'`，env `SALES_BQ_DATASET` 可改）
   - `SALES_TABLES`（8 個表名，寫入順序）、`type SalesTable`
-  - `fullTable(t: SalesTable): string`（`popinpoc1.reporting.sales_ios`）、`stageTable(t: SalesTable): string`（`popinpoc1.reporting.sales__stage_ios`）
+  - `fullTable(t: SalesTable): string`（`popinpoc1.reporting.nexus_sales_ios`）、`stageTable(t: SalesTable): string`（`popinpoc1.reporting.nexus__stage_sales_ios`）
   - `SALES_SCHEMA: Record<SalesTable, BqField[]>`、`UNIQUE_KEYS: Record<SalesTable, string[][]>`、`SALES_TABLE_DESC: Record<SalesTable, string>`
 - Produces（`rows.ts`）：
   - `type Row = Record<string, string | number | null>`、`type SalesRows = Record<SalesTable, Row[]>`
@@ -1309,8 +1309,8 @@ await ok('schema：8 張表都有欄位與唯一鍵、唯一鍵欄位都在 sche
     assert.ok(UNIQUE_KEYS[t].length > 0, t);
     for (const key of UNIQUE_KEYS[t]) for (const k of key) assert.ok(SALES_SCHEMA[t].some((f) => f.name === k), `${t}.${k}`);
   }
-  assert.equal(fullTable('sales_ios'), 'popinpoc1.reporting.sales_ios');
-  assert.equal(stageTable('sales_io_periods'), 'popinpoc1.reporting.sales__stage_io_periods');
+  assert.equal(fullTable('nexus_sales_ios'), 'popinpoc1.reporting.nexus_sales_ios');
+  assert.equal(stageTable('nexus_sales_io_periods'), 'popinpoc1.reporting.nexus__stage_sales_io_periods');
 });
 
 await ok('money：2 位小數字串、去掉浮點尾數、負數照收、null 照舊', () => {
@@ -1334,20 +1334,20 @@ await ok('seedToRows：筆數與 Seed 相同、id 從 1 連號、名稱換成外
     SEED.agencies.length, SEED.clients.length, SEED.aliases.length, SEED.billingParties.length,
     SEED.ios.length, SEED.periods.length, SEED.allocations.length, SEED.assignments.length,
   ]);
-  assert.deepEqual(ROWS.sales_ios.map((r) => r.id), SEED.ios.map((_, i) => i + 1));
-  const a12 = one('sales_ios', (r) => r.io_code === 'A12');
-  assert.equal(a12.agency_id, one('sales_agencies', (r) => r.name === '直客').id);
-  assert.equal(a12.client_id, one('sales_clients', (r) => r.name === '鮮味帖').id);
-  assert.equal(a12.billing_party_id, one('sales_billing_parties', (r) => r.name === '鮮味帖商行').id);
+  assert.deepEqual(ROWS.nexus_sales_ios.map((r) => r.id), SEED.ios.map((_, i) => i + 1));
+  const a12 = one('nexus_sales_ios', (r) => r.io_code === 'A12');
+  assert.equal(a12.agency_id, one('nexus_sales_agencies', (r) => r.name === '直客').id);
+  assert.equal(a12.client_id, one('nexus_sales_clients', (r) => r.name === '鮮味帖').id);
+  assert.equal(a12.billing_party_id, one('nexus_sales_billing_parties', (r) => r.name === '鮮味帖商行').id);
   assert.deepEqual([a12.budget_net, a12.start_date, a12.updated_by, a12.updated_at], ['45000.00', '2024-06-01', 'seed', META.at]);
   assert.deepEqual(
-    ROWS.sales_io_allocations.filter((r) => r.io_id === a12.id).map((r) => `${r.platform}:${r.month}:${r.planned_budget}`).sort(),
+    ROWS.nexus_sales_io_allocations.filter((r) => r.io_id === a12.id).map((r) => `${r.platform}:${r.month}:${r.planned_budget}`).sort(),
     ['GOOGLE:2024-06-01:15000.00', 'GOOGLE:2024-07-01:15000.00'],
   );
-  const hkBp = one('sales_billing_parties', (r) => r.name === '香港虎鯨國際貿易有限公司').id;
-  const hk = one('sales_ios', (r) => r.billing_party_id === hkBp);
+  const hkBp = one('nexus_sales_billing_parties', (r) => r.name === '香港虎鯨國際貿易有限公司').id;
+  const hk = one('nexus_sales_ios', (r) => r.billing_party_id === hkBp);
   assert.deepEqual([hk.start_date, hk.end_date, hk.io_code, hk.budget_net], [null, null, '', '680952.00']);
-  assert.ok(ROWS.sales_io_assignments.every((r) => r.campaign_id === '' && r.campaign_keyword === '' && r.valid_from === null));
+  assert.ok(ROWS.nexus_sales_io_assignments.every((r) => r.campaign_id === '' && r.campaign_keyword === '' && r.valid_from === null));
 });
 
 await ok('seedToRows：IO 的經銷商名稱找不到就直接報錯', () => {
@@ -1361,22 +1361,22 @@ await ok('checkKeys：正常資料通過', () => {
 
 await ok('checkKeys：邏輯唯一鍵重複就擋（同一條歸屬規則寫兩次）', () => {
   const r = clone();
-  r.sales_io_assignments.push({ ...r.sales_io_assignments[0], id: 999 });
-  assert.throws(() => checkKeys(r), /sales_io_assignments：\(io_id, platform, account_id, campaign_id, campaign_keyword\) 重複/);
+  r.nexus_sales_io_assignments.push({ ...r.nexus_sales_io_assignments[0], id: 999 });
+  assert.throws(() => checkKeys(r), /nexus_sales_io_assignments：\(io_id, platform, account_id, campaign_id, campaign_keyword\) 重複/);
 });
 
 await ok('checkKeys：外鍵指不到、必填欄 NULL、多出或缺少欄位都擋', () => {
   const a = clone();
-  a.sales_io_periods[0].io_id = 999;
-  assert.throws(() => checkKeys(a), /sales_io_periods\.io_id=999 在 sales_ios 找不到/);
+  a.nexus_sales_io_periods[0].io_id = 999;
+  assert.throws(() => checkKeys(a), /nexus_sales_io_periods\.io_id=999 在 nexus_sales_ios 找不到/);
   const b = clone();
-  b.sales_ios[0].agency_id = null;
+  b.nexus_sales_ios[0].agency_id = null;
   assert.throws(() => checkKeys(b), /必填欄 agency_id 是 NULL/);
   const c = clone();
-  c.sales_clients[0].extra = 'x';
+  c.nexus_sales_clients[0].extra = 'x';
   assert.throws(() => checkKeys(c), /欄位 extra 不在 schema/);
   const d = clone();
-  delete d.sales_agencies[0].note;
+  delete d.nexus_sales_agencies[0].note;
   assert.throws(() => checkKeys(d), /缺欄位 note/);
 });
 
@@ -1418,14 +1418,14 @@ export const SALES_DATASET = process.env.SALES_BQ_DATASET ?? 'popinpoc1.reportin
 
 /** 寫入順序：主檔在前、子表在後。 */
 export const SALES_TABLES = [
-  'sales_agencies', 'sales_clients', 'sales_aliases', 'sales_billing_parties',
-  'sales_ios', 'sales_io_periods', 'sales_io_allocations', 'sales_io_assignments',
+  'nexus_sales_agencies', 'nexus_sales_clients', 'nexus_sales_aliases', 'nexus_sales_billing_parties',
+  'nexus_sales_ios', 'nexus_sales_io_periods', 'nexus_sales_io_allocations', 'nexus_sales_io_assignments',
 ] as const;
 export type SalesTable = (typeof SALES_TABLES)[number];
 
 export const fullTable = (t: SalesTable) => `${SALES_DATASET}.${t}`;
-/** 種子寫入用的暫存表：sales_ios → sales__stage_ios。 */
-export const stageTable = (t: SalesTable) => `${SALES_DATASET}.${t.replace(/^sales_/, 'sales__stage_')}`;
+/** 種子寫入用的暫存表：nexus_sales_ios → nexus__stage_sales_ios。 */
+export const stageTable = (t: SalesTable) => `${SALES_DATASET}.${t.replace(/^nexus_/, 'nexus__stage_')}`;
 
 const req = (name: string, type: string): BqField => ({ name, type, mode: 'REQUIRED' });
 const opt = (name: string, type: string): BqField => ({ name, type, mode: 'NULLABLE' });
@@ -1435,11 +1435,11 @@ const UPDATED = [req('updated_by', 'STRING'), req('updated_at', 'TIMESTAMP')];
 
 /** 欄位定義見 spec §4。BQ 沒有預設值：字串欄一律寫 ''，NULL 只用在未知／TBC／不限。 */
 export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
-  sales_agencies: [req('id', 'INT64'), req('name', 'STRING'), opt('attr', 'STRING'), req('note', 'STRING'), ...AUDIT],
-  sales_clients: [req('id', 'INT64'), req('name', 'STRING'), req('note', 'STRING'), ...AUDIT],
-  sales_aliases: [req('entity_type', 'STRING'), req('alias_norm', 'STRING'), req('entity_id', 'INT64'), req('alias_raw', 'STRING')],
-  sales_billing_parties: [req('id', 'INT64'), req('name', 'STRING'), opt('tax_id', 'STRING'), req('payment_terms', 'STRING'), ...AUDIT],
-  sales_ios: [
+  nexus_sales_agencies: [req('id', 'INT64'), req('name', 'STRING'), opt('attr', 'STRING'), req('note', 'STRING'), ...AUDIT],
+  nexus_sales_clients: [req('id', 'INT64'), req('name', 'STRING'), req('note', 'STRING'), ...AUDIT],
+  nexus_sales_aliases: [req('entity_type', 'STRING'), req('alias_norm', 'STRING'), req('entity_id', 'INT64'), req('alias_raw', 'STRING')],
+  nexus_sales_billing_parties: [req('id', 'INT64'), req('name', 'STRING'), opt('tax_id', 'STRING'), req('payment_terms', 'STRING'), ...AUDIT],
+  nexus_sales_ios: [
     req('id', 'INT64'), req('name', 'STRING'), req('io_code', 'STRING'),
     opt('client_id', 'INT64'), req('agency_id', 'INT64'), opt('billing_party_id', 'INT64'),
     req('entity', 'STRING'), req('ae_email', 'STRING'), req('am_email', 'STRING'),
@@ -1447,7 +1447,7 @@ export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
     money('budget_net'), money('service_fee_pct'), money('service_fee'), money('setup_fee'), money('other_fee'),
     req('kpi', 'STRING'), req('note', 'STRING'), ...AUDIT,
   ],
-  sales_io_periods: [
+  nexus_sales_io_periods: [
     req('io_id', 'INT64'), req('period_no', 'STRING'), req('account_name_raw', 'STRING'),
     money('ad_amount'), money('service_fee_pct'), money('service_fee'), money('setup_fee'), money('other_fee'),
     money('invoice_net'), money('invoice_gross'), req('payment_type', 'STRING'),
@@ -1455,11 +1455,11 @@ export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
     opt('expected_pay_date', 'DATE'), opt('paid_date', 'DATE'), opt('topup_date', 'DATE'),
     req('note', 'STRING'), req('source_row', 'INT64'),
   ],
-  sales_io_allocations: [
+  nexus_sales_io_allocations: [
     req('io_id', 'INT64'), req('platform', 'STRING'), req('month', 'DATE'), req('planned_budget', 'NUMERIC'),
     req('source', 'STRING'), req('note', 'STRING'), ...UPDATED,
   ],
-  sales_io_assignments: [
+  nexus_sales_io_assignments: [
     req('id', 'INT64'), req('io_id', 'INT64'), req('platform', 'STRING'), req('account_id', 'STRING'),
     req('campaign_id', 'STRING'), req('campaign_keyword', 'STRING'), opt('valid_from', 'DATE'), opt('valid_to', 'DATE'),
     req('source', 'STRING'), ...UPDATED,
@@ -1468,26 +1468,26 @@ export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
 
 /** 邏輯唯一鍵。BQ 不強制，寫入前由 rows.ts 的 checkKeys 檢查。 */
 export const UNIQUE_KEYS: Record<SalesTable, string[][]> = {
-  sales_agencies: [['id'], ['name']],
-  sales_clients: [['id'], ['name']],
-  sales_aliases: [['entity_type', 'alias_norm']],
-  sales_billing_parties: [['id'], ['name']],
-  sales_ios: [['id'], ['source', 'source_ref']],
-  sales_io_periods: [['io_id', 'period_no', 'account_name_raw']],
-  sales_io_allocations: [['io_id', 'platform', 'month']],
-  sales_io_assignments: [['id'], ['io_id', 'platform', 'account_id', 'campaign_id', 'campaign_keyword']],
+  nexus_sales_agencies: [['id'], ['name']],
+  nexus_sales_clients: [['id'], ['name']],
+  nexus_sales_aliases: [['entity_type', 'alias_norm']],
+  nexus_sales_billing_parties: [['id'], ['name']],
+  nexus_sales_ios: [['id'], ['source', 'source_ref']],
+  nexus_sales_io_periods: [['io_id', 'period_no', 'account_name_raw']],
+  nexus_sales_io_allocations: [['io_id', 'platform', 'month']],
+  nexus_sales_io_assignments: [['id'], ['io_id', 'platform', 'account_id', 'campaign_id', 'campaign_keyword']],
 };
 
 const DESC_SUFFIX = '。設計：ad_tools docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md；由 ad_tools scripts/sales_seed.mts 整批寫入，id 每次重跑會換';
 export const SALES_TABLE_DESC: Record<SalesTable, string> = {
-  sales_agencies: `業績層級：經銷商／代理商（直客、陸客也各一列），attr＝客戶屬性${DESC_SUFFIX}`,
-  sales_clients: `業績層級：client（品牌）${DESC_SUFFIX}`,
-  sales_aliases: `業績層級：經銷商／client 的各種寫法（帳戶名、廣告主、公司名）${DESC_SUFFIX}`,
-  sales_billing_parties: `業績層級：付款方（開票對象）${DESC_SUFFIX}`,
-  sales_ios: `業績層級：IO（委刊單）${DESC_SUFFIX}`,
-  sales_io_periods: `業績層級：IO 請款期（財務表一列一期）${DESC_SUFFIX}`,
-  sales_io_allocations: `業績層級：IO × 平台 × 月 計畫預算${DESC_SUFFIX}`,
-  sales_io_assignments: `業績層級：IO 歸屬規則（平台帳戶，之後可細到 campaign）${DESC_SUFFIX}`,
+  nexus_sales_agencies: `業績層級：經銷商／代理商（直客、陸客也各一列），attr＝客戶屬性${DESC_SUFFIX}`,
+  nexus_sales_clients: `業績層級：client（品牌）${DESC_SUFFIX}`,
+  nexus_sales_aliases: `業績層級：經銷商／client 的各種寫法（帳戶名、廣告主、公司名）${DESC_SUFFIX}`,
+  nexus_sales_billing_parties: `業績層級：付款方（開票對象）${DESC_SUFFIX}`,
+  nexus_sales_ios: `業績層級：IO（委刊單）${DESC_SUFFIX}`,
+  nexus_sales_io_periods: `業績層級：IO 請款期（財務表一列一期）${DESC_SUFFIX}`,
+  nexus_sales_io_allocations: `業績層級：IO × 平台 × 月 計畫預算${DESC_SUFFIX}`,
+  nexus_sales_io_assignments: `業績層級：IO 歸屬規則（平台帳戶，之後可細到 campaign）${DESC_SUFFIX}`,
 };
 ```
 
@@ -1523,17 +1523,17 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
   const ioId = idOf(seed.ios, (x) => x.key);
   const io = (k: string) => must(ioId, k, 'IO');
   return {
-    sales_agencies: seed.agencies.map((a, i) => ({ id: i + 1, name: a.name, attr: a.attr, note: '', ...audit(a.source, a.sourceRef) })),
-    sales_clients: seed.clients.map((c, i) => ({ id: i + 1, name: c.name, note: '', ...audit(c.source, c.sourceRef) })),
-    sales_aliases: seed.aliases.map((a) => ({
+    nexus_sales_agencies: seed.agencies.map((a, i) => ({ id: i + 1, name: a.name, attr: a.attr, note: '', ...audit(a.source, a.sourceRef) })),
+    nexus_sales_clients: seed.clients.map((c, i) => ({ id: i + 1, name: c.name, note: '', ...audit(c.source, c.sourceRef) })),
+    nexus_sales_aliases: seed.aliases.map((a) => ({
       entity_type: a.entityType, alias_norm: a.aliasNorm,
       entity_id: must(a.entityType === 'agency' ? agencyId : clientId, a.entityName, a.entityType === 'agency' ? '經銷商' : 'client'),
       alias_raw: a.aliasRaw,
     })),
-    sales_billing_parties: seed.billingParties.map((b, i) => ({
+    nexus_sales_billing_parties: seed.billingParties.map((b, i) => ({
       id: i + 1, name: b.name, tax_id: b.taxId, payment_terms: b.paymentTerms, ...audit(b.source, b.sourceRef),
     })),
-    sales_ios: seed.ios.map((x, i) => ({
+    nexus_sales_ios: seed.ios.map((x, i) => ({
       id: i + 1, name: x.name, io_code: x.ioCode,
       client_id: x.clientName ? must(clientId, x.clientName, 'client') : null,
       agency_id: must(agencyId, x.agencyName, '經銷商'),
@@ -1544,7 +1544,7 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
       setup_fee: money(x.setupFee), other_fee: money(x.otherFee),
       kpi: x.kpi, note: x.note, ...audit(x.source, x.sourceRef),
     })),
-    sales_io_periods: seed.periods.map((p) => ({
+    nexus_sales_io_periods: seed.periods.map((p) => ({
       io_id: io(p.ioKey), period_no: p.periodNo, account_name_raw: p.accountNameRaw,
       ad_amount: money(p.adAmount), service_fee_pct: money(p.serviceFeePct), service_fee: money(p.serviceFee),
       setup_fee: money(p.setupFee), other_fee: money(p.otherFee),
@@ -1553,11 +1553,11 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
       expected_pay_date: p.expectedPayDate, paid_date: p.paidDate, topup_date: p.topupDate,
       note: p.note, source_row: p.sourceRow,
     })),
-    sales_io_allocations: seed.allocations.map((a) => ({
+    nexus_sales_io_allocations: seed.allocations.map((a) => ({
       io_id: io(a.ioKey), platform: a.platform, month: `${a.month}-01`, planned_budget: money(a.plannedBudget),
       source: a.source, note: a.note, ...upd,
     })),
-    sales_io_assignments: seed.assignments.map((a, i) => ({
+    nexus_sales_io_assignments: seed.assignments.map((a, i) => ({
       id: i + 1, io_id: io(a.ioKey), platform: a.platform, account_id: a.accountId,
       campaign_id: '', campaign_keyword: '', valid_from: null, valid_to: null, source: a.source, ...upd,
     })),
@@ -1565,14 +1565,14 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
 }
 
 const FOREIGN: { table: SalesTable; col: string; ref: SalesTable; when?: (r: Row) => boolean }[] = [
-  { table: 'sales_ios', col: 'agency_id', ref: 'sales_agencies' },
-  { table: 'sales_ios', col: 'client_id', ref: 'sales_clients' },
-  { table: 'sales_ios', col: 'billing_party_id', ref: 'sales_billing_parties' },
-  { table: 'sales_aliases', col: 'entity_id', ref: 'sales_agencies', when: (r) => r.entity_type === 'agency' },
-  { table: 'sales_aliases', col: 'entity_id', ref: 'sales_clients', when: (r) => r.entity_type === 'client' },
-  { table: 'sales_io_periods', col: 'io_id', ref: 'sales_ios' },
-  { table: 'sales_io_allocations', col: 'io_id', ref: 'sales_ios' },
-  { table: 'sales_io_assignments', col: 'io_id', ref: 'sales_ios' },
+  { table: 'nexus_sales_ios', col: 'agency_id', ref: 'nexus_sales_agencies' },
+  { table: 'nexus_sales_ios', col: 'client_id', ref: 'nexus_sales_clients' },
+  { table: 'nexus_sales_ios', col: 'billing_party_id', ref: 'nexus_sales_billing_parties' },
+  { table: 'nexus_sales_aliases', col: 'entity_id', ref: 'nexus_sales_agencies', when: (r) => r.entity_type === 'agency' },
+  { table: 'nexus_sales_aliases', col: 'entity_id', ref: 'nexus_sales_clients', when: (r) => r.entity_type === 'client' },
+  { table: 'nexus_sales_io_periods', col: 'io_id', ref: 'nexus_sales_ios' },
+  { table: 'nexus_sales_io_allocations', col: 'io_id', ref: 'nexus_sales_ios' },
+  { table: 'nexus_sales_io_assignments', col: 'io_id', ref: 'nexus_sales_ios' },
 ];
 
 /** 寫入前檢查（BQ 不擋）：欄位與 schema 一致、必填欄非 NULL、邏輯唯一鍵不重複、外鍵指得到。有任何問題就 throw。 */
@@ -1734,7 +1734,7 @@ Expected:「全部通過：39 項」
 ```ts
 // 業績層級資料的 I/O。
 // 讀：帳戶清單與帳戶×日花費走 Cloud SQL（免費），只呼叫 core/store.ts 現成 export 的函式，不改 store.ts。
-// 寫：BQ popinpoc1.reporting.sales_*。先 load 進暫存表（免費），再用一段交易整批換掉 8 張正式表（spec §6.8）。
+// 寫：BQ popinpoc1.reporting.nexus_sales_*。先 load 進暫存表（免費），再用一段交易整批換掉 8 張正式表（spec §6.8）。
 import { bqDeleteTable, bqDryRun, bqEnsureTable, bqListTableRows, bqLoadRows, bqQuery } from '../../core/bigquery.js';
 import { pacingBhConfigs, pacingKnownAccounts, pacingWarehouseSpend } from '../../core/store.js';
 import { mergeAccounts, validAccountId, type Account } from './names.js';
@@ -1758,7 +1758,7 @@ export async function loadCoverage(since: string, until: string): Promise<Covera
 }
 
 /**
- * 整批換掉 8 張 sales_ 表：檢查 → 建正式表（已存在不動 schema）→ 8 份資料 load 進暫存表 → 逐句 dry-run 估費
+ * 整批換掉 8 張 nexus_sales_ 表：檢查 → 建正式表（已存在不動 schema）→ 8 份資料 load 進暫存表 → 逐句 dry-run 估費
  * → 一段交易 DELETE＋INSERT…SELECT → 刪暫存表 → 回讀筆數核對。任何一步失敗，正式表都維持原樣。
  */
 export async function writeRowsToBq(rows: SalesRows, log: (s: string) => void = console.log): Promise<Record<SalesTable, number>> {
@@ -1844,7 +1844,7 @@ export async function runSeed(
 // 業績層級資料 種子寫入（spec docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md §6）。
 // 先把兩份試算表匯出到 poc/sales_seed_input/（做法見 src/tools/sales/CLAUDE.md），再：
 //   npx tsx scripts/sales_seed.mts           只產報告 poc/sales_seed_report.md，不寫 BQ
-//   npx tsx scripts/sales_seed.mts --write   整批換掉 BQ popinpoc1.reporting.sales_* 8 張表
+//   npx tsx scripts/sales_seed.mts --write   整批換掉 BQ popinpoc1.reporting.nexus_sales_* 8 張表
 // 帳戶與花費讀 Cloud SQL：本機先開 cloud-sql-proxy，再以 DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off 執行（見 ad_tools CLAUDE.md）。
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -1906,7 +1906,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 6 `scripts/sales_seed.mts`
-- Produces: BQ `popinpoc1.reporting.sales_*` 8 張表與資料
+- Produces: BQ `popinpoc1.reporting.nexus_sales_*` 8 張表與資料
 
 - [ ] **Step 1: 匯出試算表成 JSON**
 
@@ -1967,26 +1967,26 @@ Expected: `rows` 等於 Step 3 的財務列數與期數；`adSum` 等於 Step 3 
 for t in nexus_customer_account_map nexus_integrated_daily nexus_d_ad_daily; do
   bq show --format=prettyjson popinpoc1:reporting.$t | python3 -c "import json,sys; d=json.load(sys.stdin); print('$t', d['lastModifiedTime'])"
 done
-bq ls --max_results=1000 popinpoc1:reporting | grep -c sales_ || true
+bq ls --max_results=1000 popinpoc1:reporting | grep -c nexus_sales_ || true
 ```
 
-Expected: 三個 `lastModifiedTime` 記下來；`sales_` 開頭的表 0 張。（`bq show`／`bq ls` 是 metadata 查詢，不計費。`nexus_d_ad_daily` 每天批次都會寫，Step 9 只比前兩個。）
+Expected: 三個 `lastModifiedTime` 記下來；`nexus_sales_` 開頭的表 0 張。（`bq show`／`bq ls` 是 metadata 查詢，不計費。`nexus_d_ad_daily` 每天批次都會寫，Step 9 只比前兩個。）
 
 - [ ] **Step 7: 給使用者看報告摘要，取得寫入同意**
 
-回報：各表筆數、四平台已歸屬／衝突／走期外／未歸屬金額與占比、衝突與未歸屬前幾名、對不到的帳戶名數量、待確認事項。明講：「`--write` 會在 BQ `popinpoc1.reporting` 建 8 張 `sales_` 表並寫入（建表與 load 不計費，換表交易約 US$0.001）；不會動既有的 `nexus_*` 表／view 和 audience_center。」**等使用者同意才做 Step 8。**
+回報：各表筆數、四平台已歸屬／衝突／走期外／未歸屬金額與占比、衝突與未歸屬前幾名、對不到的帳戶名數量、待確認事項。明講：「`--write` 會在 BQ `popinpoc1.reporting` 建 8 張 `nexus_sales_` 表並寫入（建表與 load 不計費，換表交易約 US$0.001）；不會動既有的 `nexus_*` 表／view 和 audience_center。」**等使用者同意才做 Step 8。**
 
 - [ ] **Step 8: 寫入**
 
 Run: `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off npx tsx scripts/sales_seed.mts --write`
-Expected: 印出 8 行「建表 popinpoc1.reporting.sales_…」、「換表交易 dry-run：預估掃描 0 bytes…」，最後「已寫入：{"sales_agencies":…, …}」，各數字等於報告 §1 的筆數（`writeRowsToBq` 已逐表核對，不符會 throw）。
+Expected: 印出 8 行「建表 popinpoc1.reporting.nexus_sales_…」、「換表交易 dry-run：預估掃描 0 bytes…」，最後「已寫入：{"nexus_sales_agencies":…, …}」，各數字等於報告 §1 的筆數（`writeRowsToBq` 已逐表核對，不符會 throw）。
 
 - [ ] **Step 9: 重跑一次確認冪等，並確認既有表沒被動到**
 
 Run: `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off npx tsx scripts/sales_seed.mts --write`
 Expected: 不再印「建表」；「已寫入」各表筆數與 Step 8 完全相同（整批換掉，不會變兩倍）。
 
-再跑 Step 6 的指令：`nexus_customer_account_map`、`nexus_integrated_daily` 的 `lastModifiedTime` 與 Step 6 相同；`sales_` 開頭的表剛好 8 張（`bq ls … | grep sales_` 不能出現 `sales__stage_`）。
+再跑 Step 6 的指令：`nexus_customer_account_map`、`nexus_integrated_daily` 的 `lastModifiedTime` 與 Step 6 相同；`nexus_sales_` 開頭的表剛好 8 張（`bq ls … | grep nexus_` 不能出現 `nexus__stage_`）。
 
 - [ ] **Step 10: 關掉 cloud-sql-proxy**
 
@@ -1995,7 +1995,7 @@ Expected: 不再印「建表」；「已寫入」各表筆數與 Step 8 完全�
 - [ ] **Step 11: 寫模組備忘 `src/tools/sales/CLAUDE.md`**
 
 ```markdown
-## 業績層級資料（`src/tools/sales/`，BigQuery `popinpoc1.reporting.sales_*`）
+## 業績層級資料（`src/tools/sales/`，BigQuery `popinpoc1.reporting.nexus_sales_*`）
 
 - **目的**：經銷商／client／IO（委刊單）＋IO 歸屬到平台帳戶的主檔。主要給 audience_center 的 `/ad-performance`（pacplatform.net/ad-performance）之後 JOIN 出 client／經銷商／屬性維度，也給 AM dashboard、走速改版用。設計 `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（為何放 BQ §2、表結構 §4、關聯圖 §4.0、歸屬語意 §5、換表流程 §6.8、已知限制 §9）。
 - **現況**：只有資料，**沒有管理介面**，`/ad-performance` 也還沒接；第一次寫入只為了讓前端 demo 有資料，比對不完美可接受。不留歷史。
@@ -2015,7 +2015,7 @@ Expected: 不再印「建表」；「已寫入」各表筆數與 Step 8 完全�
 ```
 改成（日期與筆數填 Step 8 的實際結果）：
 ```markdown
-- 狀態：已實作；<YYYY-MM-DD> 種子寫入 BQ `popinpoc1.reporting.sales_*`（IO <n> 張、歸屬規則 <n> 條）。報告 `poc/sales_seed_report.md`（不進 repo）
+- 狀態：已實作；<YYYY-MM-DD> 種子寫入 BQ `popinpoc1.reporting.nexus_sales_*`（IO <n> 張、歸屬規則 <n> 條）。報告 `poc/sales_seed_report.md`（不進 repo）
 ```
 
 - [ ] **Step 13: Commit（不 push）**
