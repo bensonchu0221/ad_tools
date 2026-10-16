@@ -1,35 +1,39 @@
-# 業績層級資料（經銷商／client／IO＋歸屬規則）Implementation Plan
+# 業績層級資料（經銷商／client／IO＋歸屬規則）寫入 BigQuery Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 Cloud SQL `ad_tools` 庫建 8 張 `sales_` 表，並把財務「台客在線_委刊走期&發票明細」與業務「每月deliver」兩份試算表的現有資料整理寫入，讓之後的管理介面與前端 demo 有資料可用。
+**Goal:** 在 BigQuery `popinpoc1.reporting` 建 8 張 `sales_` 表，並把財務「台客在線_委刊走期&發票明細」與業務「每月deliver」兩份試算表的現有資料整理寫入，讓 `/ad-performance`（audience_center）之後能 JOIN 出 client／經銷商／屬性／IO，前端 demo 有資料可用。
 
-**Architecture:** 純函式三層（`names.ts` 名稱比對 → `parse.ts` 試算表列解析 → `build.ts` 組出要寫入的資料）＋`report.ts` 用 `nexus_coverage` 算帳戶層歸屬覆蓋率＋`store.ts` 建表／讀帳戶／整批清空重寫。一支 CLI `scripts/sales_seed.mts` 串起來：預設只產報告，`--write` 才寫 DB。試算表內容先由 Claude 用 Google Sheets MCP 匯出成 JSON 放 `poc/`（gitignored），腳本不連 Sheets API。
+**Architecture:** 純函式四層（`names.ts` 名稱比對 → `parse.ts` 試算表列解析 → `build.ts` 組出 `Seed` → `rows.ts` 轉成 BQ 列、寫入前檢查、換表交易 SQL）＋`report.ts` 用 `nexus_coverage` 算帳戶層歸屬覆蓋率。I/O 集中在 `store.ts`：帳戶與花費讀 Cloud SQL（只呼叫 `core/store.ts` 現成 export 的函式），寫入走 BQ 暫存表（load job，免費）＋一段 BQ 交易整批換掉 8 張表。`seed.ts` 串流程，`scripts/sales_seed.mts` 是薄 CLI：預設只產報告，`--write` 才寫 BQ。試算表內容由 Claude 用 Google Sheets MCP 匯出成 JSON 放 `poc/`（gitignored），腳本不連 Sheets API。
 
-**Tech Stack:** TypeScript（ESM、NodeNext）、mysql2/promise、tsx 跑腳本與測試、`node:assert/strict`。
+**Tech Stack:** TypeScript（ESM、NodeNext）、googleapis BigQuery v2（`src/core/bigquery.ts` 既有封裝）、mysql2（經 `src/core/store.ts` 既有函式）、tsx 跑腳本與測試、`node:assert/strict`。
 
-**Spec:** `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（執行前兩份都要讀；§4.0 關聯圖、§5 歸屬語意、§6 種子規則、§9 已知限制）
+**Spec:** `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（2026-10-16 改版為 BQ；執行前兩份都要讀；§2 為何放 BQ、§4 表結構與 BQ 差異處理、§4.0 關聯圖、§5 歸屬語意、§6 種子規則、§6.8 換表流程、§9 已知限制）
 
 ## Global Constraints
 
-- 表放 Cloud SQL `ad_tools` 庫（連線預設庫），表名前綴 `sales_`；BH 庫 `budget_hunter`（env `BH_DB`）**只讀**。
-- 金額一律 `DECIMAL(14,2)`、台幣未稅。
-- **不留歷史**；重跑種子＝同一個交易裡 `DELETE` 全部 `sales_` 表再寫入（id 會換新）。不加 `match_method`、`review_status` 欄位。
+- 表放 BigQuery `popinpoc1.reporting`（asia-east1），表名前綴 `sales_`；暫存表 `sales__stage_<名>`（1 天後自動過期，用完即刪）。
+- **不影響現有系統**：不改任何既有 BQ 表／view（含 `nexus_customer_account_map`、`nexus_integrated_daily`），不改 audience_center（`ad_report.py`、`ad_brand_rules.py`、`ad_performance.py` 一行不動）。
+- ad_tools 既有程式**只改一處**：`src/tools/pacing/sheet.ts` 的 `toDate`、`toNum` 加 `export`（行為不變）。`src/core/store.ts` 不改，只呼叫現成 export 的 `pacingKnownAccounts()`、`pacingBhConfigs()`、`pacingWarehouseSpend(sd, ed)`。BH 庫只讀。
+- 帳戶清單與花費讀 Cloud SQL（免費，不查 BQ）。BQ 只有建表、load job、`tabledata.list`（都不計費）與換表交易的 16 句 DML（每句最低計 10 MB，合計 ≈ US$0.001）。交易前逐句 dry-run，預估超過 1 GiB 就停。
+- 金額欄 `NUMERIC`，程式以 2 位小數字串寫入，台幣未稅；月份欄 `DATE`（該月 1 日）。
+- id 由程式依序編 1..N；BQ 不強制唯一鍵與外鍵，**寫入前一律過 `checkKeys`**，不過就整批不寫。
+- **不留歷史**；重跑＝暫存表＋一段交易整批換掉 8 張表（id 會換新）。不加 `match_method`、`review_status` 欄位。
 - 帳戶名比對三級：①正規化後完全相同 ②去前綴後相同 ③互相包含、短的一方 ≥3 字；①②命中一起收，③只在①②都沒有時用；對不到就略過。
 - 帳戶 ID 為空或 `nan`／`none`／`null`／`undefined` 一律不比對、不歸屬。
 - 財務資料只存公司名、統編、付款方式、金額、請款日期；**聯絡人、Email、電話、地址不搬**。試算表匯出的 JSON 放 `poc/sales_seed_input/`（`poc/` 已 gitignore），**不進 repo**。
-- 不查 BQ：帳戶清單與花費都讀 Cloud SQL `nexus_coverage`。
-- **寫入正式 Cloud SQL 前要先給使用者看 dry-run 報告並取得同意。** push main＝自動部署，**不要 push**，由使用者決定。
-- 註解繁體中文；DB 欄位 snake_case；程式變數 camelCase。
-- 測試：`npx tsx tests/verify_sales.mts`（全假資料、手算期望值，不連 DB），型別檢查：`npx tsc --noEmit`。
+- **寫入正式 BQ 前要先給使用者看 dry-run 報告並取得同意。** push main＝自動部署，**不要 push**，由使用者決定。
+- 本機跑 CLI 要開 `cloud-sql-proxy`（讀 Cloud SQL 用），**用完要關掉**。
+- 註解繁體中文；BQ 欄位 snake_case；程式變數 camelCase。
+- 測試：`npx tsx tests/verify_sales.mts`（全假資料、手算期望值，不連 DB／BQ），型別檢查：`npx tsc --noEmit`（只涵蓋 `src/`）。
 
 ## Review Focus
 
-1. 財務列「帳戶名、委刊起始日、委刊單」全空（香港虎鯨 9 列）→ 應併成一張 IO、期數用 `r<列號>` 不撞主鍵，不能噴錯或拆成 9 張。（Task 3 測試 c）
+1. 財務列「帳戶名、委刊起始日、委刊單」全空（香港虎鯨 9 列）→ 應併成一張 IO、期數用 `r<列號>` 不撞唯一鍵，不能噴錯或拆成 9 張。（Task 3 測試 c、Task 5 `seedToRows` 測試）
 2. 月表日期混寫 `10/1`、`10/01`、`2026/10/7`、`TBC` → 依分頁年份轉日期、TBC 為 null；TBC 的 IO 不參與併入財務 IO、也不參與歸屬。（Task 2、Task 3 測試 j、Task 4）
-3. 試算表錯誤值 `#REF!`、`#DIV/0!`、負數 P 預估 → 轉成 null 或不寫拆分，不能變 NaN 或寫進負預算。（Task 2、Task 3 測試 e）
-4. 前後空白與全形（` A12`、`鮮味帖商行 `、`直客＿仙桃牌`）→ 視為同一筆。（Task 1、Task 3 測試 a）
-5. 無效帳戶 ID（`nan`，例：D 直客_仙桃牌）→ 不比對、不歸屬。（Task 1、Task 3 測試 i、Task 5 `loadAccounts`）
+3. 試算表錯誤值 `#REF!`、`#DIV/0!`、負數 P 預估、JS 浮點加總尾數 → 轉成 null、不寫拆分、或寫成 2 位小數字串，不能變 NaN、寫進負預算或讓 BQ load 因小數位數失敗。（Task 2、Task 3 測試 e、Task 5 `money`）
+4. 寫入中途失敗（某張暫存表 load 失敗、交易中某句失敗）→ 8 張正式表要嘛全換、要嘛全不變，不能出現 `sales_ios` 換新但 `sales_io_assignments` 還是舊 io_id。（Task 5 `swapSql` 測試、Task 6 `writeRowsToBq` 流程）
+5. 無效帳戶 ID（`nan`，例：D 直客_仙桃牌）→ 不比對、不歸屬。（Task 1、Task 3 測試 i、Task 6 `mergeAccounts`）
 
 ---
 
@@ -37,17 +41,20 @@
 
 | 檔案 | 動作 | 職責 |
 |---|---|---|
-| `src/tools/sales/names.ts` | Create | 名稱正規化、去前綴、帳戶名三級比對、公司名→品牌、帳戶命名→品牌、帳戶 ID 有效性 |
-| `src/tools/sales/parse.ts` | Create | 財務表／客戶資料表／月表分頁 → 結構化列 |
-| `src/tools/sales/schema.ts` | Create | 8 張表的 DDL、平台代碼與屬性常數 |
-| `src/tools/sales/build.ts` | Create | 解析後的列＋帳戶清單 → 要寫入的資料（`Seed`） |
-| `src/tools/sales/report.ts` | Create | 帳戶層歸屬（覆蓋率、衝突、未歸屬）＋ markdown 報告 |
-| `src/tools/sales/store.ts` | Create | 建表、讀帳戶清單與 coverage、整批清空重寫 |
-| `src/tools/sales/CLAUDE.md` | Create | 這個模組的備忘（資料來源、怎麼重跑） |
-| `scripts/sales_seed.mts` | Create | CLI：讀 JSON → 報告 →（`--write`）寫 DB |
-| `tests/verify_sales.mts` | Create | 全部純函式測試 |
-| `src/tools/pacing/sheet.ts` | Modify | `toDate`、`toNum` 加 `export`（行為不變） |
-| `src/core/store.ts:51` | Modify | `getPool` 加 `export` |
+| `src/tools/sales/names.ts` | Create（T1；T6 補 `mergeAccounts`） | 名稱正規化、去前綴、帳戶名三級比對、公司名→品牌、帳戶命名→品牌、帳戶 ID 有效性、多來源帳戶合併 |
+| `src/tools/sales/parse.ts` | Create（T2） | 財務表／客戶資料表／月表分頁 → 結構化列 |
+| `src/tools/sales/schema.ts` | Create（T3 常數；T5 補 BQ schema） | 平台代碼與屬性常數、8 張表的 BQ schema、邏輯唯一鍵、表名 |
+| `src/tools/sales/build.ts` | Create（T3） | 解析後的列＋帳戶清單 → `Seed` |
+| `src/tools/sales/report.ts` | Create（T4） | 帳戶層歸屬（覆蓋率、衝突、未歸屬）＋ markdown 報告 |
+| `src/tools/sales/rows.ts` | Create（T5） | `Seed` → 8 張表的 BQ 列、寫入前檢查、換表交易 SQL |
+| `src/tools/sales/store.ts` | Create（T6） | 讀帳戶與花費（Cloud SQL 既有函式）、寫 BQ（暫存表＋交易） |
+| `src/tools/sales/seed.ts` | Create（T6） | 串起解析 → 組裝 → 報告 →（write）寫入 |
+| `src/tools/sales/CLAUDE.md` | Create（T7） | 這個模組的備忘（資料來源、怎麼重跑） |
+| `scripts/sales_seed.mts` | Create（T6） | 薄 CLI：讀 JSON → `runSeed`。`scripts/` 是新目錄，不在 tsconfig `include`、也不進 Docker image（Dockerfile 只 COPY `src`） |
+| `tests/verify_sales.mts` | Create（T1 起逐 Task 補） | 全部純函式測試 |
+| `src/tools/pacing/sheet.ts` | Modify（T2） | `toDate`、`toNum` 加 `export`（行為不變） |
+
+`src/tools/sales/` 會跟著 `src/` 編進 ad_tools 的 image，但沒有任何路由或排程 import 它。
 
 ---
 
@@ -571,7 +578,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 3: 種子組裝 `build.ts`（含 `schema.ts` 常數）
 
 **Files:**
-- Create: `src/tools/sales/schema.ts`（本 Task 只放常數與型別；DDL 在 Task 5 補）
+- Create: `src/tools/sales/schema.ts`（本 Task 只放常數與型別；BQ schema 在 Task 5 補）
 - Create: `src/tools/sales/build.ts`
 - Test: `tests/verify_sales.mts`
 
@@ -747,7 +754,7 @@ Expected: FAIL，`Cannot find module '.../src/tools/sales/build.js'`
 - [ ] **Step 3: 建 `src/tools/sales/schema.ts`（先只有常數）**
 
 ```ts
-// 業績層級資料（經銷商／client／IO＋歸屬規則）的 Cloud SQL 表結構與代碼。
+// 業績層級資料（經銷商／client／IO＋歸屬規則）的 BigQuery 表結構與代碼。
 // 設計：docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md §4
 
 /** 客戶屬性。前五個是月表 202609 起的分類；微型代理商是財務表備註的寫法，先獨立保存。 */
@@ -1260,291 +1267,574 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: 建表、DB 讀寫與 CLI
+### Task 5: BQ schema 與列轉換 `schema.ts`＋`rows.ts`
 
 **Files:**
-- Modify: `src/tools/sales/schema.ts`（補 `SALES_TABLES`、`SALES_DDL`）
-- Modify: `src/core/store.ts:51`（`function getPool()` → `export function getPool()`）
-- Create: `src/tools/sales/store.ts`
-- Create: `scripts/sales_seed.mts`
+- Modify: `src/tools/sales/schema.ts`（檔尾補 BQ schema、唯一鍵、表名）
+- Create: `src/tools/sales/rows.ts`
 - Test: `tests/verify_sales.mts`
 
 **Interfaces:**
-- Consumes: Task 1 `validAccountId`、`normName`、`Account`；Task 3 `Seed`；Task 4 `CoverageRow`、`attributeAccountDays`、`renderReport`；`getPool(): mysql.Pool | null`（core/store.ts）
-- Produces:
-  - `SALES_TABLES: readonly string[]`（依寫入順序）、`SALES_DDL: string[]`（與 `SALES_TABLES` 同順序）
-  - `ensureSalesSchema(pool: mysql.Pool): Promise<void>`
-  - `loadAccounts(pool: mysql.Pool, bhDb?: string): Promise<Account[]>`
-  - `loadCoverage(pool: mysql.Pool, since: string): Promise<CoverageRow[]>`
-  - `writeSeed(pool: mysql.Pool, seed: Seed, by: string): Promise<Record<string, number>>`
+- Consumes: Task 3 `Seed`（及其 `SeedIo` 等型別）；`BqField`（`src/core/bigquery.ts`，`import type`，不會在測試時載入 googleapis）
+- Produces（`schema.ts`）：
+  - `SALES_DATASET: string`（預設 `'popinpoc1.reporting'`，env `SALES_BQ_DATASET` 可改）
+  - `SALES_TABLES`（8 個表名，寫入順序）、`type SalesTable`
+  - `fullTable(t: SalesTable): string`（`popinpoc1.reporting.sales_ios`）、`stageTable(t: SalesTable): string`（`popinpoc1.reporting.sales__stage_ios`）
+  - `SALES_SCHEMA: Record<SalesTable, BqField[]>`、`UNIQUE_KEYS: Record<SalesTable, string[][]>`、`SALES_TABLE_DESC: Record<SalesTable, string>`
+- Produces（`rows.ts`）：
+  - `type Row = Record<string, string | number | null>`、`type SalesRows = Record<SalesTable, Row[]>`
+  - `money(n: number | null): string | null`
+  - `seedToRows(seed: Seed, meta: { by: string; at: string }): SalesRows`（名稱或 IO 鍵找不到就 throw）
+  - `checkKeys(rows: SalesRows): void`（有問題就 throw，訊息列出前 20 項）
+  - `swapStatements(): string[]`（16 句：每張表 DELETE＋INSERT…SELECT）、`swapSql(): string`（包成一段交易）
 
 - [ ] **Step 1: 寫失敗測試**
 
-import 區加：
+`tests/verify_sales.mts` import 區加：
 
 ```ts
-import { SALES_DDL, SALES_TABLES } from '../src/tools/sales/schema.js';
+import { SALES_TABLES, SALES_SCHEMA, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
+import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
 ```
 
 在 `// <<後續 Task 的測試接在這裡>>` 之前插入：
 
 ```ts
-// ---------- schema ----------
+// ---------- rows（轉成 BQ 列、寫入前檢查、換表交易） ----------
 
-await ok('DDL：8 張表、順序與 SALES_TABLES 一致、都是 CREATE TABLE IF NOT EXISTS', () => {
+await ok('schema：8 張表都有欄位與唯一鍵、唯一鍵欄位都在 schema 裡、表名與暫存表名', () => {
   assert.equal(SALES_TABLES.length, 8);
-  assert.equal(SALES_DDL.length, SALES_TABLES.length);
-  SALES_TABLES.forEach((t, i) => assert.match(SALES_DDL[i], new RegExp(`^\\s*CREATE TABLE IF NOT EXISTS ${t} \\(`)));
+  for (const t of SALES_TABLES) {
+    assert.ok(SALES_SCHEMA[t].length > 0, t);
+    assert.ok(UNIQUE_KEYS[t].length > 0, t);
+    for (const key of UNIQUE_KEYS[t]) for (const k of key) assert.ok(SALES_SCHEMA[t].some((f) => f.name === k), `${t}.${k}`);
+  }
+  assert.equal(fullTable('sales_ios'), 'popinpoc1.reporting.sales_ios');
+  assert.equal(stageTable('sales_io_periods'), 'popinpoc1.reporting.sales__stage_io_periods');
+});
+
+await ok('money：2 位小數字串、去掉浮點尾數、負數照收、null 照舊', () => {
+  assert.equal(money(0.1 + 0.2), '0.30');
+  assert.equal(money(45000.000000000004), '45000.00');
+  assert.equal(money(-39386), '-39386.00');
+  assert.equal(money(null), null);
+});
+
+const META = { by: 'seed', at: '2026-10-16T00:00:00.000Z' };
+const ROWS = seedToRows(SEED, META);
+const one = (t: SalesTable, pred: (r: Row) => boolean) => {
+  const xs = ROWS[t].filter(pred);
+  assert.equal(xs.length, 1, `${t} 應剛好一列，實際 ${xs.length}`);
+  return xs[0];
+};
+const clone = (): SalesRows => JSON.parse(JSON.stringify(ROWS));
+
+await ok('seedToRows：筆數與 Seed 相同、id 從 1 連號、名稱換成外鍵 id、金額與月份格式、規則欄位空字串', () => {
+  assert.deepEqual(SALES_TABLES.map((t) => ROWS[t].length), [
+    SEED.agencies.length, SEED.clients.length, SEED.aliases.length, SEED.billingParties.length,
+    SEED.ios.length, SEED.periods.length, SEED.allocations.length, SEED.assignments.length,
+  ]);
+  assert.deepEqual(ROWS.sales_ios.map((r) => r.id), SEED.ios.map((_, i) => i + 1));
+  const a12 = one('sales_ios', (r) => r.io_code === 'A12');
+  assert.equal(a12.agency_id, one('sales_agencies', (r) => r.name === '直客').id);
+  assert.equal(a12.client_id, one('sales_clients', (r) => r.name === '鮮味帖').id);
+  assert.equal(a12.billing_party_id, one('sales_billing_parties', (r) => r.name === '鮮味帖商行').id);
+  assert.deepEqual([a12.budget_net, a12.start_date, a12.updated_by, a12.updated_at], ['45000.00', '2024-06-01', 'seed', META.at]);
+  assert.deepEqual(
+    ROWS.sales_io_allocations.filter((r) => r.io_id === a12.id).map((r) => `${r.platform}:${r.month}:${r.planned_budget}`).sort(),
+    ['GOOGLE:2024-06-01:15000.00', 'GOOGLE:2024-07-01:15000.00'],
+  );
+  const hkBp = one('sales_billing_parties', (r) => r.name === '香港虎鯨國際貿易有限公司').id;
+  const hk = one('sales_ios', (r) => r.billing_party_id === hkBp);
+  assert.deepEqual([hk.start_date, hk.end_date, hk.io_code, hk.budget_net], [null, null, '', '680952.00']);
+  assert.ok(ROWS.sales_io_assignments.every((r) => r.campaign_id === '' && r.campaign_keyword === '' && r.valid_from === null));
+});
+
+await ok('seedToRows：IO 的經銷商名稱找不到就直接報錯', () => {
+  const bad = { ...SEED, ios: [{ ...SEED.ios[0], agencyName: '不存在的經銷商' }] } as Seed;
+  assert.throws(() => seedToRows(bad, META), /不存在的經銷商/);
+});
+
+await ok('checkKeys：正常資料通過', () => {
+  checkKeys(ROWS);
+});
+
+await ok('checkKeys：邏輯唯一鍵重複就擋（同一條歸屬規則寫兩次）', () => {
+  const r = clone();
+  r.sales_io_assignments.push({ ...r.sales_io_assignments[0], id: 999 });
+  assert.throws(() => checkKeys(r), /sales_io_assignments：\(io_id, platform, account_id, campaign_id, campaign_keyword\) 重複/);
+});
+
+await ok('checkKeys：外鍵指不到、必填欄 NULL、多出或缺少欄位都擋', () => {
+  const a = clone();
+  a.sales_io_periods[0].io_id = 999;
+  assert.throws(() => checkKeys(a), /sales_io_periods\.io_id=999 在 sales_ios 找不到/);
+  const b = clone();
+  b.sales_ios[0].agency_id = null;
+  assert.throws(() => checkKeys(b), /必填欄 agency_id 是 NULL/);
+  const c = clone();
+  c.sales_clients[0].extra = 'x';
+  assert.throws(() => checkKeys(c), /欄位 extra 不在 schema/);
+  const d = clone();
+  delete d.sales_agencies[0].note;
+  assert.throws(() => checkKeys(d), /缺欄位 note/);
+});
+
+await ok('swapSql：一段交易內 8 張表各 DELETE＋從暫存表 INSERT（欄位明列），出錯 ROLLBACK', () => {
+  const st = swapStatements();
+  assert.equal(st.length, 16);
+  for (const t of SALES_TABLES) {
+    assert.ok(st.includes(`DELETE FROM \`${fullTable(t)}\` WHERE TRUE`), t);
+    const ins = st.find((s) => s.startsWith(`INSERT INTO \`${fullTable(t)}\` (`));
+    assert.ok(ins, t);
+    assert.ok(ins.endsWith(`FROM \`${stageTable(t)}\``), t);
+    assert.ok(ins.includes(SALES_SCHEMA[t].map((f) => `\`${f.name}\``).join(', ')), t);
+  }
+  const sql = swapSql();
+  const iBegin = sql.indexOf('BEGIN TRANSACTION;'), iCommit = sql.indexOf('COMMIT TRANSACTION;');
+  assert.ok(iBegin >= 0 && iBegin < sql.indexOf('DELETE FROM') && sql.lastIndexOf('INSERT INTO') < iCommit);
+  assert.match(sql, /EXCEPTION WHEN ERROR THEN\s+ROLLBACK TRANSACTION;/);
 });
 ```
 
 - [ ] **Step 2: 跑測試確認失敗**
 
 Run: `npx tsx tests/verify_sales.mts`
-Expected: FAIL，`SALES_DDL` 不是 export（SyntaxError: does not provide an export named 'SALES_DDL'）
+Expected: FAIL，`SALES_TABLES` 不是 export（SyntaxError: does not provide an export named 'SALES_TABLES'）
 
-- [ ] **Step 3: `schema.ts` 檔尾補 DDL**
+- [ ] **Step 3: `schema.ts` 檔頂加 import、檔尾補 BQ schema**
+
+檔頂（第一個 `export` 之前）加：
 
 ```ts
-const AUDIT = `source VARCHAR(16) NOT NULL,
-  source_ref VARCHAR(255) NOT NULL DEFAULT '',
-  updated_by VARCHAR(255) NOT NULL DEFAULT '',
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`;
-const UPDATED = `updated_by VARCHAR(255) NOT NULL DEFAULT '',
-  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`;
+import type { BqField } from '../../core/bigquery.js';
+```
 
-/** 寫入順序；清空時反過來。 */
+檔尾加：
+
+```ts
+/** 表所在的 dataset（`project.dataset`）。`/ad-performance` 讀的 nexus_* 也在這裡。 */
+export const SALES_DATASET = process.env.SALES_BQ_DATASET ?? 'popinpoc1.reporting';
+
+/** 寫入順序：主檔在前、子表在後。 */
 export const SALES_TABLES = [
   'sales_agencies', 'sales_clients', 'sales_aliases', 'sales_billing_parties',
   'sales_ios', 'sales_io_periods', 'sales_io_allocations', 'sales_io_assignments',
 ] as const;
+export type SalesTable = (typeof SALES_TABLES)[number];
 
-/** 與 SALES_TABLES 同順序。第一次使用時建表（沿用 pacing_merges 做法）。 */
-export const SALES_DDL: string[] = [
-  `CREATE TABLE IF NOT EXISTS sales_agencies (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(100) NOT NULL,
-  attr VARCHAR(20) NULL,
-  note VARCHAR(255) NOT NULL DEFAULT '',
-  ${AUDIT},
-  UNIQUE KEY uq_name (name)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_clients (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(100) NOT NULL,
-  note VARCHAR(255) NOT NULL DEFAULT '',
-  ${AUDIT},
-  UNIQUE KEY uq_name (name)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_aliases (
-  entity_type VARCHAR(10) NOT NULL,
-  alias_norm VARCHAR(150) NOT NULL,
-  entity_id INT NOT NULL,
-  alias_raw VARCHAR(150) NOT NULL,
-  PRIMARY KEY (entity_type, alias_norm)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_billing_parties (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(150) NOT NULL,
-  tax_id VARCHAR(10) NULL,
-  payment_terms VARCHAR(20) NOT NULL DEFAULT '',
-  ${AUDIT},
-  UNIQUE KEY uq_name (name),
-  INDEX idx_tax (tax_id)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_ios (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(200) NOT NULL,
-  io_code VARCHAR(20) NOT NULL DEFAULT '',
-  client_id INT NULL,
-  agency_id INT NOT NULL,
-  billing_party_id INT NULL,
-  entity VARCHAR(10) NOT NULL DEFAULT '',
-  ae_email VARCHAR(255) NOT NULL DEFAULT '',
-  am_email VARCHAR(255) NOT NULL DEFAULT '',
-  start_date DATE NULL,
-  end_date DATE NULL,
-  status VARCHAR(20) NOT NULL DEFAULT '',
-  budget_net DECIMAL(14,2) NULL,
-  service_fee_pct DECIMAL(5,2) NULL,
-  service_fee DECIMAL(14,2) NULL,
-  setup_fee DECIMAL(14,2) NULL,
-  other_fee DECIMAL(14,2) NULL,
-  kpi VARCHAR(255) NOT NULL DEFAULT '',
-  note TEXT NULL,
-  ${AUDIT},
-  UNIQUE KEY uq_src (source, source_ref),
-  INDEX idx_client (client_id),
-  INDEX idx_agency (agency_id),
-  INDEX idx_period (start_date, end_date)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_io_periods (
-  io_id INT NOT NULL,
-  period_no VARCHAR(20) NOT NULL,
-  account_name_raw VARCHAR(150) NOT NULL DEFAULT '',
-  ad_amount DECIMAL(14,2) NULL,
-  service_fee_pct DECIMAL(5,2) NULL,
-  service_fee DECIMAL(14,2) NULL,
-  setup_fee DECIMAL(14,2) NULL,
-  other_fee DECIMAL(14,2) NULL,
-  invoice_net DECIMAL(14,2) NULL,
-  invoice_gross DECIMAL(14,2) NULL,
-  payment_type VARCHAR(20) NOT NULL DEFAULT '',
-  invoice_apply_date DATE NULL,
-  invoice_no VARCHAR(20) NOT NULL DEFAULT '',
-  expected_pay_date DATE NULL,
-  paid_date DATE NULL,
-  topup_date DATE NULL,
-  note TEXT NULL,
-  source_row INT NOT NULL,
-  PRIMARY KEY (io_id, period_no, account_name_raw)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_io_allocations (
-  io_id INT NOT NULL,
-  platform VARCHAR(10) NOT NULL,
-  \`month\` CHAR(7) NOT NULL,
-  planned_budget DECIMAL(14,2) NOT NULL,
-  source VARCHAR(16) NOT NULL,
-  note VARCHAR(255) NOT NULL DEFAULT '',
-  ${UPDATED},
-  PRIMARY KEY (io_id, platform, \`month\`)
-) DEFAULT CHARSET=utf8mb4`,
-  `CREATE TABLE IF NOT EXISTS sales_io_assignments (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  io_id INT NOT NULL,
-  platform VARCHAR(10) NOT NULL,
-  account_id VARCHAR(64) NOT NULL,
-  campaign_id VARCHAR(64) NOT NULL DEFAULT '',
-  campaign_keyword VARCHAR(100) NOT NULL DEFAULT '',
-  valid_from DATE NULL,
-  valid_to DATE NULL,
-  source VARCHAR(16) NOT NULL,
-  ${UPDATED},
-  UNIQUE KEY uq_rule (io_id, platform, account_id, campaign_id, campaign_keyword),
-  INDEX idx_acct (platform, account_id)
-) DEFAULT CHARSET=utf8mb4`,
+export const fullTable = (t: SalesTable) => `${SALES_DATASET}.${t}`;
+/** 種子寫入用的暫存表：sales_ios → sales__stage_ios。 */
+export const stageTable = (t: SalesTable) => `${SALES_DATASET}.${t.replace(/^sales_/, 'sales__stage_')}`;
+
+const req = (name: string, type: string): BqField => ({ name, type, mode: 'REQUIRED' });
+const opt = (name: string, type: string): BqField => ({ name, type, mode: 'NULLABLE' });
+const money = (name: string) => opt(name, 'NUMERIC');
+const AUDIT = [req('source', 'STRING'), req('source_ref', 'STRING'), req('updated_by', 'STRING'), req('updated_at', 'TIMESTAMP')];
+const UPDATED = [req('updated_by', 'STRING'), req('updated_at', 'TIMESTAMP')];
+
+/** 欄位定義見 spec §4。BQ 沒有預設值：字串欄一律寫 ''，NULL 只用在未知／TBC／不限。 */
+export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
+  sales_agencies: [req('id', 'INT64'), req('name', 'STRING'), opt('attr', 'STRING'), req('note', 'STRING'), ...AUDIT],
+  sales_clients: [req('id', 'INT64'), req('name', 'STRING'), req('note', 'STRING'), ...AUDIT],
+  sales_aliases: [req('entity_type', 'STRING'), req('alias_norm', 'STRING'), req('entity_id', 'INT64'), req('alias_raw', 'STRING')],
+  sales_billing_parties: [req('id', 'INT64'), req('name', 'STRING'), opt('tax_id', 'STRING'), req('payment_terms', 'STRING'), ...AUDIT],
+  sales_ios: [
+    req('id', 'INT64'), req('name', 'STRING'), req('io_code', 'STRING'),
+    opt('client_id', 'INT64'), req('agency_id', 'INT64'), opt('billing_party_id', 'INT64'),
+    req('entity', 'STRING'), req('ae_email', 'STRING'), req('am_email', 'STRING'),
+    opt('start_date', 'DATE'), opt('end_date', 'DATE'), req('status', 'STRING'),
+    money('budget_net'), money('service_fee_pct'), money('service_fee'), money('setup_fee'), money('other_fee'),
+    req('kpi', 'STRING'), req('note', 'STRING'), ...AUDIT,
+  ],
+  sales_io_periods: [
+    req('io_id', 'INT64'), req('period_no', 'STRING'), req('account_name_raw', 'STRING'),
+    money('ad_amount'), money('service_fee_pct'), money('service_fee'), money('setup_fee'), money('other_fee'),
+    money('invoice_net'), money('invoice_gross'), req('payment_type', 'STRING'),
+    opt('invoice_apply_date', 'DATE'), req('invoice_no', 'STRING'),
+    opt('expected_pay_date', 'DATE'), opt('paid_date', 'DATE'), opt('topup_date', 'DATE'),
+    req('note', 'STRING'), req('source_row', 'INT64'),
+  ],
+  sales_io_allocations: [
+    req('io_id', 'INT64'), req('platform', 'STRING'), req('month', 'DATE'), req('planned_budget', 'NUMERIC'),
+    req('source', 'STRING'), req('note', 'STRING'), ...UPDATED,
+  ],
+  sales_io_assignments: [
+    req('id', 'INT64'), req('io_id', 'INT64'), req('platform', 'STRING'), req('account_id', 'STRING'),
+    req('campaign_id', 'STRING'), req('campaign_keyword', 'STRING'), opt('valid_from', 'DATE'), opt('valid_to', 'DATE'),
+    req('source', 'STRING'), ...UPDATED,
+  ],
+};
+
+/** 邏輯唯一鍵。BQ 不強制，寫入前由 rows.ts 的 checkKeys 檢查。 */
+export const UNIQUE_KEYS: Record<SalesTable, string[][]> = {
+  sales_agencies: [['id'], ['name']],
+  sales_clients: [['id'], ['name']],
+  sales_aliases: [['entity_type', 'alias_norm']],
+  sales_billing_parties: [['id'], ['name']],
+  sales_ios: [['id'], ['source', 'source_ref']],
+  sales_io_periods: [['io_id', 'period_no', 'account_name_raw']],
+  sales_io_allocations: [['io_id', 'platform', 'month']],
+  sales_io_assignments: [['id'], ['io_id', 'platform', 'account_id', 'campaign_id', 'campaign_keyword']],
+};
+
+const DESC_SUFFIX = '。設計：ad_tools docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md；由 ad_tools scripts/sales_seed.mts 整批寫入，id 每次重跑會換';
+export const SALES_TABLE_DESC: Record<SalesTable, string> = {
+  sales_agencies: `業績層級：經銷商／代理商（直客、陸客也各一列），attr＝客戶屬性${DESC_SUFFIX}`,
+  sales_clients: `業績層級：client（品牌）${DESC_SUFFIX}`,
+  sales_aliases: `業績層級：經銷商／client 的各種寫法（帳戶名、廣告主、公司名）${DESC_SUFFIX}`,
+  sales_billing_parties: `業績層級：付款方（開票對象）${DESC_SUFFIX}`,
+  sales_ios: `業績層級：IO（委刊單）${DESC_SUFFIX}`,
+  sales_io_periods: `業績層級：IO 請款期（財務表一列一期）${DESC_SUFFIX}`,
+  sales_io_allocations: `業績層級：IO × 平台 × 月 計畫預算${DESC_SUFFIX}`,
+  sales_io_assignments: `業績層級：IO 歸屬規則（平台帳戶，之後可細到 campaign）${DESC_SUFFIX}`,
+};
+```
+
+- [ ] **Step 4: 實作 `src/tools/sales/rows.ts`**
+
+```ts
+// 業績層級資料：Seed → 8 張 BQ 表的列（編 id、名稱換成外鍵 id、金額轉 2 位小數字串），
+// 以及寫入前檢查與換表交易 SQL。純函式，不碰 BQ。見 spec §4（BQ 差異處理）、§6.8（換表流程）。
+import type { Seed } from './build.js';
+import { SALES_SCHEMA, SALES_TABLES, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from './schema.js';
+
+export type Row = Record<string, string | number | null>;
+export type SalesRows = Record<SalesTable, Row[]>;
+
+/** 金額 → 2 位小數字串（BQ NUMERIC 用字串寫入，避開 JS 浮點加總的尾數）。 */
+export function money(n: number | null): string | null {
+  return n === null || !Number.isFinite(n) ? null : n.toFixed(2);
+}
+
+function must(m: Map<string, number>, k: string, what: string): number {
+  const v = m.get(k);
+  if (v === undefined) throw new Error(`seedToRows：${what}「${k}」找不到`);
+  return v;
+}
+
+export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesRows {
+  const audit = (source: string, sourceRef: string) => ({ source, source_ref: sourceRef, updated_by: meta.by, updated_at: meta.at });
+  const upd = { updated_by: meta.by, updated_at: meta.at };
+  const idOf = <T>(xs: T[], key: (x: T) => string) => new Map(xs.map((x, i) => [key(x), i + 1]));
+  const agencyId = idOf(seed.agencies, (a) => a.name);
+  const clientId = idOf(seed.clients, (c) => c.name);
+  const billingId = idOf(seed.billingParties, (b) => b.name);
+  const ioId = idOf(seed.ios, (x) => x.key);
+  const io = (k: string) => must(ioId, k, 'IO');
+  return {
+    sales_agencies: seed.agencies.map((a, i) => ({ id: i + 1, name: a.name, attr: a.attr, note: '', ...audit(a.source, a.sourceRef) })),
+    sales_clients: seed.clients.map((c, i) => ({ id: i + 1, name: c.name, note: '', ...audit(c.source, c.sourceRef) })),
+    sales_aliases: seed.aliases.map((a) => ({
+      entity_type: a.entityType, alias_norm: a.aliasNorm,
+      entity_id: must(a.entityType === 'agency' ? agencyId : clientId, a.entityName, a.entityType === 'agency' ? '經銷商' : 'client'),
+      alias_raw: a.aliasRaw,
+    })),
+    sales_billing_parties: seed.billingParties.map((b, i) => ({
+      id: i + 1, name: b.name, tax_id: b.taxId, payment_terms: b.paymentTerms, ...audit(b.source, b.sourceRef),
+    })),
+    sales_ios: seed.ios.map((x, i) => ({
+      id: i + 1, name: x.name, io_code: x.ioCode,
+      client_id: x.clientName ? must(clientId, x.clientName, 'client') : null,
+      agency_id: must(agencyId, x.agencyName, '經銷商'),
+      billing_party_id: x.billingPartyName ? must(billingId, x.billingPartyName, '付款方') : null,
+      entity: x.entity, ae_email: x.aeEmail, am_email: x.amEmail,
+      start_date: x.start, end_date: x.end, status: x.status,
+      budget_net: money(x.budgetNet), service_fee_pct: money(x.serviceFeePct), service_fee: money(x.serviceFee),
+      setup_fee: money(x.setupFee), other_fee: money(x.otherFee),
+      kpi: x.kpi, note: x.note, ...audit(x.source, x.sourceRef),
+    })),
+    sales_io_periods: seed.periods.map((p) => ({
+      io_id: io(p.ioKey), period_no: p.periodNo, account_name_raw: p.accountNameRaw,
+      ad_amount: money(p.adAmount), service_fee_pct: money(p.serviceFeePct), service_fee: money(p.serviceFee),
+      setup_fee: money(p.setupFee), other_fee: money(p.otherFee),
+      invoice_net: money(p.invoiceNet), invoice_gross: money(p.invoiceGross), payment_type: p.paymentType,
+      invoice_apply_date: p.invoiceApplyDate, invoice_no: p.invoiceNo,
+      expected_pay_date: p.expectedPayDate, paid_date: p.paidDate, topup_date: p.topupDate,
+      note: p.note, source_row: p.sourceRow,
+    })),
+    sales_io_allocations: seed.allocations.map((a) => ({
+      io_id: io(a.ioKey), platform: a.platform, month: `${a.month}-01`, planned_budget: money(a.plannedBudget),
+      source: a.source, note: a.note, ...upd,
+    })),
+    sales_io_assignments: seed.assignments.map((a, i) => ({
+      id: i + 1, io_id: io(a.ioKey), platform: a.platform, account_id: a.accountId,
+      campaign_id: '', campaign_keyword: '', valid_from: null, valid_to: null, source: a.source, ...upd,
+    })),
+  };
+}
+
+const FOREIGN: { table: SalesTable; col: string; ref: SalesTable; when?: (r: Row) => boolean }[] = [
+  { table: 'sales_ios', col: 'agency_id', ref: 'sales_agencies' },
+  { table: 'sales_ios', col: 'client_id', ref: 'sales_clients' },
+  { table: 'sales_ios', col: 'billing_party_id', ref: 'sales_billing_parties' },
+  { table: 'sales_aliases', col: 'entity_id', ref: 'sales_agencies', when: (r) => r.entity_type === 'agency' },
+  { table: 'sales_aliases', col: 'entity_id', ref: 'sales_clients', when: (r) => r.entity_type === 'client' },
+  { table: 'sales_io_periods', col: 'io_id', ref: 'sales_ios' },
+  { table: 'sales_io_allocations', col: 'io_id', ref: 'sales_ios' },
+  { table: 'sales_io_assignments', col: 'io_id', ref: 'sales_ios' },
 ];
+
+/** 寫入前檢查（BQ 不擋）：欄位與 schema 一致、必填欄非 NULL、邏輯唯一鍵不重複、外鍵指得到。有任何問題就 throw。 */
+export function checkKeys(rows: SalesRows): void {
+  const errs: string[] = [];
+  for (const t of SALES_TABLES) {
+    const fields = SALES_SCHEMA[t];
+    const names = new Set(fields.map((f) => f.name));
+    rows[t].forEach((r, i) => {
+      for (const k of Object.keys(r)) if (!names.has(k)) errs.push(`${t} 第 ${i + 1} 列：欄位 ${k} 不在 schema`);
+      for (const f of fields) {
+        if (!(f.name in r)) errs.push(`${t} 第 ${i + 1} 列：缺欄位 ${f.name}`);
+        else if (f.mode === 'REQUIRED' && r[f.name] === null) errs.push(`${t} 第 ${i + 1} 列：必填欄 ${f.name} 是 NULL`);
+      }
+    });
+    for (const key of UNIQUE_KEYS[t]) {
+      const seen = new Set<string>();
+      for (const r of rows[t]) {
+        const v = JSON.stringify(key.map((k) => r[k]));
+        if (seen.has(v)) errs.push(`${t}：(${key.join(', ')}) 重複 ${v}`);
+        seen.add(v);
+      }
+    }
+  }
+  for (const fk of FOREIGN) {
+    const ids = new Set(rows[fk.ref].map((r) => r.id));
+    for (const r of rows[fk.table]) {
+      if (fk.when && !fk.when(r)) continue;
+      const v = r[fk.col];
+      if (v !== null && !ids.has(v)) errs.push(`${fk.table}.${fk.col}=${v} 在 ${fk.ref} 找不到`);
+    }
+  }
+  if (errs.length) throw new Error(`寫入前檢查沒過（${errs.length} 項）：\n${errs.slice(0, 20).join('\n')}`);
+}
+
+const q = (s: string) => `\`${s}\``;
+
+/** 換表的 16 句 DML（每張表：清空正式表、從暫存表整批搬入），欄位明列。也拿來逐句 dry-run 估費。 */
+export function swapStatements(): string[] {
+  return SALES_TABLES.flatMap((t) => {
+    const cols = SALES_SCHEMA[t].map((f) => q(f.name)).join(', ');
+    return [
+      `DELETE FROM ${q(fullTable(t))} WHERE TRUE`,
+      `INSERT INTO ${q(fullTable(t))} (${cols}) SELECT ${cols} FROM ${q(stageTable(t))}`,
+    ];
+  });
+}
+
+/** 一段 BQ 交易：8 張表要嘛全換、要嘛全不變（任何一句失敗就 ROLLBACK 再把錯誤丟出來）。 */
+export function swapSql(): string {
+  return [
+    'BEGIN',
+    '  BEGIN TRANSACTION;',
+    ...swapStatements().map((s) => `  ${s};`),
+    '  COMMIT TRANSACTION;',
+    'EXCEPTION WHEN ERROR THEN',
+    '  ROLLBACK TRANSACTION;',
+    '  RAISE USING MESSAGE = @@error.message;',
+    'END;',
+  ].join('\n');
+}
+```
+
+- [ ] **Step 5: 跑測試與型別檢查**
+
+Run: `npx tsx tests/verify_sales.mts && npx tsc --noEmit`
+Expected:「全部通過：38 項」；tsc 無輸出
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/tools/sales/schema.ts src/tools/sales/rows.ts tests/verify_sales.mts
+git commit -m "feat(sales): BQ schema、Seed 轉 BQ 列、寫入前檢查與換表交易 SQL
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: 讀寫 I/O 與 CLI `store.ts`＋`seed.ts`＋`scripts/sales_seed.mts`
+
+**Files:**
+- Modify: `src/tools/sales/names.ts`（補 `mergeAccounts`）
+- Create: `src/tools/sales/store.ts`
+- Create: `src/tools/sales/seed.ts`
+- Create: `scripts/sales_seed.mts`
+- Test: `tests/verify_sales.mts`
+
+**Interfaces:**
+- Consumes:
+  - Task 1 `validAccountId`、`normName`、`Account`；Task 2 `parseFinance`、`parseCustomers`、`parseDeliverTab`；Task 3 `buildSeed`、`Seed`；Task 4 `CoverageRow`、`attributeAccountDays`、`renderReport`；Task 5 `seedToRows`、`checkKeys`、`swapStatements`、`swapSql`、`SalesRows`、`SALES_TABLES`、`SALES_SCHEMA`、`SALES_TABLE_DESC`、`fullTable`、`stageTable`、`SalesTable`
+  - `src/core/store.ts`（既有、不改）：`pacingKnownAccounts(): Promise<{ platform: string; accountId: string; name: string }[]>`、`pacingBhConfigs(): Promise<PacingBhRow[]>`（用 `platform`、`accountId`、`accountName`）、`pacingWarehouseSpend(sd: string, ed: string): Promise<{ platform: string; accountId: string; dt: string; spend: number }[]>`
+  - `src/core/bigquery.ts`（既有、不改）：`bqEnsureTable(spec): Promise<boolean>`、`bqDeleteTable(table)`、`bqLoadRows(table, schema, rows, { writeDisposition })`、`bqDryRun(sql): Promise<number>`、`bqQuery(sql, { timeoutMs })`、`bqListTableRows(table)`
+  - `twToday(): string`（`src/tools/pacing/calc.ts`）
+- Produces:
+  - `mergeAccounts(lists: Account[][]): Account[]`（names.ts）
+  - `loadAccounts(): Promise<Account[]>`、`loadCoverage(since: string, until: string): Promise<CoverageRow[]>`、`writeRowsToBq(rows: SalesRows, log?: (s: string) => void): Promise<Record<SalesTable, number>>`（store.ts）
+  - `DELIVER_TABS`、`COVERAGE_SINCE`、`interface SeedSheets { finance: unknown[][]; customers: unknown[][]; deliver: Record<string, unknown[][]> }`、`runSeed(sheets: SeedSheets, opts: { write: boolean; by: string; log?: (s: string) => void }): Promise<{ seed: Seed; report: string; written: Record<SalesTable, number> | null }>`（seed.ts）
+
+- [ ] **Step 1: 寫失敗測試**
+
+`tests/verify_sales.mts` 第一行 names 的 import 改成（多一個 `mergeAccounts`）：
+
+```ts
+import {
+  normName, coreName, matchAccounts, companyCore, brandFromLabel, validAccountId, mergeAccounts, type Account,
+} from '../src/tools/sales/names.js';
+```
+
+在 `// <<後續 Task 的測試接在這裡>>` 之前插入：
+
+```ts
+// ---------- accounts ----------
+
+await ok('mergeAccounts：多個來源合併、無效 ID 與空名字略過、正規化後同名只留一個、同帳戶不同名字都留', () => {
+  const got = mergeAccounts([
+    [
+      { platform: 'D', accountId: '37975', name: '直客_仙桃牌' },
+      { platform: 'D', accountId: 'nan', name: '直客_仙桃牌' },
+      { platform: 'R', accountId: '1', name: '' },
+    ],
+    [
+      { platform: 'D', accountId: '37975', name: '直客＿仙桃牌 ' },
+      { platform: 'D', accountId: '37975', name: '仙桃牌D' },
+    ],
+  ]);
+  assert.deepEqual(got.map((a) => `${a.platform}${a.accountId}:${a.name}`), ['D37975:直客_仙桃牌', 'D37975:仙桃牌D']);
+});
+```
+
+- [ ] **Step 2: 跑測試確認失敗**
+
+Run: `npx tsx tests/verify_sales.mts`
+Expected: FAIL，`does not provide an export named 'mergeAccounts'`
+
+- [ ] **Step 3: `names.ts` 檔尾補 `mergeAccounts`**
+
+```ts
+/** 多個來源的帳戶清單合併：無效 ID、空名字略過；正規化後同名只留一個；同帳戶不同名字都留（都拿來比對）。 */
+export function mergeAccounts(lists: Account[][]): Account[] {
+  const out = new Map<string, Account>();
+  for (const a of lists.flat()) {
+    const x: Account = { platform: String(a.platform), accountId: String(a.accountId ?? '').trim(), name: String(a.name ?? '').trim() };
+    if (!validAccountId(x.accountId) || !x.name) continue;
+    const k = `${x.platform}|${x.accountId}|${normName(x.name)}`;
+    if (!out.has(k)) out.set(k, x);
+  }
+  return [...out.values()];
+}
 ```
 
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `npx tsx tests/verify_sales.mts`
-Expected:「全部通過：31 項」
+Expected:「全部通過：39 項」
 
-- [ ] **Step 5: `src/core/store.ts` 第 51 行把 `getPool` 改成 export**
-
-```ts
-function getPool(): mysql.Pool | null {
-```
-改成
-```ts
-export function getPool(): mysql.Pool | null {
-```
-
-- [ ] **Step 6: 建 `src/tools/sales/store.ts`**
+- [ ] **Step 5: 建 `src/tools/sales/store.ts`**
 
 ```ts
-// 業績層級資料：Cloud SQL 讀寫——建表、讀帳戶清單與 coverage、整批清空重寫種子。
-// 帳戶清單＝倉庫 nexus_coverage ∪ BH bh_accounts（BH 只讀），不查 BQ。
-import type mysql from 'mysql2/promise';
-import { SALES_DDL, SALES_TABLES } from './schema.js';
-import { normName, validAccountId, type Account } from './names.js';
-import type { Seed } from './build.js';
+// 業績層級資料的 I/O。
+// 讀：帳戶清單與帳戶×日花費走 Cloud SQL（免費），只呼叫 core/store.ts 現成 export 的函式，不改 store.ts。
+// 寫：BQ popinpoc1.reporting.sales_*。先 load 進暫存表（免費），再用一段交易整批換掉 8 張正式表（spec §6.8）。
+import { bqDeleteTable, bqDryRun, bqEnsureTable, bqListTableRows, bqLoadRows, bqQuery } from '../../core/bigquery.js';
+import { pacingBhConfigs, pacingKnownAccounts, pacingWarehouseSpend } from '../../core/store.js';
+import { mergeAccounts, validAccountId, type Account } from './names.js';
 import type { CoverageRow } from './report.js';
+import { checkKeys, swapSql, swapStatements, type SalesRows } from './rows.js';
+import { SALES_SCHEMA, SALES_TABLES, SALES_TABLE_DESC, fullTable, stageTable, type SalesTable } from './schema.js';
 
-export async function ensureSalesSchema(pool: mysql.Pool): Promise<void> {
-  for (const sql of SALES_DDL) await pool.query(sql);
+/** 換表 16 句 DML 的預估掃描量上限。表都很小，正常是 0 bytes；超過代表表名指錯了。1 GiB ≈ US$0.006。 */
+const MAX_SWAP_BYTES = 2 ** 30;
+const DAY_MS = 24 * 3600 * 1000;
+
+/** 倉庫出現過的帳戶＋D／M token 表＋BH active 設定。 */
+export async function loadAccounts(): Promise<Account[]> {
+  const [known, bh] = await Promise.all([pacingKnownAccounts(), pacingBhConfigs()]);
+  return mergeAccounts([known, bh.map((b) => ({ platform: b.platform, accountId: b.accountId, name: b.accountName }))]);
 }
 
-/** 倉庫∪BH 的帳戶；同一帳戶兩邊名字不同就兩個名字都留（都拿來比對），無效 ID 與空名字略過。 */
-export async function loadAccounts(pool: mysql.Pool, bhDb = process.env.BH_DB ?? 'budget_hunter'): Promise<Account[]> {
-  const [cov] = await pool.query(`SELECT platform, account_id, MAX(account_name) AS name FROM nexus_coverage GROUP BY platform, account_id`);
-  const [bh] = await pool.query(`SELECT platform, account_id, MAX(account_name) AS name FROM \`${bhDb}\`.bh_accounts GROUP BY platform, account_id`);
-  const out = new Map<string, Account>();
-  for (const r of [...(cov as any[]), ...(bh as any[])]) {
-    const a: Account = { platform: String(r.platform), accountId: String(r.account_id ?? ''), name: String(r.name ?? '').trim() };
-    if (!validAccountId(a.accountId) || !a.name) continue;
-    const k = `${a.platform}|${a.accountId}|${normName(a.name)}`;
-    if (!out.has(k)) out.set(k, a);
+/** 帳戶×日花費（台幣，nexus_coverage），給報告算歸屬覆蓋率。 */
+export async function loadCoverage(since: string, until: string): Promise<CoverageRow[]> {
+  return (await pacingWarehouseSpend(since, until)).filter((r) => validAccountId(r.accountId));
+}
+
+/**
+ * 整批換掉 8 張 sales_ 表：檢查 → 建正式表（已存在不動 schema）→ 8 份資料 load 進暫存表 → 逐句 dry-run 估費
+ * → 一段交易 DELETE＋INSERT…SELECT → 刪暫存表 → 回讀筆數核對。任何一步失敗，正式表都維持原樣。
+ */
+export async function writeRowsToBq(rows: SalesRows, log: (s: string) => void = console.log): Promise<Record<SalesTable, number>> {
+  checkKeys(rows);
+  for (const t of SALES_TABLES) {
+    if (await bqEnsureTable({ table: fullTable(t), schema: SALES_SCHEMA[t], description: SALES_TABLE_DESC[t] })) log(`建表 ${fullTable(t)}`);
   }
-  return [...out.values()];
-}
-
-/** 帳戶×日花費（台幣），給報告算歸屬覆蓋率。 */
-export async function loadCoverage(pool: mysql.Pool, since: string): Promise<CoverageRow[]> {
-  const [rows] = await pool.query(
-    `SELECT platform, account_id, DATE_FORMAT(dt,'%Y-%m-%d') AS dt, spend FROM nexus_coverage WHERE dt >= ?`, [since],
-  );
-  return (rows as any[])
-    .filter((r) => validAccountId(String(r.account_id)))
-    .map((r) => ({ platform: String(r.platform), accountId: String(r.account_id), dt: r.dt, spend: Number(r.spend) }));
-}
-
-async function bulk(conn: mysql.PoolConnection, sql: string, rows: unknown[][]): Promise<void> {
-  for (let i = 0; i < rows.length; i += 500) await conn.query(sql, [rows.slice(i, i + 500)]);
-}
-
-/** 同一個交易裡清空全部 sales_ 表再寫入（spec §6.8）；任何一步失敗整批回滾。回傳各表寫入筆數。 */
-export async function writeSeed(pool: mysql.Pool, seed: Seed, by: string): Promise<Record<string, number>> {
-  const conn = await pool.getConnection();
+  const expirationTime = Date.now() + DAY_MS;
   try {
-    await conn.beginTransaction();
-    for (const t of [...SALES_TABLES].reverse()) await conn.query(`DELETE FROM ${t}`);
-    const ins = async (sql: string, params: unknown[]) => ((await conn.query(sql, params))[0] as mysql.ResultSetHeader).insertId;
-
-    const agencyId = new Map<string, number>();
-    for (const a of seed.agencies) {
-      agencyId.set(a.name, await ins(`INSERT INTO sales_agencies (name, attr, source, source_ref, updated_by) VALUES (?,?,?,?,?)`,
-        [a.name.slice(0, 100), a.attr, a.source, a.sourceRef.slice(0, 255), by]));
-    }
-    const clientId = new Map<string, number>();
-    for (const c of seed.clients) {
-      clientId.set(c.name, await ins(`INSERT INTO sales_clients (name, source, source_ref, updated_by) VALUES (?,?,?,?)`,
-        [c.name.slice(0, 100), c.source, c.sourceRef.slice(0, 255), by]));
-    }
-    const aliasRows = seed.aliases
-      .map((a) => [a.entityType, a.aliasNorm.slice(0, 150), (a.entityType === 'agency' ? agencyId : clientId).get(a.entityName), a.aliasRaw.slice(0, 150)])
-      .filter((r) => r[2] !== undefined);
-    // 別名衝突（DB 定序把兩個不同寫法視為相同）時保留先寫的那個
-    await bulk(conn, `INSERT IGNORE INTO sales_aliases (entity_type, alias_norm, entity_id, alias_raw) VALUES ?`, aliasRows);
-    const billingId = new Map<string, number>();
-    for (const b of seed.billingParties) {
-      billingId.set(b.name, await ins(`INSERT INTO sales_billing_parties (name, tax_id, payment_terms, source, source_ref, updated_by) VALUES (?,?,?,?,?,?)`,
-        [b.name.slice(0, 150), b.taxId, b.paymentTerms.slice(0, 20), b.source, b.sourceRef.slice(0, 255), by]));
-    }
-    const ioId = new Map<string, number>();
-    for (const x of seed.ios) {
-      ioId.set(x.key, await ins(
-        `INSERT INTO sales_ios (name, io_code, client_id, agency_id, billing_party_id, entity, ae_email, am_email, start_date, end_date,
-           status, budget_net, service_fee_pct, service_fee, setup_fee, other_fee, kpi, note, source, source_ref, updated_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [x.name.slice(0, 200), x.ioCode.slice(0, 20), x.clientName ? clientId.get(x.clientName) ?? null : null, agencyId.get(x.agencyName),
-          x.billingPartyName ? billingId.get(x.billingPartyName) ?? null : null, x.entity.slice(0, 10), x.aeEmail.slice(0, 255), x.amEmail.slice(0, 255),
-          x.start, x.end, x.status.slice(0, 20), x.budgetNet, x.serviceFeePct, x.serviceFee, x.setupFee, x.otherFee,
-          x.kpi.slice(0, 255), x.note, x.source, x.sourceRef, by]));
-    }
-    await bulk(conn, `INSERT INTO sales_io_periods (io_id, period_no, account_name_raw, ad_amount, service_fee_pct, service_fee, setup_fee, other_fee,
-        invoice_net, invoice_gross, payment_type, invoice_apply_date, invoice_no, expected_pay_date, paid_date, topup_date, note, source_row) VALUES ?`,
-      seed.periods.map((p) => [ioId.get(p.ioKey), p.periodNo.slice(0, 20), p.accountNameRaw.slice(0, 150), p.adAmount, p.serviceFeePct, p.serviceFee,
-        p.setupFee, p.otherFee, p.invoiceNet, p.invoiceGross, p.paymentType.slice(0, 20), p.invoiceApplyDate, p.invoiceNo.slice(0, 20),
-        p.expectedPayDate, p.paidDate, p.topupDate, p.note, p.sourceRow]));
-    await bulk(conn, `INSERT INTO sales_io_allocations (io_id, platform, \`month\`, planned_budget, source, note, updated_by) VALUES ?`,
-      seed.allocations.map((a) => [ioId.get(a.ioKey), a.platform, a.month, a.plannedBudget, a.source, a.note, by]));
-    await bulk(conn, `INSERT INTO sales_io_assignments (io_id, platform, account_id, source, updated_by) VALUES ?`,
-      seed.assignments.map((a) => [ioId.get(a.ioKey), a.platform, a.accountId, a.source, by]));
-    await conn.commit();
-    const out: Record<string, number> = {};
     for (const t of SALES_TABLES) {
-      const [r] = await pool.query(`SELECT COUNT(*) AS n FROM ${t}`);
-      out[t] = Number((r as any[])[0].n);
+      await bqDeleteTable(stageTable(t)); // 上次失敗留下的暫存表 schema 可能是舊的
+      await bqEnsureTable({ table: stageTable(t), schema: SALES_SCHEMA[t], expirationTime, description: '業績層級種子寫入暫存，1 天後自動刪除' });
+      await bqLoadRows(stageTable(t), SALES_SCHEMA[t], rows[t], { writeDisposition: 'WRITE_TRUNCATE' });
     }
-    return out;
-  } catch (e) {
-    await conn.rollback();
-    throw e;
+    let bytes = 0;
+    for (const sql of swapStatements()) bytes += await bqDryRun(sql);
+    log(`換表交易 dry-run：預估掃描 ${bytes} bytes（實際每句最低計 10 MB，16 句約 160 MB ≈ US$0.001）`);
+    if (bytes > MAX_SWAP_BYTES) throw new Error(`換表交易預估掃描 ${bytes} bytes，超過上限 ${MAX_SWAP_BYTES}，停止（正式表未動）`);
+    await bqQuery(swapSql(), { timeoutMs: 120_000 });
   } finally {
-    conn.release();
+    for (const t of SALES_TABLES) {
+      await bqDeleteTable(stageTable(t)).catch((e) => log(`暫存表 ${stageTable(t)} 刪除失敗（1 天後自動過期）：${e}`));
+    }
   }
+  const out = {} as Record<SalesTable, number>;
+  for (const t of SALES_TABLES) {
+    out[t] = (await bqListTableRows(fullTable(t))).length; // tabledata.list，不計費
+    if (out[t] !== rows[t].length) throw new Error(`${fullTable(t)} 回讀 ${out[t]} 列，應為 ${rows[t].length} 列`);
+  }
+  return out;
+}
+```
+
+- [ ] **Step 6: 建 `src/tools/sales/seed.ts`**
+
+```ts
+// 業績層級資料 種子流程：試算表 values → 解析 → 組 Seed → 轉 BQ 列並檢查 → 報告 →（write 時）寫 BQ。spec §6。
+import { twToday } from '../pacing/calc.js';
+import { buildSeed, type Seed } from './build.js';
+import { parseCustomers, parseDeliverTab, parseFinance } from './parse.js';
+import { attributeAccountDays, renderReport } from './report.js';
+import { checkKeys, seedToRows } from './rows.js';
+import type { SalesTable } from './schema.js';
+import { loadAccounts, loadCoverage, writeRowsToBq } from './store.js';
+
+/** 月表分頁：對齊倉庫起始日 2026-05-21，更早的月份倉庫沒有數字，先不收（spec §6.2）。 */
+export const DELIVER_TABS = ['202605', '202606', '202607', '202608', '202609', '202610'] as const;
+/** 倉庫起始日。 */
+export const COVERAGE_SINCE = '2026-05-21';
+
+export interface SeedSheets { finance: unknown[][]; customers: unknown[][]; deliver: Record<string, unknown[][]> }
+
+export async function runSeed(
+  sheets: SeedSheets, opts: { write: boolean; by: string; log?: (s: string) => void },
+): Promise<{ seed: Seed; report: string; written: Record<SalesTable, number> | null }> {
+  const log = opts.log ?? console.log;
+  const finance = parseFinance(sheets.finance);
+  const customers = parseCustomers(sheets.customers);
+  const deliver = DELIVER_TABS.flatMap((t) => {
+    const v = sheets.deliver[t];
+    if (!v) throw new Error(`缺月表分頁 ${t}`);
+    return parseDeliverTab(t, v);
+  });
+  const accounts = await loadAccounts();
+  const seed = buildSeed({ finance, customers, deliver, accounts });
+  const rows = seedToRows(seed, { by: opts.by, at: new Date().toISOString() });
+  checkKeys(rows); // dry-run 也先檢查：報告看起來沒問題、寫入時才擋下就太晚了
+  const coverage = await loadCoverage(COVERAGE_SINCE, twToday());
+  const names = new Map(accounts.map((a) => [`${a.platform}|${a.accountId}`, a.name]));
+  const report = renderReport(seed, attributeAccountDays(seed, coverage), names);
+  const adSum = seed.periods.reduce((s, p) => s + (p.adAmount ?? 0), 0);
+  log(`讀入：財務 ${finance.length} 列、客戶資料 ${customers.length} 列、月表 ${deliver.length} 列、帳戶 ${accounts.length} 個、花費 ${coverage.length} 列（帳戶×日）`);
+  log(`財務期數 ${seed.periods.length}、廣告金額合計 ${adSum.toFixed(2)}`);
+  log(`IO ${seed.ios.length}、拆分 ${seed.allocations.length}、歸屬規則 ${seed.assignments.length}；寫入前檢查通過`);
+  const written = opts.write ? await writeRowsToBq(rows, log) : null;
+  return { seed, report, written };
 }
 ```
 
@@ -1553,62 +1843,61 @@ export async function writeSeed(pool: mysql.Pool, seed: Seed, by: string): Promi
 ```ts
 // 業績層級資料 種子寫入（spec docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md §6）。
 // 先把兩份試算表匯出到 poc/sales_seed_input/（做法見 src/tools/sales/CLAUDE.md），再：
-//   npx tsx scripts/sales_seed.mts           只產報告 poc/sales_seed_report.md，不寫 DB
-//   npx tsx scripts/sales_seed.mts --write   清空 sales_ 全部表後重寫（.env 指向的是正式 Cloud SQL）
+//   npx tsx scripts/sales_seed.mts           只產報告 poc/sales_seed_report.md，不寫 BQ
+//   npx tsx scripts/sales_seed.mts --write   整批換掉 BQ popinpoc1.reporting.sales_* 8 張表
+// 帳戶與花費讀 Cloud SQL：本機先開 cloud-sql-proxy，再以 DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off 執行（見 ad_tools CLAUDE.md）。
 import 'dotenv/config';
 import fs from 'node:fs';
-import { getPool } from '../src/core/store.js';
-import { parseFinance, parseCustomers, parseDeliverTab } from '../src/tools/sales/parse.js';
-import { buildSeed } from '../src/tools/sales/build.js';
-import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
-import { ensureSalesSchema, loadAccounts, loadCoverage, writeSeed } from '../src/tools/sales/store.js';
+import { DELIVER_TABS, runSeed } from '../src/tools/sales/seed.js';
 
 const DIR = 'poc/sales_seed_input';
-const DELIVER_TABS = ['202605', '202606', '202607', '202608', '202609', '202610'];
-const COVERAGE_SINCE = '2026-05-21'; // 倉庫起始日
 const read = (f: string): unknown[][] => JSON.parse(fs.readFileSync(`${DIR}/${f}`, 'utf8')).values;
 
-const finance = parseFinance(read('finance_io.json'));
-const customers = parseCustomers(read('finance_customers.json'));
-const deliver = DELIVER_TABS.flatMap((t) => parseDeliverTab(t, read(`deliver_${t}.json`)));
-const pool = getPool();
-if (!pool) throw new Error('DB 未設定（.env 的 DB_HOST／DB_USER）');
-const accounts = await loadAccounts(pool);
-const seed = buildSeed({ finance, customers, deliver, accounts });
-const names = new Map(accounts.map((a) => [`${a.platform}|${a.accountId}`, a.name]));
-fs.writeFileSync('poc/sales_seed_report.md', renderReport(seed, attributeAccountDays(seed, await loadCoverage(pool, COVERAGE_SINCE)), names));
-const adSum = seed.periods.reduce((s, p) => s + (p.adAmount ?? 0), 0);
-console.log(`讀入：財務 ${finance.length} 列、客戶資料 ${customers.length} 列、月表 ${deliver.length} 列、帳戶 ${accounts.length} 個`);
-console.log(`財務期數 ${seed.periods.length}、廣告金額合計 ${adSum}`);
-console.log(`IO ${seed.ios.length}、拆分 ${seed.allocations.length}、歸屬規則 ${seed.assignments.length}；報告 poc/sales_seed_report.md`);
-if (process.argv.includes('--write')) {
-  await ensureSalesSchema(pool);
-  console.log('已寫入：', await writeSeed(pool, seed, 'seed'));
-} else {
-  console.log('未寫入（加 --write 才寫 DB）');
-}
-await pool.end();
+const res = await runSeed(
+  {
+    finance: read('finance_io.json'),
+    customers: read('finance_customers.json'),
+    deliver: Object.fromEntries(DELIVER_TABS.map((t) => [t, read(`deliver_${t}.json`)])),
+  },
+  { write: process.argv.includes('--write'), by: 'seed' },
+);
+fs.writeFileSync('poc/sales_seed_report.md', res.report);
+console.log('報告：poc/sales_seed_report.md');
+console.log(res.written ? `已寫入：${JSON.stringify(res.written)}` : '未寫入（加 --write 才寫 BQ）');
+process.exit(0); // core/store.ts 的連線池不會自己關
 ```
 
 - [ ] **Step 8: 型別檢查與全部測試**
 
 Run: `npx tsc --noEmit && npx tsx tests/verify_sales.mts && npx tsx tests/verify_pacing.mts`
-Expected: tsc 無輸出；verify_sales「全部通過：31 項」；verify_pacing 全部 ✓
+Expected: tsc 無輸出；verify_sales「全部通過：39 項」；verify_pacing 全部 ✓（項數與改之前相同）
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: 確認沒有動到既有程式（除了 pacing/sheet.ts 的兩個 export）**
+
+以本 plan 的 commit 當基準：
 
 ```bash
-git add src/tools/sales/schema.ts src/tools/sales/store.ts src/core/store.ts scripts/sales_seed.mts tests/verify_sales.mts
-git commit -m "feat(sales): sales_ 8 張表 DDL、DB 讀寫與種子 CLI
+BASE=$(git log -1 --format=%H -- docs/superpowers/plans/2026-10-16-sales-io-hierarchy-bq.md)
+git diff --stat $BASE -- src/core src/server.ts src/tools/pacing src/tools/nexus
+git diff $BASE -- src/tools/pacing/sheet.ts
+```
+
+Expected: 第一句只列出 `src/tools/pacing/sheet.ts`；第二句只有兩行 `function` → `export function`。（如果其他 session 在這段期間 commit 了 nexus／pacing 的改動，會一起列出；用 `git log --oneline $BASE..HEAD -- <檔案>` 逐一確認那些 commit 不是本 plan 產生的即可。）
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/tools/sales/names.ts src/tools/sales/store.ts src/tools/sales/seed.ts scripts/sales_seed.mts tests/verify_sales.mts
+git commit -m "feat(sales): 讀帳戶與花費、BQ 暫存表＋交易整批寫入、種子 CLI
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 6: 匯出試算表、dry-run、取得同意後寫入正式 DB
+### Task 7: 匯出試算表、dry-run、取得同意後寫入正式 BQ
 
-這個 Task 由 Claude（有 Google Sheets MCP）執行，不交給沒有 MCP 的 subagent。
+這個 Task 由 Claude（有 Google Sheets MCP）在主 session 執行，不交給沒有 MCP 的 subagent。
 
 **Files:**
 - Create（不進 repo）：`poc/sales_seed_input/finance_io.json`、`finance_customers.json`、`deliver_202605.json` … `deliver_202610.json`、`poc/sales_seed_report.md`
@@ -1616,8 +1905,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（狀態行）
 
 **Interfaces:**
-- Consumes: Task 5 `scripts/sales_seed.mts`
-- Produces: 正式 Cloud SQL `ad_tools.sales_*` 8 張表與資料
+- Consumes: Task 6 `scripts/sales_seed.mts`
+- Produces: BQ `popinpoc1.reporting.sales_*` 8 張表與資料
 
 - [ ] **Step 1: 匯出試算表成 JSON**
 
@@ -1631,14 +1920,24 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 確認 `git status --short poc/` 沒有任何輸出（`poc/` 已 gitignore）。
 
-- [ ] **Step 2: Dry-run**
+- [ ] **Step 2: 開 cloud-sql-proxy（背景）**
 
-Run: `npx tsx scripts/sales_seed.mts`
-Expected: 印出讀入列數（財務約 349、月表約 290）、IO／拆分／歸屬筆數，最後一行「未寫入（加 --write 才寫 DB）」；產生 `poc/sales_seed_report.md`。
+用 Bash `run_in_background` 執行：
 
-- [ ] **Step 3: 獨立核對財務金額**
+```bash
+cloud-sql-proxy popinpoc1:asia-east1:internal-tool --port 3307 --quota-project popinpoc1
+```
 
-用另一條路算試算表的廣告金額合計，要等於 Step 2 印的「廣告金額合計」，期數要等於財務列數：
+等輸出出現 `ready for new connections` 再往下。`.env` 的 `DB_PASSWORD` 若是空的，從 Secret Manager `ad-tools-timeoff-db-password` 取，只放在指令的環境變數裡，不寫進檔案、不印出來。
+
+- [ ] **Step 3: Dry-run**
+
+Run: `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off npx tsx scripts/sales_seed.mts`
+Expected: 印出讀入列數（財務約 349、月表約 290）、IO／拆分／歸屬筆數、「寫入前檢查通過」，最後一行「未寫入（加 --write 才寫 BQ）」；產生 `poc/sales_seed_report.md`。這一步完全不碰 BQ。
+
+- [ ] **Step 4: 獨立核對財務金額**
+
+用另一條路算試算表的廣告金額合計，要等於 Step 3 印的「廣告金額合計」，期數要等於財務列數：
 
 ```bash
 node -e '
@@ -1649,12 +1948,12 @@ for (const r of v.slice(1)) {
   if (!String(r[1] ?? "").trim() && !String(r[4] ?? "").trim()) continue;
   n++; const x = Number(String(r[ci] ?? "").replace(/[,\s$]/g, "")); if (Number.isFinite(x)) s += x;
 }
-console.log({ rows: n, adSum: s });'
+console.log({ rows: n, adSum: s.toFixed(2) });'
 ```
 
-Expected: `rows` 等於 Step 2 的財務列數與期數；`adSum` 等於 Step 2 的廣告金額合計。
+Expected: `rows` 等於 Step 3 的財務列數與期數；`adSum` 等於 Step 3 的廣告金額合計。
 
-- [ ] **Step 4: 讀報告做 spec §7 抽查**
+- [ ] **Step 5: 讀報告做 spec §7 抽查**
 
 讀 `poc/sales_seed_report.md`，逐項確認並記下結果：
 1. 鮮味帖 A12 是一張 IO、兩個帳戶名（查 §7「沒有任何歸屬規則的 IO」會有它——兩個帳戶名都對不到倉庫，符合預期）。
@@ -1662,52 +1961,71 @@ Expected: `rows` 等於 Step 2 的財務列數與期數；`adSum` 等於 Step 2 
 3. 默沙東 HPV：D 34196 與 R 10003 不在「未歸屬」清單。
 4. 各平台已歸屬占比；未歸屬前 30 大帳戶、對不到的帳戶名清單。
 
-- [ ] **Step 5: 給使用者看報告摘要，取得寫入同意**
+- [ ] **Step 6: 記下既有表的修改時間（證明寫入不會動到它們）**
 
-回報：各表筆數、四平台已歸屬／衝突／走期外／未歸屬金額與占比、衝突與未歸屬前幾名、對不到的帳戶名數量、待確認事項。明講「`--write` 會在正式 Cloud SQL `ad_tools` 建 8 張 `sales_` 表並寫入」。**等使用者同意才做 Step 6。**
-
-- [ ] **Step 6: 寫入**
-
-Run: `npx tsx scripts/sales_seed.mts --write`
-Expected: 最後印「已寫入：{ sales_agencies: …, …, sales_io_assignments: … }」，各數字等於 Step 2／報告 §1 的筆數（`sales_aliases` 可能因 `INSERT IGNORE` 略少，差多少要記下）。
-
-- [ ] **Step 7: 重跑一次確認冪等**
-
-Run: `npx tsx scripts/sales_seed.mts --write`
-Expected: 各表筆數與 Step 6 完全相同（清空重寫，不會變兩倍）。
-
-- [ ] **Step 8: 寫模組備忘 `src/tools/sales/CLAUDE.md`**
-
-```markdown
-## 業績層級資料（`src/tools/sales/`，Cloud SQL `ad_tools.sales_*`）
-
-- **目的**：經銷商／client／IO（委刊單）＋IO 歸屬到平台帳戶的主檔，給業績報表、AM dashboard、之後的走速改版用。設計 `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（關聯圖 §4.0、歸屬語意 §5、已知限制 §9）。
-- **現況**：只有資料，**沒有管理介面**；第一次寫入只為了讓前端 demo 有資料，比對不完美可接受。不留歷史。
-- **分層**：`names.ts`（名稱比對）→ `parse.ts`（試算表列）→ `build.ts`（組種子）→ `report.ts`（帳戶層歸屬覆蓋率）→ `store.ts`（建表、清空重寫）。測試 `npx tsx tests/verify_sales.mts`。
-- **重跑種子**：本機 ADC 沒有試算表權限 ⇒ 由 Claude 用 Google Sheets MCP 把財務「在線委刊走期表」「客戶資料表(財務填)」與月表 202605~202610 匯出成 `poc/sales_seed_input/*.json`（`{"values": [...]}`，**含財務資料，不進 repo**），再 `npx tsx scripts/sales_seed.mts`（只產報告）→ 看 `poc/sales_seed_report.md` → `--write`（同一交易清空 8 張表再寫）。管理介面上線後就不要再跑，會蓋掉人工資料。
-- **帳戶清單**＝`nexus_coverage` ∪ BH `bh_accounts`（只讀）；`nan` 等無效 ID 略過。帳戶名比對三級（完全相同／去前綴相同 一起收，互相包含 ≥3 字只在前兩級沒有時用），對不到就略過、列在報告。
+```bash
+for t in nexus_customer_account_map nexus_integrated_daily nexus_d_ad_daily; do
+  bq show --format=prettyjson popinpoc1:reporting.$t | python3 -c "import json,sys; d=json.load(sys.stdin); print('$t', d['lastModifiedTime'])"
+done
+bq ls --max_results=1000 popinpoc1:reporting | grep -c sales_ || true
 ```
 
-- [ ] **Step 9: 更新 spec 狀態行**
+Expected: 三個 `lastModifiedTime` 記下來；`sales_` 開頭的表 0 張。（`bq show`／`bq ls` 是 metadata 查詢，不計費。`nexus_d_ad_daily` 每天批次都會寫，Step 9 只比前兩個。）
+
+- [ ] **Step 7: 給使用者看報告摘要，取得寫入同意**
+
+回報：各表筆數、四平台已歸屬／衝突／走期外／未歸屬金額與占比、衝突與未歸屬前幾名、對不到的帳戶名數量、待確認事項。明講：「`--write` 會在 BQ `popinpoc1.reporting` 建 8 張 `sales_` 表並寫入（建表與 load 不計費，換表交易約 US$0.001）；不會動既有的 `nexus_*` 表／view 和 audience_center。」**等使用者同意才做 Step 8。**
+
+- [ ] **Step 8: 寫入**
+
+Run: `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off npx tsx scripts/sales_seed.mts --write`
+Expected: 印出 8 行「建表 popinpoc1.reporting.sales_…」、「換表交易 dry-run：預估掃描 0 bytes…」，最後「已寫入：{"sales_agencies":…, …}」，各數字等於報告 §1 的筆數（`writeRowsToBq` 已逐表核對，不符會 throw）。
+
+- [ ] **Step 9: 重跑一次確認冪等，並確認既有表沒被動到**
+
+Run: `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off npx tsx scripts/sales_seed.mts --write`
+Expected: 不再印「建表」；「已寫入」各表筆數與 Step 8 完全相同（整批換掉，不會變兩倍）。
+
+再跑 Step 6 的指令：`nexus_customer_account_map`、`nexus_integrated_daily` 的 `lastModifiedTime` 與 Step 6 相同；`sales_` 開頭的表剛好 8 張（`bq ls … | grep sales_` 不能出現 `sales__stage_`）。
+
+- [ ] **Step 10: 關掉 cloud-sql-proxy**
+
+停掉 Step 2 開的背景程序（TaskStop 或 `kill` 該 PID），確認 `pgrep -fl cloud-sql-proxy` 沒有本 session 開的那個。其他 session 開的不要動。
+
+- [ ] **Step 11: 寫模組備忘 `src/tools/sales/CLAUDE.md`**
+
+```markdown
+## 業績層級資料（`src/tools/sales/`，BigQuery `popinpoc1.reporting.sales_*`）
+
+- **目的**：經銷商／client／IO（委刊單）＋IO 歸屬到平台帳戶的主檔。主要給 audience_center 的 `/ad-performance`（pacplatform.net/ad-performance）之後 JOIN 出 client／經銷商／屬性維度，也給 AM dashboard、走速改版用。設計 `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（為何放 BQ §2、表結構 §4、關聯圖 §4.0、歸屬語意 §5、換表流程 §6.8、已知限制 §9）。
+- **現況**：只有資料，**沒有管理介面**，`/ad-performance` 也還沒接；第一次寫入只為了讓前端 demo 有資料，比對不完美可接受。不留歷史。
+- **分層**：`names.ts`（名稱比對）→ `parse.ts`（試算表列）→ `build.ts`（組 Seed）→ `rows.ts`（轉 BQ 列、`checkKeys`、換表交易 SQL）→ `report.ts`（帳戶層歸屬覆蓋率）；I/O 只在 `store.ts`；`seed.ts` 串流程。測試 `npx tsx tests/verify_sales.mts`。
+- **BQ 不擋資料錯誤**：唯一鍵、外鍵都靠 `checkKeys`；之後誰要直接寫這些表（管理介面）也要自己檢查。**id 每次重跑都會換**，別的系統不要存 id。
+- **重跑種子**：本機 ADC 沒有試算表權限 ⇒ 由 Claude 用 Google Sheets MCP 把財務「在線委刊走期表」「客戶資料表(財務填)」與月表 202605~202610 匯出成 `poc/sales_seed_input/*.json`（`{"values": [...]}`，**含財務資料，不進 repo**）→ 開 cloud-sql-proxy → `DB_HOST=127.0.0.1 DB_PORT=3307 DB_SSL=off npx tsx scripts/sales_seed.mts`（只產報告）→ 看 `poc/sales_seed_report.md` → 加 `--write`（暫存表＋一段交易整批換掉 8 張表，約 US$0.001）→ 關 proxy。管理介面上線後就不要再跑，會蓋掉人工資料。
+- **改 schema**：`bqEnsureTable` 對已存在的表不改 schema，換表交易的 `INSERT … SELECT` 會因欄位對不上而整段 ROLLBACK（正式表不變）。要加欄位先 `bq update` 正式表或刪表重建，再跑種子。
+- **帳戶清單**＝`nexus_coverage` 出現過的帳戶＋D／M token 表＋BH `bh_accounts` active（都經 `core/store.ts` 既有函式、唯讀）；`nan` 等無效 ID 略過。帳戶名比對三級（完全相同／去前綴相同 一起收，互相包含 ≥3 字只在前兩級沒有時用），對不到就略過、列在報告。
+```
+
+- [ ] **Step 12: 更新 spec 狀態行**
 
 `docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md` 第 5 行：
 
 ```markdown
-- 狀態：設計待審
+- 狀態：設計待審（2026-10-16 改版：儲存位置改 BQ）
 ```
-改成（日期與筆數填 Step 6 的實際結果）：
+改成（日期與筆數填 Step 8 的實際結果）：
 ```markdown
-- 狀態：已實作；<YYYY-MM-DD> 種子寫入正式 Cloud SQL（IO <n> 張、歸屬規則 <n> 條）。報告 `poc/sales_seed_report.md`（不進 repo）
+- 狀態：已實作；<YYYY-MM-DD> 種子寫入 BQ `popinpoc1.reporting.sales_*`（IO <n> 張、歸屬規則 <n> 條）。報告 `poc/sales_seed_report.md`（不進 repo）
 ```
 
-- [ ] **Step 10: Commit（不 push）**
+- [ ] **Step 13: Commit（不 push）**
 
 ```bash
 git add src/tools/sales/CLAUDE.md docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md
-git status --short   # 確認沒有 poc/ 底下的檔案
-git commit -m "docs(sales): 模組備忘與 spec 狀態更新（種子已寫入）
+git status --short   # 確認沒有 poc/ 底下的檔案、也沒有其他 session 未 commit 的檔案被加進來
+git commit -m "docs(sales): 模組備忘與 spec 狀態更新（種子已寫入 BQ）
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-回報使用者：commit 清單、寫入筆數、已歸屬占比、**尚未 push**（push main 會自動部署，`getPool` export 與 pacing 的兩個 export 不影響執行行為），問要不要 push。
+回報使用者：commit 清單、寫入筆數、已歸屬占比、既有表 `lastModifiedTime` 沒變、proxy 已關、**尚未 push**（push main 會自動部署 ad_tools；本 plan 對線上行為的唯一改動是 pacing 的兩個 export，不影響執行；`src/tools/sales/` 沒有路由會呼叫），問要不要 push。
