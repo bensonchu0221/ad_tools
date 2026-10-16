@@ -6,6 +6,7 @@ import {
 } from '../src/tools/sales/names.js';
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
 import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
+import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -305,6 +306,46 @@ await ok('k. 參照完整：IO 的經銷商／client／付款方都存在、子�
   for (const x of [...SEED.periods, ...SEED.allocations, ...SEED.assignments]) assert.ok(keys.has(x.ioKey), x.ioKey);
   for (const a of SEED.aliases) assert.ok((a.entityType === 'agency' ? ag : cl).has(a.entityName), a.aliasRaw);
   assert.equal(new Set(SEED.ios.map((i) => `${i.source}|${i.sourceRef}`)).size, SEED.ios.length);
+});
+
+// ---------- report ----------
+
+await ok('帳戶層歸屬：恰好一張＝已歸屬、兩張＝衝突、有規則但不在走期（含 TBC）＝走期外、沒規則＝未歸屬', () => {
+  const mk = (key: string, name: string, start: string | null, end: string | null) => ({ key, name, start, end }) as SeedIo;
+  const seed = {
+    ios: [mk('A', '體健丸', '2026-10-01', '2026-10-14'), mk('B', '保血平丸', '2026-10-01', '2026-10-07'), mk('C', '九月', '2026-09-01', '2026-09-30'), mk('T', 'TBC', null, null)],
+    assignments: [
+      { ioKey: 'A', platform: 'D', accountId: '1', source: 'deliver' },
+      { ioKey: 'B', platform: 'D', accountId: '1', source: 'deliver' },
+      { ioKey: 'C', platform: 'D', accountId: '2', source: 'deliver' },
+      { ioKey: 'T', platform: 'R', accountId: '3', source: 'deliver' },
+    ],
+  } as unknown as Seed;
+  const at = attributeAccountDays(seed, [
+    { platform: 'D', accountId: '1', dt: '2026-10-03', spend: 100 },
+    { platform: 'D', accountId: '1', dt: '2026-10-10', spend: 50 },
+    { platform: 'D', accountId: '1', dt: '2026-10-20', spend: 30 },
+    { platform: 'D', accountId: '2', dt: '2026-10-03', spend: 20 },
+    { platform: 'D', accountId: '9', dt: '2026-10-03', spend: 7 },
+    { platform: 'R', accountId: '3', dt: '2026-10-03', spend: 5 },
+  ]);
+  assert.deepEqual(at.byPlatform.get('D'), { attributed: 50, conflict: 100, outOfPeriod: 50, unassigned: 7 });
+  assert.deepEqual(at.byPlatform.get('R'), { attributed: 0, conflict: 0, outOfPeriod: 5, unassigned: 0 });
+  assert.deepEqual(at.conflicts, [{ platform: 'D', accountId: '1', ios: ['保血平丸', '體健丸'], spend: 100 }]);
+  assert.deepEqual(at.unassigned, [{ platform: 'D', accountId: '9', spend: 7 }]);
+});
+
+await ok('報告：筆數、覆蓋率表、未歸屬帳戶、對不到的帳戶名、待確認都有出現', () => {
+  const at = attributeAccountDays(SEED, [
+    { platform: 'D', accountId: '37975', dt: '2026-10-10', spend: 1000 },
+    { platform: 'D', accountId: '777', dt: '2026-10-10', spend: 3 },
+  ]);
+  const md = renderReport(SEED, at, new Map([['D|777', '某帳戶']]));
+  assert.match(md, /\| nexus_sales_ios \| 12 \|/);
+  assert.match(md, /\| D \| 1,000 \| 0 \| 0 \| 3 \| 99\.7% \|/);
+  assert.match(md, /- D 777 某帳戶：3/);
+  assert.match(md, /- 南灣文教有限公司/);
+  assert.match(md, /香港虎鯨/);
 });
 
 // <<後續 Task 的測試接在這裡>>
