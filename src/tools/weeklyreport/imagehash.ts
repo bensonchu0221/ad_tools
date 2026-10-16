@@ -61,37 +61,71 @@ async function videoSnapshot(url: string): Promise<Buffer | null> {
   return (await ffmpegFrame(url, 3)) ?? (await ffmpegFrame(url, 0));
 }
 
-/** 下載素材縮圖（去重；單張失敗回 null 不中斷） */
+/** 同時下載幾張：以前全部一起發，素材多（job 196 共 83 張、R／M 原圖一張近 1MB）時頻寬搶不過來，個別逾時。 */
+export const IMG_CONCURRENCY = 6;
+/** 每張最多試幾次；逾時一次比一次長（第一次 8 秒＝舊值）。 */
+const IMG_TIMEOUTS_MS = [8000, 15000, 20000];
+
+/** 不必重試的失敗（重試結果也一樣）：4xx（429 除外）、回的不是圖片。 */
+class PermanentImageError extends Error {}
+
+async function fetchImageOnce(url: string, timeoutMs: number): Promise<DownloadedImage> {
+  // 照舊：縮圖一律換成 300x157 的縮版
+  const fetchUrl = url.replace(/__scv1__\d+x\d+/, '__scv1__300x157');
+  const res = await fetch(fetchUrl, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) {
+    const msg = `HTTP ${res.status}`;
+    throw res.status >= 400 && res.status < 500 && res.status !== 429 ? new PermanentImageError(msg) : new Error(msg);
+  }
+  const type = res.headers.get('content-type') ?? '';
+  // 副檔名沒露餡的影片／HTML 錯誤頁也擋掉：只收 image/*
+  if (!type.startsWith('image/')) throw new PermanentImageError(`not image: ${type}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const extension = type.includes('png') ? 'png' : type.includes('gif') ? 'gif' : 'jpeg';
+  return { buffer: buf, extension };
+}
+
+/**
+ * 下載單張；逾時／網路錯誤／5xx／429 重試（最多 IMG_TIMEOUTS_MS.length 次），永久性錯誤直接放棄。
+ * 2026-10-16 起：以前 8 秒逾時、不重試，偶爾一張失敗 ⇒ 該圖退回 URL 判同圖、素材被拆成另一列且沒有縮圖
+ * （job 191 同一份連跑素材 6 列／4 列）。
+ */
+async function downloadOne(url: string): Promise<DownloadedImage | null> {
+  // R 影音素材的 assetimage 是 mp4 本體（單支 10~24MB），R 的報表／管理 API 都沒有封面圖欄位。
+  // 2026-10-07 job 195 曾把 5 支 mp4 當 jpeg 塞進 xlsx（95MB），超過 Cloud Run 32MiB 回應上限→下載 500。
+  // 現改成 ffmpeg 截一格當縮圖；截不到就當無縮圖（ffmpeg 自己有 20 秒逾時、第 3 秒失敗會再試第 0 秒，不另外重試）
+  if (VIDEO_URL.test(url)) {
+    const buf = await videoSnapshot(url);
+    return buf ? { buffer: buf, extension: 'jpeg' } : null;
+  }
+  for (let i = 0; i < IMG_TIMEOUTS_MS.length; i++) {
+    try {
+      return await fetchImageOnce(url, IMG_TIMEOUTS_MS[i]);
+    } catch (e) {
+      if (e instanceof PermanentImageError) return null;
+      if (i < IMG_TIMEOUTS_MS.length - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
+  }
+  return null;
+}
+
+/** 下載素材縮圖（去重；同時 IMG_CONCURRENCY 張；單張重試後仍失敗回 null 不中斷）。回傳順序＝輸入順序。 */
 export async function downloadImages(urls: string[]): Promise<Map<string, DownloadedImage | null>> {
   const unique = [...new Set(urls.filter(Boolean))];
-  const out = new Map<string, DownloadedImage | null>();
-  await Promise.all(
-    unique.map(async (url) => {
+  const results: (DownloadedImage | null)[] = new Array(unique.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < unique.length) {
+      const i = next++;
       try {
-        // R 影音素材的 assetimage 是 mp4 本體（單支 10~24MB），R 的報表／管理 API 都沒有封面圖欄位。
-        // 2026-10-07 job 195 曾把 5 支 mp4 當 jpeg 塞進 xlsx（95MB），超過 Cloud Run 32MiB 回應上限→下載 500。
-        // 現改成 ffmpeg 截一格當縮圖；截不到就當無縮圖
-        if (VIDEO_URL.test(url)) {
-          const buf = await videoSnapshot(url);
-          out.set(url, buf ? { buffer: buf, extension: 'jpeg' } : null);
-          return;
-        }
-        // 照舊：縮圖一律換成 300x157 的縮版
-        const fetchUrl = url.replace(/__scv1__\d+x\d+/, '__scv1__300x157');
-        const res = await fetch(fetchUrl, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const type = res.headers.get('content-type') ?? '';
-        // 副檔名沒露餡的影片／HTML 錯誤頁也擋掉：只收 image/*
-        if (!type.startsWith('image/')) throw new Error(`not image: ${type}`);
-        const buf = Buffer.from(await res.arrayBuffer());
-        const extension = type.includes('png') ? 'png' : type.includes('gif') ? 'gif' : 'jpeg';
-        out.set(url, { buffer: buf, extension });
+        results[i] = await downloadOne(unique[i]);
       } catch {
-        out.set(url, null);
+        results[i] = null;
       }
-    })
-  );
-  return out;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(IMG_CONCURRENCY, unique.length) }, worker));
+  return new Map(unique.map((u, i) => [u, results[i]]));
 }
 
 /** 嵌進 xlsx 的縮圖寬度上限：Excel 裡只顯示 191×100，600＝顯示寬度約 3 倍，高解析度螢幕仍清楚 */

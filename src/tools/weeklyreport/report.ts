@@ -904,6 +904,11 @@ export async function fetchWeeklyRaw(
 
   onPhase?.('下載素材縮圖中…');
   const images = await downloadImages(collectImageUrls(dRaw, rRaw, mRaw));
+  const imgFailed = [...images.values()].filter((v) => !v).length;
+  if (imgFailed) {
+    // 抓不到的圖只能用網址判同圖：跨平台的同一張圖認不出來、素材分析會多拆一列，那列也沒有縮圖（數字加總不受影響）
+    warnings.push(`有 ${imgFailed} 張素材圖重試後仍抓不到，素材分析中這幾張沒有縮圖、也無法跟其他平台的同一張圖合併`);
+  }
   const imageKeys = await clusterImageUrls(images); // URL → identity key（空 URL 不在 map 內）
   return { dRaw, rRaw, mRaw, pRaw, deviceAgg, deviceRaw, warnings, images, imageKeys };
 }
