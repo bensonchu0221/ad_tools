@@ -2,7 +2,7 @@
 
 popin 內部工具集（取代舊 dctool）。
 - tool#1＝廣告預覽：在「真實媒體文章頁」的 popin 廣告位換上廣告主素材後供 AM 截圖，取代舊 PPT 產出。
-- tool#2＝整合週報（原 D&R 週報）：整合 Discovery（D）+ Rixbee（R）+ MGID（M）+ Prism（P）四平台報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device/文案八工作表），取代舊 weeklyreport。2026-07-11 併入 MGID、改名整合週報；2026-09-10 併入 Prism。
+- tool#2＝整合週報（原 D&R 週報）：整合 Discovery（D）+ Rixbee（R）+ MGID（M）+ Prism（P）四平台報表產出 Excel（日/週/素材/受眾/裝置/Raw/raw_data_device/文案八工作表），取代舊 weeklyreport。2026-07-11 併入 MGID、改名整合週報；2026-09-10 併入 Prism。2026-10-16 起倉庫（tool#9）已有的日子改讀倉庫（env `WEEKLY_DATA_SOURCE` 切 auto／nexus／api）。
 - tool#3＝AdStream（廣告凝視者）：多 D／R／MGID／Prism 帳戶原始報表定期同步到指定 Google Sheet（排程跑 T-1），供 BI 直接吃 raw；另有 integrated／device_summary 整合分頁。
 - tool#4＝GCP 資源（GCP Watch）：GCP 專案 popinpoc1 的 Memorystore Redis／Cloud SQL 用量即時監看，唯讀 Cloud Monitoring。2026-08-17 建立（起因：Redis 用滿導致爬蟲寫不進去，事後才發現）。2026-09-01 用戶可見名稱由「資源看板」改為「GCP 資源」。
 - tool#5＝MGID 媒體報表：廣告主角度看各媒體（source）成效。排程把 `day×source` raw 寫入 `mgid_source_raw`，頁面讀庫組成 MSN 合併／折線／堆積／合計／每日鑽取。不即時打 API。設計 `docs/superpowers/specs/2026-08-24-mgid-source-report-design.md`。

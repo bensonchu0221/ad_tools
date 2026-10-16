@@ -2509,6 +2509,23 @@ export async function nexusCoveredRows(platform: NexusPlatform, accountId: strin
   return Number((rows as any[])[0]?.n ?? 0);
 }
 
+/**
+ * 整合週報讀倉庫用（2026-10-16）：某平台這些帳戶（D／M 一帳一 job；R／P 與 M 裝置 job 是 '*'）
+ * 跟區間有重疊的「成功」job 區間。週報用它判斷哪幾天倉庫已經寫好、可以不打平台 API。
+ */
+export async function nexusSuccessRanges(
+  platform: NexusPlatform, accountIds: string[], sd: string, ed: string
+): Promise<{ accountId: string; sd: string; ed: string }[]> {
+  if (!accountIds.length) return [];
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT account_id, DATE_FORMAT(sd, '%Y-%m-%d') AS sd, DATE_FORMAT(ed, '%Y-%m-%d') AS ed FROM nexus_jobs
+      WHERE platform = ? AND account_id IN (?) AND status = 'success' AND sd <= ? AND ed >= ?`,
+    [platform, accountIds, ed, sd]
+  );
+  return (rows as any[]).map((r) => ({ accountId: String(r.account_id), sd: String(r.sd), ed: String(r.ed) }));
+}
+
 export interface NexusCoverageEntry { accountId: string; accountName: string; dt: string; factRows: number; imp: number; spend: number }
 
 /**

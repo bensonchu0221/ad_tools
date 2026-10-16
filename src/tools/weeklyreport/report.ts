@@ -11,6 +11,9 @@ import {
 } from '../../core/popin.js';
 import { getDAccountTokenById, getMgidTokenById, listMgidAccounts } from '../../core/store.js';
 import { downloadImages, clusterImageUrls } from './imagehash.js';
+import {
+  planWeeklySources, readNexusD, readNexusR, readNexusM, readNexusP, daysBetween, API_MAX_DAYS, type Segment,
+} from './nexussource.js';
 import type { UserType } from '../../core/rixbee.js';
 import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidDeviceRow } from '../../core/mgid.js';
 import { fetchPrismReport, normalizePrismDate, type PrismReportRow } from '../../core/prism.js';
@@ -98,16 +101,43 @@ function addTo(agg: MetricAgg, imp: number, click: number, spend: number, cv1: n
   agg.cv4 += cv4;
 }
 
-// 裝置分析的固定桶與排序。D 端只填得了 PC/Mobile（campaign 層 platform_cv=1
-// 對 Tablet/Xbox 不回 imp/click/charge，僅 mcv+cv事件，見 poc/verify_d_device.mts）；
-// Tablet/Others 由 R 的 device_type 維度補上（見 R_DEVICE_BUCKET / fetchRDeviceAgg）。
+// 裝置分析的固定桶與排序。D 端 campaign 層 platform_cv=1 只有 PC/Mobile 有 imp/click/charge，
+// Tablet/Xbox 僅給轉換事件（見 poc/verify_d_device.mts）⇒ D 的 Others＝總數 − PC − Mobile（addDOthers），D 的 Tablet 留空；
+// R/M/P 四桶都填得到。
 const DEVICE_LABELS = ['PC', 'Mobile', 'Tablet', 'Others'] as const;
 
-// D campaign 層裝置回應的欄位前綴 → 桶（只有 PC/Mobile 有 base 指標）
+// D campaign 層裝置回應的欄位前綴 → 桶。others_* 不是 API 原生欄位，是 addDOthers 算出來寫回列上的。
 const D_DEVICES = [
   { prefix: 'pc', label: 'PC' },
   { prefix: 'mobile', label: 'Mobile' },
+  { prefix: 'others', label: 'Others' },
 ] as const;
+
+const D_OTHER_PREFIXES = ['tablet', 'xbox'];
+const D_DEVICE_BASE = new Set(['imp', 'click', 'charge', 'ctr', 'cpc', 'cpm', 'cvr']);
+
+/**
+ * D 裝置 Others（2026-10-16，與 nexus 倉庫同口徑，見 nexus fetch.ts toDDeviceRows）：
+ * Others＝不分裝置總數 − PC − Mobile（平板、Xbox 等；平台不給它們的曝光／點擊／花費、分不開），
+ * 轉換事件＝tablet_＋xbox_ 前綴加總。結果寫回列上的 others_* 欄，給 dDeviceMetric 用 'others' 前綴取。
+ * 實測 37975 仙桃牌 9/08~10/05：總數 7,763,145／14,458／92,453.22 − Mobile ⇒ Others 225,517 曝光／176 點擊／1,112 元。
+ * 以前週報只取 PC/Mobile，這塊整個沒算進裝置分析（裝置加總 < D 總數）。
+ */
+export function addDOthers(row: any): any {
+  if (!row || typeof row !== 'object') return row;
+  row.others_imp = Math.max(0, num(row.imp) - num(row.pc_imp) - num(row.mobile_imp));
+  row.others_click = Math.max(0, num(row.click) - num(row.pc_click) - num(row.mobile_click));
+  row.others_charge = Math.max(0, Math.round((num(row.charge) - num(row.pc_charge) - num(row.mobile_charge)) * 10000) / 10000);
+  for (const prefix of D_OTHER_PREFIXES) {
+    for (const [k, v] of Object.entries(row)) {
+      if (!k.startsWith(`${prefix}_`)) continue;
+      const ev = k.slice(prefix.length + 1);
+      if (D_DEVICE_BASE.has(ev)) continue;
+      row[`others_${ev}`] = num(row[`others_${ev}`]) + num(v);
+    }
+  }
+  return row;
+}
 
 // R device_type 代碼 → 裝置桶。文件(help_report)：2=Desktop、1=Mobile、5=Tablet、
 // 3=TV Device、7=Set Top Box。依需求 Desktop→PC、Mobile→Mobile、Tablet→Tablet、其餘→Others。
@@ -166,9 +196,9 @@ function mergeDeviceAgg(into: Map<string, MetricAgg>, from: Map<string, MetricAg
  * 把 campaign 層裝置回應列依裝置聚合。轉換口徑與 calcConversions 一致：
  * 各裝置 cv1/cv2 以該裝置基底（{prefix}_cv/{prefix}_mcv）起算、再加分桶事件（{prefix}_{event}）；
  * cv3/cv4 無 API 基底，純分桶。base 指標取 {prefix}_imp/click/charge。
- * 只處理 PC/Mobile（D_DEVICES）：API 對 Tablet/Xbox 不回 base 指標，見 D_DEVICES 註解。
+ * 處理 PC/Mobile/Others（D_DEVICES）：Others 欄要先經 addDOthers 算好（倉庫來源的列已帶 others_*）。
  */
-function aggregateDevices(
+export function aggregateDevices(
   deviceRows: any[],
   buckets: WeeklyReportInput['buckets']
 ): Map<string, MetricAgg> {
@@ -184,10 +214,10 @@ function aggregateDevices(
 
 /**
  * 把 D campaign 層裝置回應列整成 raw_data_device 寬列：每列＝一個 (campaign, 日期)，
- * 只填 PC/Mobile（沿用裝置分析口徑，tablet/xbox 無 base 指標 → Tablet/Others 留零）。
+ * 填 PC/Mobile/Others（同裝置分析口徑，Tablet 留零：平板併在 Others 裡分不開）。
  * campaign_id 由 getCampaignDeviceReports 補在列上，名稱/帳號從 camMap 帶。
  */
-function buildDDeviceRaw(
+export function buildDDeviceRaw(
   deviceRows: any[],
   camMap: Map<string, any>,
   buckets: WeeklyReportInput['buckets']
@@ -418,8 +448,6 @@ async function fetchRDevice(
   userType: UserType,
   buckets: WeeklyReportInput['buckets']
 ): Promise<{ deviceAgg: Map<string, MetricAgg>; raw: DeviceRawRow[] }> {
-  const deviceAgg = emptyDeviceAgg();
-  const rawMap = new Map<string, DeviceRawRow>(); // key=day|cpg_id（樞紐成寬列）
   try {
     const rows = await fetchReport({
       userType,
@@ -429,36 +457,50 @@ async function fetchRDevice(
       dimensions: ['day', 'cpg_id', 'device_type'],
       metrics: [], // 照舊不帶 metrics＝回全部指標（含 behavior0-6）
     });
-    for (const item of rows) {
-      const ev: Record<string, any> = {};
-      for (const [behavior, name] of Object.entries(R_BEHAVIOR_MAP)) ev[name] = num(item[behavior]);
-      const [cv1, cv2, cv3, cv4] = calcConversions(ev, buckets);
-      const bucket = rDeviceBucket(item.device_type);
-      const imp = num(item.impression);
-      const click = num(item.click);
-      const spend = num(item.payment_revenue);
-      // ① 裝置分析聚合
-      addTo(deviceAgg.get(bucket)!, imp, click, spend, cv1, cv2, cv3, cv4);
-      // ② raw 寬列：(day,cpg_id) 一列，device_type 樞紐到對應桶（同桶多列累加，如 code 1/4 都歸 Mobile/Others）
-      const day = String(item.day ?? '');
-      const cid = String(item.cpg_id ?? '');
-      const key = `${day}|${cid}`;
-      let r = rawMap.get(key);
-      if (!r) {
-        r = {
-          platform: 'R',
-          date: day,
-          account_name: String(item.user_name ?? ''), // 未帶 user_id 維度時通常空，campaign_name 已可識別
-          campaign_id: cid,
-          campaign_name: String(item.cpg_name ?? ''),
-          devices: emptyDeviceMap(),
-        };
-        rawMap.set(key, r);
-      }
-      addTo(r.devices[bucket], imp, click, spend, cv1, cv2, cv3, cv4);
-    }
+    return buildRDevice(rows, buckets);
   } catch {
     /* R 裝置維度抓取失敗：保留零值聚合與空 raw，不影響主報表 */
+    return { deviceAgg: emptyDeviceAgg(), raw: [] };
+  }
+}
+
+/**
+ * R 裝置 item（API 回應，或倉庫列轉成同形狀）→ 裝置聚合＋(day,cpg_id) 寬列。
+ * 桶：API 列看 device_type 代碼；倉庫列已是桶名、放在 bucket 欄。
+ */
+export function buildRDevice(
+  rows: any[],
+  buckets: WeeklyReportInput['buckets']
+): { deviceAgg: Map<string, MetricAgg>; raw: DeviceRawRow[] } {
+  const deviceAgg = emptyDeviceAgg();
+  const rawMap = new Map<string, DeviceRawRow>(); // key=day|cpg_id（樞紐成寬列）
+  for (const item of rows) {
+    const ev: Record<string, any> = {};
+    for (const [behavior, name] of Object.entries(R_BEHAVIOR_MAP)) ev[name] = num(item[behavior]);
+    const [cv1, cv2, cv3, cv4] = calcConversions(ev, buckets);
+    const bucket = DEVICE_LABELS.includes(item.bucket) ? String(item.bucket) : rDeviceBucket(item.device_type);
+    const imp = num(item.impression);
+    const click = num(item.click);
+    const spend = num(item.payment_revenue);
+    // ① 裝置分析聚合
+    addTo(deviceAgg.get(bucket)!, imp, click, spend, cv1, cv2, cv3, cv4);
+    // ② raw 寬列：(day,cpg_id) 一列，device_type 樞紐到對應桶（同桶多列累加，如 code 1/4 都歸 Mobile/Others）
+    const day = String(item.day ?? '');
+    const cid = String(item.cpg_id ?? '');
+    const key = `${day}|${cid}`;
+    let r = rawMap.get(key);
+    if (!r) {
+      r = {
+        platform: 'R',
+        date: day,
+        account_name: String(item.user_name ?? ''), // 未帶 user_id 維度時通常空，campaign_name 已可識別
+        campaign_id: cid,
+        campaign_name: String(item.cpg_name ?? ''),
+        devices: emptyDeviceMap(),
+      };
+      rawMap.set(key, r);
+    }
+    addTo(r.devices[bucket], imp, click, spend, cv1, cv2, cv3, cv4);
   }
   return { deviceAgg, raw: [...rawMap.values()] };
 }
@@ -570,12 +612,9 @@ async function fetchDData(
   if (dataCampaignIds.size) {
     onPhase?.(`抓 D 裝置維度中…（${dataCampaignIds.size} 個 campaign）`);
     try {
-      const deviceRows = await getCampaignDeviceReports(
-        accessToken,
-        [...dataCampaignIds],
-        ymd(input.startDate),
-        ymd(input.endDate)
-      );
+      const deviceRows = (
+        await getCampaignDeviceReports(accessToken, [...dataCampaignIds], ymd(input.startDate), ymd(input.endDate))
+      ).map(addDOthers);
       deviceAgg = aggregateDevices(deviceRows, input.buckets);
       deviceRaw = buildDDeviceRaw(deviceRows, camMap, input.buckets);
     } catch {
@@ -708,58 +747,150 @@ export function collectImageUrls(dRaw: DRow[], rRaw: RRow[], mRaw: MRow[]): stri
   ];
 }
 
+type PlatformResult<R> = { rows: R[]; deviceAgg: Map<string, MetricAgg>; deviceRaw: DeviceRawRow[] };
+
+const emptyResult = <R>(): PlatformResult<R> => ({ rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [] });
+
+/**
+ * 依區段逐段抓、接起來（區段照日期排序、彼此相接）。讀倉庫的段走 nexus，其他段照舊打 API（input 換成該段日期）。
+ * 打 API 的段超過 31 天直接丟錯：D per-ad 32 天起會靜默回 0 列，寧可失敗也不要少數字（送出時已擋，這裡是第二道）。
+ */
+async function bySegments<R>(
+  input: WeeklyReportInput,
+  segs: Segment[],
+  api: (sub: WeeklyReportInput) => Promise<PlatformResult<R>>,
+  nexus: (sd: string, ed: string) => Promise<PlatformResult<R>>
+): Promise<PlatformResult<R>> {
+  const out = emptyResult<R>();
+  for (const seg of segs) {
+    if (seg.source === 'api' && daysBetween(seg.sd, seg.ed) > API_MAX_DAYS) {
+      throw new Error(`${seg.sd}~${seg.ed} 要打平台 API，超過單次 ${API_MAX_DAYS} 天上限`);
+    }
+    const r = seg.source === 'nexus' ? await nexus(seg.sd, seg.ed) : await api({ ...input, startDate: seg.sd, endDate: seg.ed });
+    for (const row of r.rows) out.rows.push(row); // 不用 push(...rows)：一年份可能幾十萬列，展開會 stack overflow
+    mergeDeviceAgg(out.deviceAgg, r.deviceAgg);
+    for (const row of r.deviceRaw) out.deviceRaw.push(row);
+  }
+  return out;
+}
+
 /** 階段①：並行抓 R+D+M+P ＋ 下載素材圖並分群 → 完整原始資料（不聚合）。
- *  素材圖下載/分群提前到抓取階段，聚合（aggregateWeekly）就能是同步純函式、可被隨機調整重複套用。 */
+ *  素材圖下載/分群提前到抓取階段，聚合（aggregateWeekly）就能是同步純函式、可被隨機調整重複套用。
+ *  每個平台依 planWeeklySources 切段：倉庫已有的日子讀 nexus，其他日子打 API（見 nexussource.ts）。 */
 export async function fetchWeeklyRaw(
   input: WeeklyReportInput,
   onPhase?: (phase: string) => void
 ): Promise<WeeklyRawData> {
   const warnings: string[] = [];
 
+  const { plan, notes } = await planWeeklySources(input);
+  warnings.push(...notes);
+  const segsOf = (p: 'D' | 'R' | 'M' | 'P'): Segment[] => plan[p] ?? [{ sd: input.startDate, ed: input.endDate, source: 'api' }];
+
   onPhase?.('抓取 D / R / M / P 報表中…');
-  const fetchR = async (): Promise<{ rows: RRow[]; deviceAgg: Map<string, MetricAgg>; deviceRaw: DeviceRawRow[] }> => {
-    if (!input.rUserIds.length) return { rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [] };
-    const userType = await detectRUserType(input); // 三種類型自動偵測，查無資料會 throw
-    warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
-    const [rows, device] = await Promise.all([
-      fetchRData(input, userType, (m) => warnings.push(m)),
-      fetchRDevice(input, userType, input.buckets),
-    ]);
-    return { rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
+  const fetchR = async (): Promise<PlatformResult<RRow>> => {
+    if (!input.rUserIds.length) return emptyResult();
+    const segs = segsOf('R');
+    let typeNoted = false;
+    return bySegments(
+      input,
+      segs,
+      async (sub) => {
+        let userType: UserType;
+        try {
+          userType = await detectRUserType(sub); // 三種類型自動偵測，查無資料會 throw
+        } catch (e) {
+          // 只有這一段打 API ⇒ 照舊報錯；跟倉庫段拼接時（例：今天還沒入倉、R 還沒數字）這段沒資料是正常的
+          if (segs.length === 1) throw e;
+          warnings.push(`R 在 ${sub.startDate}~${sub.endDate}（打 API 的那段）查無資料`);
+          return emptyResult();
+        }
+        if (!typeNoted) warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
+        typeNoted = true;
+        const [rows, device] = await Promise.all([
+          fetchRData(sub, userType, (m) => warnings.push(m)),
+          fetchRDevice(sub, userType, input.buckets),
+        ]);
+        return { rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
+      },
+      async (sd, ed) => {
+        const r = await readNexusR(input.rUserIds, sd, ed);
+        const device = buildRDevice(r.deviceItems, input.buckets);
+        return { rows: r.rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
+      }
+    );
   };
-  const fetchP = async (): Promise<{
-    rows: PRow[];
-    deviceAgg: Map<string, MetricAgg>;
-    deviceRaw: DeviceRawRow[];
-    failed: boolean;
-  }> => {
+  const fetchD = async (): Promise<PlatformResult<DRow>> => {
+    if (!input.dAccountId) return emptyResult();
+    return bySegments(
+      input,
+      segsOf('D'),
+      (sub) => fetchDData(sub, onPhase),
+      async (sd, ed) => {
+        const r = await readNexusD(input.dAccountId, sd, ed);
+        return {
+          rows: r.rows,
+          deviceAgg: aggregateDevices(r.deviceRows, input.buckets),
+          deviceRaw: buildDDeviceRaw(r.deviceRows, r.camMap, input.buckets),
+        };
+      }
+    );
+  };
+  const fetchM = async (): Promise<PlatformResult<MRow>> => {
+    const ids = input.mgidClientIds ?? [];
+    if (!ids.length) return emptyResult();
+    return bySegments(
+      input,
+      segsOf('M'),
+      (sub) => fetchMData(sub, input.buckets, (m) => warnings.push(m)),
+      async (sd, ed) => {
+        const accounts = await listMgidAccounts();
+        const nameById = new Map(accounts.map((a) => [a.apiClientId, a.clientName]));
+        const r = await readNexusM(ids, sd, ed);
+        const out = emptyResult<MRow>();
+        for (const { account_id, ...row } of r.rows) {
+          out.rows.push({ ...row, account_name: nameById.get(account_id) ?? (row.account_name || account_id) });
+        }
+        for (const id of ids) {
+          const dev = buildMgidDevice(r.devByAccount.get(id) ?? [], input.buckets, nameById.get(id) ?? id);
+          mergeDeviceAgg(out.deviceAgg, dev.deviceAgg);
+          for (const row of dev.raw) out.deviceRaw.push(row);
+        }
+        return out;
+      }
+    );
+  };
+  const fetchP = async (): Promise<PlatformResult<PRow> & { failed: boolean }> => {
+    if (!input.pAdvertiserIds?.length) return { ...emptyResult<PRow>(), failed: false };
     try {
-      const result = await fetchPData(input, (m) => warnings.push(m));
+      const result = await bySegments(
+        input,
+        segsOf('P'),
+        (sub) => fetchPData(sub, (m) => warnings.push(m)),
+        async (sd, ed) => {
+          const r = await readNexusP(input.pAdvertiserIds!, sd, ed);
+          const device = buildPrismDevice(r.deviceItems);
+          return { rows: r.rows, deviceAgg: device.deviceAgg, deviceRaw: device.raw };
+        }
+      );
       return { ...result, failed: false };
     } catch (e: any) {
       // P 是附加資料源；單一平台故障不可讓已成功的 D/R/M 整份報表作廢。
       warnings.push(`P 平台報表抓取失敗，已略過 P 資料：${String(e?.message ?? e)}`);
-      return { rows: [], deviceAgg: emptyDeviceAgg(), deviceRaw: [], failed: true };
+      return { ...emptyResult<PRow>(), failed: true };
     }
   };
-  const [rResult, dResult, mResult, pResult] = await Promise.all([
-    fetchR(),
-    input.dAccountId
-      ? fetchDData(input, onPhase)
-      : Promise.resolve({ rows: [] as DRow[], deviceAgg: emptyDeviceAgg(), deviceRaw: [] as DeviceRawRow[] }),
-    fetchMData(input, input.buckets, (m) => warnings.push(m)),
-    fetchP(),
-  ]);
+  const [rResult, dResult, mResult, pResult] = await Promise.all([fetchR(), fetchD(), fetchM(), fetchP()]);
   const rRaw = rResult.rows;
   const dRaw = dResult.rows;
   const mRaw = mResult.rows;
   const pRaw = pResult.rows;
-  // 裝置分析：D 端 platform_cv 只填得了 PC/Mobile，R 端 device_type 補四桶，M 端 deviceType 補四桶（同桶累加）
+  // 裝置分析：D 填 PC/Mobile/Others（Others＝總數−PC−Mobile），R/M/P 四桶都有（同桶累加）
   const deviceAgg = dResult.deviceAgg;
   mergeDeviceAgg(deviceAgg, rResult.deviceAgg);
   mergeDeviceAgg(deviceAgg, mResult.deviceAgg);
   mergeDeviceAgg(deviceAgg, pResult.deviceAgg);
-  // raw_data_device：D 寬列（campaign×日期，PC/Mobile）＋ R 寬列（campaign×日期，四桶）＋ M 寬列（每日一列，四桶）併排
+  // raw_data_device：D 寬列（campaign×日期）＋ R 寬列（campaign×日期）＋ M 寬列（每日一列）＋ P 寬列併排
   const deviceRaw = [...dResult.deviceRaw, ...rResult.deviceRaw, ...mResult.deviceRaw, ...pResult.deviceRaw];
   if (input.dAccountId && dRaw.length === 0) {
     warnings.push(`D 帳號「${input.dAccountName || input.dAccountId}」在走期內查無報表資料`);

@@ -51,21 +51,33 @@ export async function bqQuery(sql: string, opts: { timeoutMs?: number } = {}): P
   });
   const body: any = res.data;
   if (body.errors?.length) throw new Error(`BigQuery: ${body.errors[0]?.message ?? 'unknown error'}`);
+  const jobId = body.jobReference?.jobId;
 
   // jobComplete=false ＝還在跑，改用 getQueryResults 等它（大 script 會走到這裡）。
+  let page: any = body;
   if (body.jobComplete === false) {
-    const jobId = body.jobReference?.jobId;
     if (!jobId) throw new Error('BigQuery: job 未完成且沒有 jobId');
+    page = null;
     for (let i = 0; i < 30; i++) {
       const r: any = await bq.jobs.getQueryResults({
         projectId: BQ_PROJECT, jobId, location: BQ_LOCATION, timeoutMs: 30_000,
       });
       if (r.data.errors?.length) throw new Error(`BigQuery: ${r.data.errors[0]?.message ?? 'unknown error'}`);
-      if (r.data.jobComplete) return toObjects(r.data.schema?.fields, r.data.rows);
+      if (r.data.jobComplete) { page = r.data; break; }
     }
-    throw new Error('BigQuery: 等待 job 完成逾時');
+    if (!page) throw new Error('BigQuery: 等待 job 完成逾時');
   }
-  return toObjects(body.schema?.fields, body.rows);
+  // 結果超過一頁（約 10MB）會帶 pageToken；以前只回第一頁＝靜默截斷（2026-10-16 週報讀倉庫時補上）
+  const out = toObjects(page.schema?.fields, page.rows);
+  let token: string | undefined = page.pageToken;
+  while (token) {
+    if (!jobId) throw new Error('BigQuery: 結果有下一頁但沒有 jobId');
+    const r: any = await bq.jobs.getQueryResults({ projectId: BQ_PROJECT, jobId, location: BQ_LOCATION, pageToken: token });
+    if (r.data.errors?.length) throw new Error(`BigQuery: ${r.data.errors[0]?.message ?? 'unknown error'}`);
+    for (const o of toObjects(page.schema?.fields, r.data.rows)) out.push(o);
+    token = r.data.pageToken;
+  }
+  return out;
 }
 
 /** dry-run：不執行、不計費，只回傳這句 SQL 會掃描（＝計費）多少 bytes。上線前估成本用。 */

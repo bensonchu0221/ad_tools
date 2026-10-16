@@ -96,7 +96,7 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
         </div>
 
         <div class="field">
-          <div class="flabel"><span class="nm">日期範圍</span><span class="hint">最多 31 天</span></div>
+          <div class="flabel"><span class="nm">日期範圍</span><span class="hint">05/21 起最多一年；更早的日期最多 31 天</span></div>
           <div class="row2">
             <div class="daterange">
               <input type="date" id="startDate" required>
@@ -270,7 +270,8 @@ export function weeklyFormPage(hasDb: boolean, basePath: string, retentionDays: 
     if (!startDate || !endDate) { statusBox.innerHTML = '<div class="msg msg-warn">請選擇日期範圍</div>'; return; }
     var days = (new Date(endDate) - new Date(startDate)) / 86400000 + 1;
     if (days <= 0) { statusBox.innerHTML = '<div class="msg msg-warn">結束日不可早於開始日</div>'; return; }
-    if (days > 31) { statusBox.innerHTML = '<div class="msg msg-warn">日期範圍最多 31 天</div>'; return; }
+    // 整份最多一年；倉庫範圍外（2026-05-21 以前、還沒入倉的最近幾天）要打 API 的那段最多 31 天，由後端依倉庫涵蓋判斷
+    if (days > 366) { statusBox.innerHTML = '<div class="msg msg-warn">日期範圍最多 366 天</div>'; return; }
 
     var body = new URLSearchParams({
       account: account, accountName: accountName, rAid: rAid, mgidClientIds: mgidClientIds, pAdvertiserIds: pAdvertiserIds,

@@ -1,6 +1,7 @@
 ## nexus 資料倉庫核心（tool#9）
 
 - **目的**（2026-09-23 使用者定調）：四平台（D/R/M/P）**全部有在跑的帳戶**「素材 × 日」數據每天抓一次存進 BQ，之後 Report Hub、整合週報等內部報表工具都改讀倉庫、不再各自打 API；主管／老闆用 **Looker Studio** 直接看，會議上以 **customer（客戶）** 角度看整體。
+- **讀倉庫的工具**：走速（花費讀 `nexus_coverage`）、**整合週報（2026-10-16 起，倉庫已寫好的日子讀事實表＋裝置表＋M 裝置轉換表，判斷看 `nexus_jobs` 成功 job，見 `weeklyreport/CLAUDE.md`）**。改表結構／欄位語意前先看週報 `nexussource.ts` 有沒有用到。
 - **位置**：BQ `popinpoc1.reporting`（使用者拍板用既有 dataset、不另開），表名一律 **`nexus_` 前綴**（使用者指定，呼應 Cloud SQL 跨工具共用庫 `nexus`）。同 dataset 有主管的 `coupang_report*`（WRITE_TRUNCATE 只作用在那張表，碰不到我們；但 dataset 擁有者是主管，建表前使用者已自行知會）。
 - **表**（定義在 `schema.ts`，單一真相）：
   - `nexus_d_ad_daily`／`nexus_r_cr_daily`／`nexus_m_teaser_daily`／`nexus_p_creative_daily`：各平台原生欄位全收（D 含 cv/mcv/mcv2＋cv_* 11 種；R 含 behavior0-6＋`exposure_report` 可視曝光＋agent 代理商；M 三階漏斗＋幣別；P 含 view_25~100、viewable）。**只存可加總的計數／金額，比率一律不存**。id 全轉 STRING。標題／落地頁／縮圖直接冗餘在事實表（量小，省 Looker join）。

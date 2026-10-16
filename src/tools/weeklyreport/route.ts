@@ -31,6 +31,7 @@ import { buildXlsx } from './xlsx.js';
 import { summarizeReport, buildNarrative } from './narrative.js';
 import { weeklyFormPage } from './form.js';
 import { type WeeklyReportInput } from './types.js';
+import { planWeeklySources, planLimitError, REPORT_MAX_DAYS } from './nexussource.js';
 
 export const BASE_PATH = '/tools/weeklyreport';
 
@@ -101,9 +102,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       return reply.send({ ok: false, error: '日期格式錯誤' });
     }
     const days = (Date.parse(endDate) - Date.parse(startDate)) / 86400000 + 1;
-    // 上限 31 天：per-ad date_reporting 端點單次區間上限 31 天 inclusive（32 天起靜默回 0 列），
-    // 31 天時各抓取路徑皆為單一視窗、無需切段（bulk/R 已內部切 7 天）。放寬過 31 天需先補 per-ad/device 切段。
-    if (days <= 0 || days > 31) return reply.send({ ok: false, error: '日期範圍需在 1～31 天內' });
+    // 整份最多一年；倉庫範圍外要打 API 的那幾段才受 31 天限制（per-ad date_reporting 單次 ≤31 天 inclusive，
+    // 32 天起靜默回 0 列），下面建好 input 後依讀倉庫的切段再檢查（2026-10-16 改讀倉庫後放寬）。
+    if (days <= 0 || days > REPORT_MAX_DAYS) return reply.send({ ok: false, error: `日期範圍需在 1～${REPORT_MAX_DAYS} 天內` });
 
     const input: WeeklyReportInput = {
       dAccountId: account,
@@ -120,6 +121,9 @@ export async function registerWeeklyReport(app: FastifyInstance) {
       pAdvertiserIds,
       adjust: b.adjust === '1', // 隨機調整模式：worker 只抓 raw、停在待調整
     };
+
+    const limitErr = planLimitError((await planWeeklySources(input)).plan);
+    if (limitErr) return reply.send({ ok: false, error: limitErr });
 
     // label：帳號（D 名 / R ids / M ids / P ids）＋日期區間，清單顯示用
     const who = accountName
