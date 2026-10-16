@@ -10,7 +10,7 @@
 // 放寬門檻必然誤合併、收緊則救不回。對齊法在 19 份真實報表 1156 組配對上，
 // 該合併的最大 18.5、不該合併的最小 33.5，中間有 80% 餘裕。
 import { execFile } from 'node:child_process';
-import { Jimp } from 'jimp';
+import { Jimp, ResizeStrategy } from 'jimp';
 
 // ---- 分群門檻（實證值，改動請同步跑 poc/verify_image_hash.mts 的餘裕斷言）----
 /** 精算亮度差 ≤ 此值＝同一張圖。實證：該合併最大 18.5、不該合併最小 33.5 */
@@ -92,6 +92,40 @@ export async function downloadImages(urls: string[]): Promise<Map<string, Downlo
     })
   );
   return out;
+}
+
+/** 嵌進 xlsx 的縮圖寬度上限：Excel 裡只顯示 191×100，600＝顯示寬度約 3 倍，高解析度螢幕仍清楚 */
+export const SHEET_IMG_MAX_W = 600;
+const SHEET_JPEG_QUALITY = 80;
+
+/** 嵌圖用：附原圖寬高（給 xlsx 算顯示框比例）；解碼失敗時寬高為 null */
+export type SheetImage = DownloadedImage & { width: number | null; height: number | null };
+
+/**
+ * 嵌進 xlsx 前縮圖（2026-10-15）：寬度超過 SHEET_IMG_MAX_W 就等比縮到 600 寬、鋪白底轉 JPEG。
+ * 起因：只有 D 的網址能換 `__scv1__300x157` 縮版；R／M 圖下載的是原圖（1200×628 PNG 一張約 0.9MB、
+ * M 有 1536×1024 PNG 2.5MB），整張塞進 xlsx——job 196 共 36 張圖佔 22.1MB／22.2MB，逼近 Cloud Run 32MiB 回應上限。
+ * 實測同 33 張縮成 600 寬 JPEG q80：22.0MB → 1.4MB（平均 43KB）。
+ * 只用在寫 xlsx：判同圖（toBase／clusterImageUrls）仍用原圖，分群結果不變。
+ * 白底：PNG 透明處轉 JPEG 會變黑。GIF 取第一格。解碼失敗就原樣回傳（不讓縮圖失敗擋掉整份報表）。
+ */
+export async function shrinkForSheet(img: DownloadedImage): Promise<SheetImage> {
+  try {
+    const src = await Jimp.read(img.buffer);
+    const { width, height } = src.bitmap;
+    if (width <= SHEET_IMG_MAX_W) return { ...img, width, height }; // D 縮版 300×157、影片截圖 300×156 等本來就小
+    src.resize({ w: SHEET_IMG_MAX_W, mode: ResizeStrategy.BICUBIC });
+    const out = new Jimp({ width: src.bitmap.width, height: src.bitmap.height, color: 0xffffffff });
+    out.composite(src, 0, 0);
+    return {
+      buffer: await out.getBuffer('image/jpeg', { quality: SHEET_JPEG_QUALITY }),
+      extension: 'jpeg',
+      width,
+      height,
+    };
+  } catch {
+    return { ...img, width: null, height: null };
+  }
 }
 
 /** 一張圖的比對基底：亮度 Y ＋ 色度 Cr/Cb，皆已降到 BASE_W×BASE_H */

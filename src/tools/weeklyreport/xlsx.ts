@@ -2,6 +2,7 @@
 import ExcelJS from 'exceljs';
 import type { ReportResult, MetricAgg, WeeklyReportInput } from './types.js';
 import { RAW_HEADERS, DEV_HEADERS, dRawRowArray, rRawRowArray, mRawRowArray, pRawRowArray, deviceRawRowArray } from './rawrows.js';
+import { shrinkForSheet } from './imagehash.js';
 
 const FONT = { name: 'Microsoft JhengHei', size: 12 } as const;
 const HEAD_FONT = { name: 'Microsoft JhengHei', size: 13, bold: true } as const;
@@ -132,6 +133,10 @@ function writeSummarySheet(
 }
 
 /** 產出整份週報 Excel（Buffer） */
+/** 素材分析圖片顯示寬（px）與行高上限（pt）：150pt≈200px，放得下 1:1 正方形 */
+const ASSET_IMG_W = 191;
+const ASSET_ROW_MAX_PT = 150;
+
 export async function buildXlsx(
   result: ReportResult,
   buckets: WeeklyReportInput['buckets'],
@@ -172,16 +177,30 @@ export async function buildXlsx(
   s3.getColumn(2).width = 30; // 圖片欄
   s3.getColumn(3).width = 50; // 文案欄
 
+  // 素材圖：寬固定 191px、高照原圖比例；整張表統一行高＝這份報表最高的圖放得下（2026-10-16 使用者選定）。
+  // 全是 1.91:1（D 300×157、R 1200×628）＝100px → 維持 80pt；有 3:2（M 1536×1024）＝127px → 101pt。
+  // 行高上限 150pt（放得下 1:1 正方形 191px），更高的直式圖頂端切齊、下緣超出格子，免得一張圖把整份撐得很高。
+  // R／M 下載的是原圖（一張近 1MB），縮成 600 寬 JPEG 再嵌，否則 xlsx 會逼近 Cloud Run 32MiB 下載上限。
+  const sheetImgs = new Map<string, Awaited<ReturnType<typeof shrinkForSheet>>>();
+  for (const a of result.assets) {
+    const img = images.get(a.asset_image);
+    if (img && !sheetImgs.has(a.asset_image)) sheetImgs.set(a.asset_image, await shrinkForSheet(img));
+  }
+  // 讀不出寬高（解碼失敗）退回舊的 191×100
+  const imgH = (x: { width: number | null; height: number | null }) =>
+    x.width && x.height ? Math.round((ASSET_IMG_W * x.height) / x.width) : 100;
+  const maxImgH = Math.max(100, ...[...sheetImgs.values()].map(imgH));
+  const assetRowPt = Math.min(ASSET_ROW_MAX_PT, Math.max(80, Math.ceil(maxImgH * 0.75 + 5))); // px→pt；+5pt≈上下留白（100px 剛好 80pt）
+
   let row = 4;
   for (const a of result.assets) {
-    s3.getRow(row).height = 80;
-    const img = images.get(a.asset_image);
-    if (img) {
-      const imgId = wb.addImage({ buffer: img.buffer as any, extension: img.extension });
-      // 300x157 等比縮到高 100px（≈75pt，行高 80pt 內）
+    s3.getRow(row).height = assetRowPt;
+    const small = sheetImgs.get(a.asset_image);
+    if (small) {
+      const imgId = wb.addImage({ buffer: small.buffer as any, extension: small.extension });
       s3.addImage(imgId, {
         tl: { col: 1.05, row: row - 0.95 } as any,
-        ext: { width: 191, height: 100 },
+        ext: { width: ASSET_IMG_W, height: imgH(small) },
         editAs: 'oneCell',
       });
     }
