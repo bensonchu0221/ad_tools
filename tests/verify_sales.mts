@@ -12,6 +12,8 @@ import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type S
 import { writeRowsToBq, type BqOps } from '../src/tools/sales/store.js';
 import { fromBq, mergeRows } from '../src/tools/sales/merge.js';
 import { findSuspectedDuplicates } from '../src/tools/sales/dupes.js';
+import { deliverTabs, fetchSalesSheets, FINANCE_SHEET_ID, DELIVER_SHEET_ID, FINANCE_TABS, type SheetReader } from '../src/tools/sales/sheets.js';
+import { checkSanity } from '../src/tools/sales/sanity.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -776,6 +778,93 @@ await ok('dupes：accounts 與 overlap 值正確', () => {
   assert.deepEqual(d.accounts, ['D37975', 'M866244']);
   assert.deepEqual(d.overlap, ['2026-09-03', '2026-09-30']);
   assert.deepEqual([d.vanished.name, d.vanished.sourceRef, d.current.name], ['舊IO', 'V', '新IO']);
+});
+
+// ---------- sheets／sanity（Task 4）----------
+
+const FIN_VALUES = [FIN_HEADER,
+  fin({ company: '甲公司', account: '甲', start: '2026/9/1', end: '2026/9/30', code: 'A1', no: '01', amount: '10,000' }),
+  fin({ company: '乙公司', account: '乙', start: '2026/10/1', end: '2026/10/31', code: 'B1', no: '01', amount: '20,000' })];
+const DEL_TAB = tab10({ attr: '直客', agency: '直客', adv: '甲', start: '10/1', end: '10/31', budget: '1000', label: '甲' });
+/** 假 reader：tabs 給的月表分頁有內容（值為 'empty' 時只有表頭），沒列到的回 null。 */
+function fakeReader(tabs: Record<string, 'ok' | 'empty'>, opts: { noFinance?: boolean } = {}): SheetReader {
+  return async (id, tab) => {
+    if (id === FINANCE_SHEET_ID) {
+      if (opts.noFinance) return null;
+      return tab === FINANCE_TABS.io ? FIN_VALUES : tab === FINANCE_TABS.customers ? CUST : null;
+    }
+    assert.equal(id, DELIVER_SHEET_ID);
+    const k = tabs[tab];
+    return k === undefined ? null : k === 'empty' ? [['', '總計'], ['', '小計'], DEL_HEADER] : DEL_TAB;
+  };
+}
+const okTabs = (until: string) => Object.fromEntries(deliverTabs(until).map((t) => [t, 'ok' as const]));
+
+await ok('deliverTabs：跨年與當月', () => {
+  assert.deepEqual(deliverTabs('2026-10-19'), ['202605', '202606', '202607', '202608', '202609', '202610']);
+  assert.deepEqual(deliverTabs('2026-05-03'), ['202605']);
+  assert.deepEqual(deliverTabs('2027-01-02').slice(-2), ['202612', '202701']);
+});
+
+await ok('fetchSalesSheets：當月分頁不存在 → 略過不丟錯', async () => {
+  const sh = await fetchSalesSheets('2026-11-01', fakeReader(okTabs('2026-10-31')));
+  assert.deepEqual(Object.keys(sh.deliver), deliverTabs('2026-10-31'));
+  assert.equal(sh.finance, FIN_VALUES);
+  assert.equal(sh.customers, CUST);
+});
+
+await ok('fetchSalesSheets：當月分頁存在但只有表頭 → 略過', async () => {
+  const sh = await fetchSalesSheets('2026-11-01', fakeReader({ ...okTabs('2026-10-31'), '202611': 'empty' }));
+  assert.ok(!('202611' in sh.deliver));
+});
+
+await ok('fetchSalesSheets：更早月份缺分頁 → 丟「月表缺分頁 202607」', async () => {
+  const tabs = okTabs('2026-10-19');
+  delete tabs['202607'];
+  await assert.rejects(fetchSalesSheets('2026-10-19', fakeReader(tabs)), /月表缺分頁 202607/);
+});
+
+await ok('fetchSalesSheets：財務分頁不存在 → 丟錯', async () => {
+  await assert.rejects(fetchSalesSheets('2026-10-19', fakeReader(okTabs('2026-10-19'), { noFinance: true })), /財務/);
+});
+
+const sanityIn = (o: { finance?: unknown[][]; customers?: unknown[][]; deliver?: Record<string, unknown[][]> } = {}) => {
+  const deliver = o.deliver ?? { '202609': DEL_TAB, '202610': DEL_TAB };
+  return {
+    finance: parseFinance(o.finance ?? FIN_VALUES), customers: parseCustomers(o.customers ?? CUST),
+    deliver: Object.entries(deliver).flatMap(([t, v]) => parseDeliverTab(t, v)), tabs: Object.keys(deliver),
+  };
+};
+const finN = (n: number, bad: number, field: 'start' | 'amount') => [FIN_HEADER, ...Array.from({ length: n }, (_, i) => fin({
+  company: `公司${i}`, account: `帳${i}`, code: 'A1', no: '01',
+  start: field === 'start' && i < bad ? 'TBC' : '2026/9/1', end: '2026/9/30',
+  amount: field === 'amount' && i < bad ? '' : '1000',
+}))];
+
+await ok('checkSanity：正常資料 → []', () => {
+  assert.deepEqual(checkSanity(sanityIn()), []);
+});
+
+await ok('checkSanity：財務 0 列 / 客戶 0 列 / 某月 0 列 → 各一條', () => {
+  const p = checkSanity(sanityIn({
+    finance: [FIN_HEADER], customers: [CUST[0]],
+    deliver: { '202609': DEL_TAB, '202610': [['', '總計'], ['', '小計'], DEL_HEADER] },
+  }));
+  assert.equal(p.length, 3, p.join('\n'));
+  assert.ok(p.some((x) => x.includes('財務')));
+  assert.ok(p.some((x) => x.includes('客戶資料')));
+  assert.ok(p.some((x) => x.includes('202610')));
+});
+
+await ok('checkSanity：起始日 90% 讀不到 → 報；89% → 不報', () => {
+  assert.equal(checkSanity(sanityIn({ finance: finN(100, 90, 'start') })).length, 1);
+  assert.deepEqual(checkSanity(sanityIn({ finance: finN(100, 89, 'start') })), []);
+});
+
+await ok('checkSanity：廣告金額 90% 讀不到 → 報', () => {
+  const p = checkSanity(sanityIn({ finance: finN(10, 9, 'amount') }));
+  assert.equal(p.length, 1);
+  assert.ok(p[0].includes('廣告金額'));
 });
 
 // <<後續 Task 的測試接在這裡>>
