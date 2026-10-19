@@ -47,10 +47,13 @@ export function deliverTabs(today: string): string[] {
 
 export interface SeedSheets { finance: unknown[][]; customers: unknown[][]; deliver: Record<string, unknown[][]> }
 
-/** 當月分頁還沒建、或建了但還沒有資料（沒表頭或 0 列）→ 先略過；月初常晚幾天才建。 */
+/**
+ * 當月分頁還沒建、整頁空白、或只有表頭沒資料 → 先略過（月初常晚幾天才建）。
+ * 有內容但解析失敗（例如必要欄位被改名）不能略過：略過會讓還在表上的 IO 當月預算被默默換成空的，要丟錯讓排程通知。
+ */
 function currentTabEmpty(tab: string, values: unknown[][] | null): boolean {
-  if (!values) return true;
-  try { return parseDeliverTab(tab, values).length === 0; } catch { return true; }
+  if (!values || values.every((r) => (r ?? []).every((c) => String(c ?? '').trim() === ''))) return true;
+  return parseDeliverTab(tab, values).length === 0;
 }
 
 /** 財務兩分頁、月表 202605～當月。財務分頁不存在或以前月份缺分頁 → 丟錯；當月沒資料 → 不放進 deliver。 */

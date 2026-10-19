@@ -56,7 +56,12 @@ const taipeiDate = (iso: string) => new Date(Date.parse(iso) + 8 * 3600_000).toI
  * 輸出順序＝既有列（原順序、同鍵被今天的取代）＋新列（今天的順序），所以同樣的輸入重跑結果相同。
  */
 function mergeIdTable(t: SalesTable, ex: Row[], td: Row[], key: (r: Row) => string, prep: (r: Row) => Row) {
-  const out = new Map(ex.map((r) => [key(r), r]));
+  const out = new Map<string, Row>();
+  for (const r of ex) {
+    // 既有兩列撞鍵（手動 SQL 或 normName 規則改過才會發生）：照合併會默默丟掉一列永久資料，寧可整次失敗
+    if (out.has(key(r))) throw new Error(`mergeRows：${t} 既有資料鍵重複「${key(r)}」（id ${out.get(key(r))!.id}、${r.id}），請先手動整理`);
+    out.set(key(r), r);
+  }
   const idMap = new Map<number, number>(); // 今天臨時 id → 合併後 id
   const newIds: number[] = [];
   const seen = new Set<string>();
@@ -64,6 +69,7 @@ function mergeIdTable(t: SalesTable, ex: Row[], td: Row[], key: (r: Row) => stri
   for (const r of td) {
     const cur = prep(r);
     const k = key(cur);
+    if (seen.has(k)) throw new Error(`mergeRows：${t} 今天的資料鍵重複「${k}」`);
     const old = out.get(k);
     const id = old ? Number(old.id) : next++;
     if (!old) newIds.push(id);
@@ -121,7 +127,8 @@ export function mergeRows(existing: SalesRows, today: SalesRows, meta: { date: s
   // ---------- IO ----------
   const exIos = existing.nexus_sales_ios.map((r) =>
     r.last_seen_at === null || r.last_seen_at === undefined ? { ...r, last_seen_at: taipeiDate(String(r.updated_at)) } : r);
-  const ioKey = (r: Row) => `${r.source}|${r.source_ref}`;
+  // source_ref 是組裡第一列的原始文字，正規化後再比：多一個空白、全半形、組內列順序換了都還是同一張 IO（只增不減下否則會永久多一張）
+  const ioKey = (r: Row) => `${r.source}|${normName(String(r.source_ref))}`;
   const io = mergeIdTable('nexus_sales_ios', exIos, today.nexus_sales_ios, ioKey, (r) => stamp({
     ...r,
     agency_id: must(agencyMap, r.agency_id, '經銷商'),

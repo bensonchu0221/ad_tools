@@ -1014,6 +1014,41 @@ await ok('route：runSync 丟錯 → 500、非 dry 時 postChat 一次', async (
   assert.ok(posted[0].includes('爆了'));
 });
 
+// ---------- final review 修正 ----------
+
+await ok('fetchSalesSheets：當月分頁缺必要欄位 → 丟錯（不默默略過）', async () => {
+  const base = fakeReader(okTabs('2026-10-31'));
+  const broken = [DEL_HEADER.filter((h) => h !== '帳戶名'), del({ agency: '直客', adv: '甲' })];
+  const reader: SheetReader = async (id, tab) => (tab === '202611' ? broken : base(id, tab));
+  await assert.rejects(fetchSalesSheets('2026-11-05', reader), /帳戶名/);
+});
+
+await ok('fetchSalesSheets：當月分頁完全空白（沒有任何非空儲存格）→ 略過', async () => {
+  const base = fakeReader(okTabs('2026-10-31'));
+  const reader: SheetReader = async (id, tab) => (tab === '202611' ? [[], ['', '  ']] : base(id, tab));
+  const sh = await fetchSalesSheets('2026-11-01', reader);
+  assert.ok(!('202611' in sh.deliver));
+});
+
+await ok('mergeRows：IO 鍵只差空白/全半形/大小寫 → 視為同一張（沿用 id，不產生新 IO）', () => {
+  const ex = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(5, '貝拉整形外科(桃園)|F1|2026-01-24', { last_seen_at: '2026-10-21' })] });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, '貝拉整形外科（桃園） |f1|2026-01-24')] });
+  const m = mergeRows(ex, td, M_META);
+  assert.equal(m.rows.nexus_sales_ios.length, 1);
+  assert.equal(m.rows.nexus_sales_ios[0].id, 5);
+  assert.deepEqual(m.newIoIds, []); assert.deepEqual(m.vanishedIoIds, []);
+});
+
+await ok('mergeRows：今天兩張 IO 正規化後撞鍵 → 丟錯', () => {
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A B|1'), ioRow(2, 'AB|1')] });
+  assert.throws(() => mergeRows(rowsOf({ nexus_sales_agencies: [AG1()] }), td, M_META), /重複/);
+});
+
+await ok('mergeRows：既有主檔兩列名稱正規化後相同 → 丟錯，不默默丟掉一列', () => {
+  const ex = rowsOf({ nexus_sales_agencies: [mk('nexus_sales_agencies', { id: 1, name: '台北數位' }), mk('nexus_sales_agencies', { id: 2, name: '台北 數位' })] });
+  assert.throws(() => mergeRows(ex, emptyRows(), M_META), /重複/);
+});
+
 // <<後續 Task 的測試接在這裡>>
 
 console.log(`\n全部通過：${n} 項`);
