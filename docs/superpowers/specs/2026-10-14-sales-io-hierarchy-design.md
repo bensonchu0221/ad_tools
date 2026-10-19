@@ -294,6 +294,10 @@ CREATE TABLE reporting.nexus_sales_io_assignments (
 
 ## 8. 之後（不在本 spec）
 
+- **下一步：定期從兩份試算表同步到 BQ**（2026-10-19 使用者決定，讓資料保持最新）。現在只有 10/16、10/19 手動跑過兩次種子，沒有排程。規劃方向：
+  - ad_tools 線上加一個排程（例如每天一次），用線上服務帳號直接讀兩份試算表，照現有種子流程整批重寫 `nexus_sales_*`（不再經過 `poc/` 的 JSON 匯出）。
+  - 月表走速（`src/tools/pacing/source.ts`）線上已經讀得到；財務表要先分享給 `439393162392-compute@developer.gserviceaccount.com`（檢視者即可）。
+  - 這段期間試算表是唯一來源；**人工維護（管理介面）是再下一階段**，屆時另行規劃同步與人工資料怎麼並存（現在的整批重寫會蓋掉人工資料）。
 - 管理介面：主檔維護、別名合併、IO 平台預算填寫、歸屬規則（含 campaign 規則、從衝突清單一鍵補）、未歸屬帳戶指定。
 - 歸屬計算引擎：可以直接在 BQ 用 `nexus_sales_io_assignments` JOIN `nexus_integrated_daily`（帳戶＋campaign＋日），campaign 層規則也不用另外準備花費資料。
 - `/ad-performance` 接上層級：`ad_report.py` 的查詢多 JOIN `nexus_sales_io_assignments`→`nexus_sales_ios`→`nexus_sales_clients`／`nexus_sales_agencies`，新增 client／經銷商／屬性維度；對不到的帳戶繼續用 `ad_brand_rules.py` 解析出的品牌。
