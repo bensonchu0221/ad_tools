@@ -64,6 +64,10 @@ const minDate = (xs: (string | null)[]) => dates(xs)[0] ?? null;
 const maxDate = (xs: (string | null)[]) => dates(xs).at(-1) ?? null;
 const monthIdx = (tab: string) => Number(tab.slice(0, 4)) * 12 + Number(tab.slice(4, 6));
 const tabMonth = (tab: string) => `${tab.slice(0, 4)}-${tab.slice(4, 6)}`;
+const dayNo = (ymd: string) => Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10)) / 86400000;
+/** 兩段走期（含頭尾）重疊幾天；不重疊回 0。 */
+const overlapDays = (s1: string, e1: string, s2: string, e2: string) =>
+  Math.max(0, Math.min(dayNo(e1), dayNo(e2)) - Math.max(dayNo(s1), dayNo(s2)) + 1);
 const ref = (s: string) => s.slice(0, 255);
 const pushTo = <K, V>(m: Map<K, V[]>, k: K, v: V) => { const xs = m.get(k); if (xs) xs.push(v); else m.set(k, [v]); };
 
@@ -130,8 +134,10 @@ export function buildSeed(input: SeedInput): Seed {
     const labels = [...new Set(rs.map((r) => r.account).filter(Boolean))];
     // 經銷商代付：client 取帳戶名的品牌段；直客：client＝公司名去後綴
     const clientName = fa && labels[0] ? brandFromLabel(labels[0]) ?? labels[0] : companyCore(f.company);
-    const sourceRef = ref(`${f.company}|${f.ioCode || `#${f.account}`}|${f.start ?? ''}`);
+    // 跟分組用同一個判斷：委刊單正規化後是空的（空白或只有符號）就改用帳戶名，否則兩組會撞同一個鍵、後者蓋掉前者
+    const sourceRef = ref(`${f.company}|${normName(f.ioCode) ? f.ioCode : `#${f.account}`}|${f.start ?? ''}`);
     const key = `finance|${sourceRef}`;
+    if (ios.has(key)) throw new Error(`財務 IO 鍵重複：${key}（第 ${rs.map((r) => r.row).join('、')} 列）`);
     ios.set(key, {
       key, name: `${f.account || f.company}${f.ioCode ? ` ${f.ioCode}` : ''}`, ioCode: f.ioCode,
       clientName, agencyName: fa ? agencies.get(normName(fa.agency))!.name : '直客',
@@ -184,11 +190,14 @@ export function buildSeed(input: SeedInput): Seed {
   for (const r of input.deliver) {
     const agencyName = agencies.get(normName(agencyOf(r)))!.name;
     const clientName = (r.label && brandFromLabel(r.label)) || r.advertiser;
-    const lab = normName(r.label), cl = normName(clientName), m = tabMonth(r.tab);
-    const hit = finIos
-      .filter((x) => x.start && x.end && x.start.slice(0, 7) <= m && m <= x.end.slice(0, 7)
+    const lab = normName(r.label), cl = normName(clientName);
+    // 依月表這列的實際走期，挑走期重疊天數最多的財務 IO（同天數取起始日較晚者）；TBC（沒有起訖）不併入
+    const hit = !r.start || !r.end ? undefined : finIos
+      .filter((x) => x.start && x.end
         && ((lab !== '' && x.labels.some((l) => normName(l) === lab)) || normName(x.clientName ?? '') === cl))
-      .sort((a, b) => b.start!.localeCompare(a.start!))[0];
+      .map((x) => ({ x, days: overlapDays(x.start!, x.end!, r.start!, r.end!) }))
+      .filter((o) => o.days > 0)
+      .sort((a, b) => b.days - a.days || b.x.start!.localeCompare(a.x.start!))[0]?.x;
     if (hit) {
       mergedFinance.add(hit.key);
       if (r.label && !hit.labels.includes(r.label)) hit.labels.push(r.label);

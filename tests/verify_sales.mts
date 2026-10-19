@@ -9,6 +9,7 @@ import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
 import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
 import { SALES_TABLES, SALES_SCHEMA, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
 import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
+import { writeRowsToBq, type BqOps } from '../src/tools/sales/store.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -461,6 +462,84 @@ await ok('mergeAccounts：多個來源合併、無效 ID 與空名字略過、�
     ],
   ]);
   assert.deepEqual(got.map((a) => `${a.platform}${a.accountId}:${a.name}`), ['D37975:直客_仙桃牌', 'D37975:仙桃牌D']);
+});
+
+// ---------- final review 修正 ----------
+
+await ok('月表併入財務 IO：依實際走期重疊天數選（萬國牌 9/1~9/10 → A1 8/10~9/09，不是 A2 9/10~10/10）；TBC 列不併入', () => {
+  const fin2 = parseFinance([FIN_HEADER,
+    fin({ company: '東春電器股份有限公司', account: '萬國牌', start: '2026/08/10', end: '2026/09/09', code: 'A1', no: '1', amount: '10,000' }),
+    fin({ company: '東春電器股份有限公司', account: '萬國牌', start: '2026/09/10', end: '2026/10/10', code: 'A2', no: '1', amount: '10,000' }),
+  ]);
+  const del2 = [
+    ...parseDeliverTab('202609', tab10({ attr: '直客', agency: '直客', adv: '萬國牌', start: '9/1', end: '9/10', budget: '9,523', r: '5,523', label: '萬國牌' })),
+    ...parseDeliverTab('202610', tab10({ attr: '直客', agency: '直客', adv: '萬國牌TBC', start: 'TBC', end: 'TBC', r: '7,000', label: '萬國牌' })),
+  ];
+  const s2 = buildSeed({ finance: fin2, customers: [], deliver: del2, accounts: [] });
+  const keyOf = (code: string) => s2.ios.find((i) => i.source === 'finance' && i.ioCode === code)!.key;
+  const alloc = (k: string) => s2.allocations.filter((a) => a.ioKey === k).map((a) => `${a.platform}:${a.month}:${a.plannedBudget}`);
+  assert.deepEqual(alloc(keyOf('A1')), ['R:2026-09:5523']);
+  assert.deepEqual(alloc(keyOf('A2')), []);
+  const tbc = s2.ios.filter((i) => i.source === 'deliver' && i.name === '萬國牌TBC');
+  assert.equal(tbc.length, 1);
+  assert.deepEqual(alloc(tbc[0].key), ['R:2026-10:7000']);
+});
+
+await ok('財務 IO 鍵與分組一致：委刊單只有符號（-）、同公司同起始日兩個帳戶名 → 兩張 IO，預算不互相覆蓋', () => {
+  const fin3 = parseFinance([FIN_HEADER,
+    fin({ company: '甲公司', account: '甲帳戶', start: '2026/01/01', end: '2026/01/31', code: '-', no: '1', amount: '100' }),
+    fin({ company: '甲公司', account: '乙帳戶', start: '2026/01/01', end: '2026/01/31', code: '-', no: '1', amount: '200' }),
+  ]);
+  const s3 = buildSeed({ finance: fin3, customers: [], deliver: [], accounts: [] });
+  assert.deepEqual(s3.ios.map((i) => i.budgetNet).sort(), [100, 200]);
+  assert.equal(new Set(s3.periods.map((p) => p.ioKey)).size, 2);
+});
+
+/** 假的 BQ 操作：記下呼叫順序，可指定某一步丟錯。 */
+function fakeBq(failAt: { load?: string; query?: boolean } = {}) {
+  const calls: string[] = [];
+  const counts = new Map<string, number>();
+  const bq: BqOps = {
+    ensureTable: async (spec) => { calls.push(`ensure ${spec.table}`); return false; },
+    deleteTable: async (t) => { calls.push(`delete ${t}`); },
+    loadRows: async (t, _s, rows) => {
+      calls.push(`load ${t}`);
+      if (failAt.load && t === failAt.load) throw new Error('load 失敗（測試）');
+      counts.set(t.replace('nexus__stage_', 'nexus_'), rows.length);
+    },
+    dryRun: async () => 0,
+    query: async () => { calls.push('query'); if (failAt.query) throw new Error('等待 job 完成逾時（測試）'); return []; },
+    listRows: async (t) => { calls.push(`list ${t}`); return Array.from({ length: counts.get(t) ?? 0 }, () => ({})); },
+  };
+  return { bq, calls };
+}
+const quiet = () => {};
+
+await ok('writeRowsToBq：沒注入假 BQ、也沒設 SALES_BQ_WRITE=1 → 碰 BQ 之前就擋下', async () => {
+  assert.notEqual(process.env.SALES_BQ_WRITE, '1');
+  await assert.rejects(writeRowsToBq(ROWS, quiet), /SALES_BQ_WRITE=1/);
+});
+
+await ok('writeRowsToBq：成功時回讀筆數、最後刪掉 8 張暫存表', async () => {
+  const { bq, calls } = fakeBq();
+  const out = await writeRowsToBq(ROWS, quiet, bq);
+  assert.equal(out.nexus_sales_ios, ROWS.nexus_sales_ios.length);
+  const iq = calls.indexOf('query');
+  assert.equal(calls.slice(iq).filter((c) => c.startsWith('delete ') && c.includes('nexus__stage_')).length, 8);
+});
+
+await ok('writeRowsToBq：暫存表 load 失敗 → 不跑交易、刪暫存表、訊息說正式表未動', async () => {
+  const { bq, calls } = fakeBq({ load: stageTable('nexus_sales_ios') });
+  await assert.rejects(writeRowsToBq(ROWS, quiet, bq), /正式表未動/);
+  assert.ok(!calls.includes('query'));
+  assert.ok(calls.at(-1)!.startsWith('delete ') && calls.at(-1)!.includes('nexus__stage_'));
+});
+
+await ok('writeRowsToBq：交易呼叫失敗（可能逾時但 job 仍在跑）→ 不刪暫存表、訊息說結果不確定', async () => {
+  const { bq, calls } = fakeBq({ query: true });
+  await assert.rejects(writeRowsToBq(ROWS, quiet, bq), /結果不確定/);
+  const iq = calls.indexOf('query');
+  assert.equal(calls.slice(iq + 1).filter((c) => c.startsWith('delete ')).length, 0);
 });
 
 // <<後續 Task 的測試接在這裡>>

@@ -10,6 +10,7 @@ import { DELIVER_TABS, runSeed } from '../src/tools/sales/seed.js';
 const DIR = 'poc/sales_seed_input';
 const read = (f: string): unknown[][] => JSON.parse(fs.readFileSync(`${DIR}/${f}`, 'utf8')).values;
 
+if (process.argv.includes('--write')) process.env.SALES_BQ_WRITE = '1'; // 只有 CLI 帶 --write 才允許寫正式 BQ
 const res = await runSeed(
   {
     finance: read('finance_io.json'),
