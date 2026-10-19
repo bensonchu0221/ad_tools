@@ -2,7 +2,7 @@
 
 - 日期：2026-10-14
 - 所屬：BigQuery `popinpoc1.reporting.nexus_sales_*`（2026-10-16 由 Cloud SQL 改到 BQ，理由見 §2）；寫入程式在 ad_tools，讀取端主要是 audience_center 的 `/ad-performance`（pacplatform.net/ad-performance），之後也給 AM dashboard、走速（tool#10）用
-- 狀態：已實作；2026-10-16 種子寫入 BQ `popinpoc1.reporting.nexus_sales_*`（IO 342 張、歸屬規則 347 條）。報告 `poc/sales_seed_report.md`（不進 repo）
+- 狀態：已實作；2026-10-16 種子寫入 BQ `popinpoc1.reporting.nexus_sales_*`（IO 342 張、歸屬規則 347 條）；2026-10-19 final review 修正後重寫（筆數相同）。報告 `poc/sales_seed_report.md`（不進 repo）
 
 ## 1. 背景與目的
 
@@ -253,7 +253,7 @@ CREATE TABLE reporting.nexus_sales_io_assignments (
 
 - **財務來源**：以（公司, 委刊單, 委刊起始日）分組成一張 IO（委刊單空白時改用帳戶名），`source_ref = 公司|委刊單|起始日`。每列寫一筆 `nexus_sales_io_periods`；IO 的 `budget_net`／各項費用＝各期加總，起訖＝各期最早起始日、最晚結束日。
 - **月表來源**：
-  1. 先嘗試併入財務 IO：同 client（或帳戶名相同），且月表走期落在財務 IO 走期內 ⇒ 不另建 IO，只把這列的平台預算寫進該 IO 的 allocation。
+  1. 先嘗試併入財務 IO：同 client（或帳戶名相同），且月表這列的實際走期與財務 IO 走期有重疊 ⇒ 不另建 IO，只把這列的平台預算寫進重疊天數最多的那張財務 IO 的 allocation（同天數取起始日較晚者）。走期 TBC 的列不併入。（2026-10-19 final review 改：原本只比月份，萬國牌 9/1~9/10 被併到 9/10~10/10 那張；用「完全落在走期內」又會因月表多為整月、財務 IO 常跨月而幾乎併不進去。）
   2. 併不進去的：同（代理商, 帳戶名, 廣告主）正規化後相同、月份相連的列併成一張 IO（月表把跨月檔期每月拆一列），`source_ref = deliver|代理商|帳戶名|廣告主|首月`；起訖＝各月最早／最晚，`budget_net`＝各月預算加總，狀態取最後一個月。走期 TBC 的保留 NULL。
 
 ### 6.6 預算拆分
