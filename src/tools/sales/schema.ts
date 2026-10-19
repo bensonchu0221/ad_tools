@@ -43,6 +43,7 @@ export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
     opt('start_date', 'DATE'), opt('end_date', 'DATE'), req('status', 'STRING'),
     money('budget_net'), money('service_fee_pct'), money('service_fee'), money('setup_fee'), money('other_fee'),
     req('kpi', 'STRING'), req('note', 'STRING'), ...AUDIT,
+    opt('last_seen_at', 'DATE'), // 最後一次在試算表看到的台北日；ALTER TABLE ADD COLUMN 加在最後，順序跟著放最後
   ],
   nexus_sales_io_periods: [
     req('io_id', 'INT64'), req('period_no', 'STRING'), req('account_name_raw', 'STRING'),
@@ -75,7 +76,7 @@ export const UNIQUE_KEYS: Record<SalesTable, string[][]> = {
   nexus_sales_io_assignments: [['id'], ['io_id', 'platform', 'account_id', 'campaign_id', 'campaign_keyword']],
 };
 
-const DESC_SUFFIX = '。設計：ad_tools docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md；由 ad_tools scripts/sales_seed.mts 整批寫入，id 每次重跑會換';
+const DESC_SUFFIX = '。設計：ad_tools docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md；由 ad_tools 每日同步（/tools/sales/cron）合併寫入，只增不減，id 固定';
 export const SALES_TABLE_DESC: Record<SalesTable, string> = {
   nexus_sales_agencies: `業績層級：經銷商／代理商（直客、陸客也各一列），attr＝客戶屬性${DESC_SUFFIX}`,
   nexus_sales_clients: `業績層級：client（品牌）${DESC_SUFFIX}`,

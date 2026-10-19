@@ -7,7 +7,7 @@ import {
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
 import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
 import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
-import { SALES_TABLES, SALES_SCHEMA, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
+import { SALES_TABLES, SALES_SCHEMA, SALES_TABLE_DESC, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
 import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
 import { writeRowsToBq, type BqOps } from '../src/tools/sales/store.js';
 
@@ -515,9 +515,16 @@ function fakeBq(failAt: { load?: string; query?: boolean } = {}) {
 }
 const quiet = () => {};
 
-await ok('writeRowsToBq：沒注入假 BQ、也沒設 SALES_BQ_WRITE=1 → 碰 BQ 之前就擋下', async () => {
-  assert.notEqual(process.env.SALES_BQ_WRITE, '1');
-  await assert.rejects(writeRowsToBq(ROWS, quiet), /SALES_BQ_WRITE=1/);
+await ok('writeRowsToBq：沒注入假 BQ、也沒給 allowProd → 碰 BQ 之前就擋下', async () => {
+  await assert.rejects(writeRowsToBq(ROWS, quiet), /allowProd/);
+  await assert.rejects(writeRowsToBq(ROWS, quiet, undefined, { allowProd: false }), /allowProd/);
+});
+
+await ok('schema：ios 最後一欄是 last_seen_at（DATE、可 NULL），seedToRows 帶 null', () => {
+  const f = SALES_SCHEMA.nexus_sales_ios.at(-1)!;
+  assert.deepEqual([f.name, f.type, f.mode], ['last_seen_at', 'DATE', 'NULLABLE']);
+  assert.ok(ROWS.nexus_sales_ios.every((r) => r.last_seen_at === null));
+  for (const t of SALES_TABLES) assert.ok(!SALES_TABLE_DESC[t].includes('會換'), t);
 });
 
 await ok('writeRowsToBq：成功時回讀筆數、最後刪掉 8 張暫存表', async () => {

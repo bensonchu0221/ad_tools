@@ -46,7 +46,7 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
       start_date: x.start, end_date: x.end, status: x.status,
       budget_net: money(x.budgetNet), service_fee_pct: money(x.serviceFeePct), service_fee: money(x.serviceFee),
       setup_fee: money(x.setupFee), other_fee: money(x.otherFee),
-      kpi: x.kpi, note: x.note, ...audit(x.source, x.sourceRef),
+      kpi: x.kpi, note: x.note, ...audit(x.source, x.sourceRef), last_seen_at: null,
     })),
     nexus_sales_io_periods: seed.periods.map((p) => ({
       io_id: io(p.ioKey), period_no: p.periodNo, account_name_raw: p.accountNameRaw,

@@ -44,10 +44,12 @@ const realBq: BqOps = {
  * → 一段交易 DELETE＋INSERT…SELECT → 刪暫存表 → 回讀筆數核對。
  * 交易之前任何一步失敗：正式表沒動、暫存表刪掉。交易呼叫本身失敗（例如等太久逾時，但 BQ 上的 job 可能還在跑）：
  * 結果不確定，暫存表保留（1 天後自動過期）免得把還在跑的 job 弄壞；8 張表仍是全換或全不變，重跑種子即可（冪等）。
- * 用真的 BQ 時必須設 SALES_BQ_WRITE=1（只有 scripts/sales_seed.mts --write 會設），免得測試或其他程式誤寫正式表。
+ * 用真的 BQ 時必須明確傳 { allowProd: true }（cron 非 dry、CLI --write 才會傳），免得測試或其他程式誤寫正式表。
  */
-export async function writeRowsToBq(rows: SalesRows, log: (s: string) => void = console.log, bq: BqOps = realBq): Promise<Record<SalesTable, number>> {
-  if (bq === realBq && process.env.SALES_BQ_WRITE !== '1') throw new Error('writeRowsToBq：要寫正式 BQ 必須設 SALES_BQ_WRITE=1（請用 scripts/sales_seed.mts --write）');
+export async function writeRowsToBq(
+  rows: SalesRows, log: (s: string) => void = console.log, bq: BqOps = realBq, opts: { allowProd?: boolean } = {},
+): Promise<Record<SalesTable, number>> {
+  if (bq === realBq && opts.allowProd !== true) throw new Error('writeRowsToBq：要寫正式 BQ 必須傳 { allowProd: true }');
   checkKeys(rows);
   for (const t of SALES_TABLES) {
     if (await bq.ensureTable({ table: fullTable(t), schema: SALES_SCHEMA[t], description: SALES_TABLE_DESC[t] })) log(`建表 ${fullTable(t)}`);
