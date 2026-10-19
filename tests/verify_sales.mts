@@ -11,6 +11,7 @@ import { SALES_TABLES, SALES_SCHEMA, SALES_TABLE_DESC, UNIQUE_KEYS, fullTable, s
 import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
 import { writeRowsToBq, type BqOps } from '../src/tools/sales/store.js';
 import { fromBq, mergeRows } from '../src/tools/sales/merge.js';
+import { findSuspectedDuplicates } from '../src/tools/sales/dupes.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -717,6 +718,64 @@ await ok('mergeRows：真實種子對空表合併 → 與 seedToRows 同筆數�
   const m2 = mergeRows(m1.rows, ROWS, M_META);
   assert.deepEqual(m2.rows, m1.rows);
   assert.deepEqual(m2.vanishedIoIds, []);
+});
+
+// ---------- dupes（Task 3）----------
+
+const D_DATE = '2026-10-22';
+const asg = (id: number, ioId: number, acct: string) =>
+  mk('nexus_sales_io_assignments', { id, io_id: ioId, platform: acct[0], account_id: acct.slice(1) });
+/** v＝消失的 IO（last_seen_at 10-21）、c＝今天還在的 IO（last_seen_at 10-22）。 */
+function dupRows(o: { v: [string | null, string | null]; c: [string | null, string | null]; vAcct: string[]; cAcct: string[]; vSrc?: string }): SalesRows {
+  return rowsOf({
+    nexus_sales_ios: [
+      ioRow(1, 'V', { name: '舊IO', source: o.vSrc ?? 'finance', start_date: o.v[0], end_date: o.v[1], last_seen_at: '2026-10-21' }),
+      ioRow(2, 'C', { name: '新IO', start_date: o.c[0], end_date: o.c[1], last_seen_at: D_DATE }),
+    ],
+    nexus_sales_io_assignments: [...o.vAcct.map((a, i) => asg(10 + i, 1, a)), ...o.cAcct.map((a, i) => asg(20 + i, 2, a))],
+  });
+}
+
+await ok('dupes：改起始日（同帳戶、走期重疊）→ 報一組', () => {
+  const r = dupRows({ v: ['2026-09-01', '2026-09-30'], c: ['2026-09-03', '2026-09-30'], vAcct: ['D37975'], cAcct: ['D37975'] });
+  const d = findSuspectedDuplicates(r, [1], D_DATE);
+  assert.equal(d.length, 1);
+  assert.deepEqual([d[0].vanished.id, d[0].current.id], [1, 2]);
+});
+
+await ok('dupes：月表 IO 併入財務 IO（月表 IO 消失、財務 IO 認領同帳戶、走期重疊）→ 報一組', () => {
+  const r = dupRows({ v: ['2026-10-01', '2026-10-31'], c: ['2026-09-15', '2026-11-15'], vAcct: ['R7163'], cAcct: ['R7163', 'D5'], vSrc: 'deliver' });
+  const d = findSuspectedDuplicates(r, [1], D_DATE);
+  assert.equal(d.length, 1);
+  assert.deepEqual(d[0].accounts, ['R7163']);
+});
+
+await ok('dupes：共用帳戶但走期不重疊 → 不報', () => {
+  const r = dupRows({ v: ['2026-08-01', '2026-08-31'], c: ['2026-09-01', '2026-09-30'], vAcct: ['D1'], cAcct: ['D1'] });
+  assert.deepEqual(findSuspectedDuplicates(r, [1], D_DATE), []);
+});
+
+await ok('dupes：走期重疊但沒有共用帳戶 → 不報', () => {
+  const r = dupRows({ v: ['2026-09-01', '2026-09-30'], c: ['2026-09-01', '2026-09-30'], vAcct: ['D1'], cAcct: ['M1'] });
+  assert.deepEqual(findSuspectedDuplicates(r, [1], D_DATE), []);
+});
+
+await ok('dupes：任一方起訖為 null → 不報', () => {
+  const r = dupRows({ v: ['2026-09-01', null], c: ['2026-09-01', '2026-09-30'], vAcct: ['D1'], cAcct: ['D1'] });
+  assert.deepEqual(findSuspectedDuplicates(r, [1], D_DATE), []);
+});
+
+await ok('dupes：隔天再跑（該 IO 已不在 vanishedIoIds）→ 不重報', () => {
+  const r = dupRows({ v: ['2026-09-01', '2026-09-30'], c: ['2026-09-03', '2026-09-30'], vAcct: ['D1'], cAcct: ['D1'] });
+  assert.deepEqual(findSuspectedDuplicates(r, [], D_DATE), []);
+});
+
+await ok('dupes：accounts 與 overlap 值正確', () => {
+  const r = dupRows({ v: ['2026-09-01', '2026-09-30'], c: ['2026-09-03', '2026-10-31'], vAcct: ['M866244', 'D37975', 'R1'], cAcct: ['D37975', 'M866244'] });
+  const [d] = findSuspectedDuplicates(r, [1], D_DATE);
+  assert.deepEqual(d.accounts, ['D37975', 'M866244']);
+  assert.deepEqual(d.overlap, ['2026-09-03', '2026-09-30']);
+  assert.deepEqual([d.vanished.name, d.vanished.sourceRef, d.current.name], ['舊IO', 'V', '新IO']);
 });
 
 // <<後續 Task 的測試接在這裡>>
