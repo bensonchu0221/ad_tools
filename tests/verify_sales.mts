@@ -10,6 +10,7 @@ import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js
 import { SALES_TABLES, SALES_SCHEMA, SALES_TABLE_DESC, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
 import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
 import { writeRowsToBq, type BqOps } from '../src/tools/sales/store.js';
+import { fromBq, mergeRows } from '../src/tools/sales/merge.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -547,6 +548,175 @@ await ok('writeRowsToBq：交易呼叫失敗（可能逾時但 job 仍在跑）�
   await assert.rejects(writeRowsToBq(ROWS, quiet, bq), /結果不確定/);
   const iq = calls.indexOf('query');
   assert.equal(calls.slice(iq + 1).filter((c) => c.startsWith('delete ')).length, 0);
+});
+
+// ---------- merge（Task 2）----------
+
+/** 依 schema 補齊一列：必填 STRING ''、必填 INT64 0、其餘 null，再蓋上指定欄位。 */
+function mk(t: SalesTable, o: Row): Row {
+  const r: Row = {};
+  for (const f of SALES_SCHEMA[t]) r[f.name] = f.mode !== 'REQUIRED' ? null : f.type === 'STRING' ? '' : f.type === 'INT64' ? 0 : null;
+  if ('updated_at' in r) { r.updated_by = 'seed'; r.updated_at = '2026-10-19T02:25:30.000Z'; }
+  return { ...r, ...o };
+}
+const emptyRows = (): SalesRows => Object.fromEntries(SALES_TABLES.map((t) => [t, []])) as unknown as SalesRows;
+const rowsOf = (o: Partial<SalesRows>): SalesRows => ({ ...emptyRows(), ...o });
+const M_META = { date: '2026-10-22', by: 'sync', at: '2026-10-21T22:00:00.000Z' };
+const ioRow = (id: number, ref: string, o: Row = {}) => mk('nexus_sales_ios', { id, name: ref, source: 'finance', source_ref: ref, agency_id: 1, ...o });
+const AG1 = () => mk('nexus_sales_agencies', { id: 1, name: '直客', attr: '直客', source: 'finance' });
+
+await ok('fromBq：INT64→number、TIMESTAMP 秒數→ISO、NUMERIC/DATE 原樣', () => {
+  const raw: Record<string, string | null> = {};
+  for (const f of SALES_SCHEMA.nexus_sales_ios) raw[f.name] = f.mode === 'REQUIRED' ? '' : null;
+  Object.assign(raw, { id: '94', agency_id: '2', budget_net: '40000', start_date: '2026-01-24', updated_at: '1792376730.284', last_seen_at: null });
+  const [r] = fromBq('nexus_sales_ios', [raw]);
+  assert.equal(r.id, 94); assert.equal(r.agency_id, 2); assert.equal(r.client_id, null);
+  assert.equal(r.budget_net, '40000'); assert.equal(r.start_date, '2026-01-24');
+  assert.equal(r.updated_at, new Date(1792376730284).toISOString()); assert.equal(r.last_seen_at, null);
+});
+
+await ok('mergeRows：同鍵沿用既有 id，新的從 MAX(id)+1 編', () => {
+  const ex = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(5, 'A'), ioRow(9, 'B')] });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A'), ioRow(2, 'C')] });
+  const m = mergeRows(ex, td, M_META);
+  const byRef = new Map(m.rows.nexus_sales_ios.map((r) => [r.source_ref, r.id]));
+  assert.equal(byRef.get('A'), 5); assert.equal(byRef.get('B'), 9); assert.equal(byRef.get('C'), 10);
+  assert.deepEqual(m.newIoIds, [10]);
+});
+
+await ok('mergeRows：今天臨時 id 與既有 id 撞號時，外鍵仍指到正確的合併後 id', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [mk('nexus_sales_agencies', { id: 1, name: '甲' }), mk('nexus_sales_agencies', { id: 2, name: '乙' })],
+    nexus_sales_clients: [mk('nexus_sales_clients', { id: 1, name: '品牌一' }), mk('nexus_sales_clients', { id: 2, name: '品牌二' })],
+  });
+  const td = rowsOf({
+    nexus_sales_agencies: [mk('nexus_sales_agencies', { id: 1, name: '乙' })],
+    nexus_sales_clients: [mk('nexus_sales_clients', { id: 1, name: '品牌二' })],
+    nexus_sales_aliases: [mk('nexus_sales_aliases', { entity_type: 'agency', alias_norm: '乙別名', entity_id: 1, alias_raw: '乙別名' })],
+    nexus_sales_ios: [ioRow(1, 'X', { agency_id: 1, client_id: 1 })],
+    nexus_sales_io_periods: [mk('nexus_sales_io_periods', { io_id: 1, period_no: '01', source_row: 2 })],
+  });
+  const m = mergeRows(ex, td, M_META);
+  const io = m.rows.nexus_sales_ios[0];
+  assert.equal(io.id, 1); // 新 IO，ios 沒有既有列 → 從 1 編
+  assert.equal(io.agency_id, 2); assert.equal(io.client_id, 2);
+  assert.equal(m.rows.nexus_sales_aliases[0].entity_id, 2);
+  assert.equal(m.rows.nexus_sales_io_periods[0].io_id, 1);
+  checkKeys(m.rows);
+});
+
+await ok('mergeRows：IO 今天不見 → IO 與其 periods/allocations/assignments 全保留，last_seen_at 不動', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [AG1()],
+    nexus_sales_ios: [ioRow(3, 'GONE', { last_seen_at: '2026-10-21' })],
+    nexus_sales_io_periods: [mk('nexus_sales_io_periods', { io_id: 3, period_no: '01', ad_amount: '100' })],
+    nexus_sales_io_allocations: [mk('nexus_sales_io_allocations', { io_id: 3, platform: 'D', month: '2026-10-01', planned_budget: '100' })],
+    nexus_sales_io_assignments: [mk('nexus_sales_io_assignments', { id: 7, io_id: 3, platform: 'D', account_id: '1' })],
+  });
+  const m = mergeRows(ex, rowsOf({ nexus_sales_agencies: [AG1()] }), M_META);
+  assert.equal(m.rows.nexus_sales_ios.length, 1);
+  assert.equal(m.rows.nexus_sales_ios[0].last_seen_at, '2026-10-21');
+  assert.equal(m.rows.nexus_sales_io_periods.length, 1);
+  assert.equal(m.rows.nexus_sales_io_allocations.length, 1);
+  assert.equal(m.rows.nexus_sales_io_assignments[0].id, 7);
+  assert.equal(m.stats.nexus_sales_ios.kept, 1);
+});
+
+await ok('mergeRows：IO 今天還在 → 其子表整組換成今天的（今天少一期，合併後也少）', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(3, 'A')],
+    nexus_sales_io_periods: [mk('nexus_sales_io_periods', { io_id: 3, period_no: '01' }), mk('nexus_sales_io_periods', { io_id: 3, period_no: '02' })],
+    nexus_sales_io_allocations: [mk('nexus_sales_io_allocations', { io_id: 3, platform: 'D', month: '2026-09-01', planned_budget: '1' })],
+  });
+  const td = rowsOf({
+    nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A')],
+    nexus_sales_io_periods: [mk('nexus_sales_io_periods', { io_id: 1, period_no: '01' })],
+  });
+  const m = mergeRows(ex, td, M_META);
+  assert.deepEqual(m.rows.nexus_sales_io_periods.map((r) => [r.io_id, r.period_no]), [[3, '01']]);
+  assert.equal(m.rows.nexus_sales_io_allocations.length, 0);
+});
+
+await ok('mergeRows：主檔與 aliases 只增不減', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [AG1(), mk('nexus_sales_agencies', { id: 4, name: '舊經銷商' })],
+    nexus_sales_clients: [mk('nexus_sales_clients', { id: 2, name: '舊品牌' })],
+    nexus_sales_billing_parties: [mk('nexus_sales_billing_parties', { id: 3, name: '舊公司' })],
+    nexus_sales_aliases: [mk('nexus_sales_aliases', { entity_type: 'client', alias_norm: '舊別名', entity_id: 2, alias_raw: '舊別名' })],
+  });
+  const m = mergeRows(ex, rowsOf({ nexus_sales_agencies: [AG1()] }), M_META);
+  assert.equal(m.rows.nexus_sales_agencies.length, 2);
+  assert.equal(m.rows.nexus_sales_clients.length, 1);
+  assert.equal(m.rows.nexus_sales_billing_parties.length, 1);
+  assert.equal(m.rows.nexus_sales_aliases.length, 1);
+});
+
+await ok('mergeRows：內容沒變 → 稽核欄沿用；NUMERIC "40000" 對 "40000.00" 視為沒變', () => {
+  const ex = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(3, 'A', { budget_net: '40000', last_seen_at: '2026-10-21' })] });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A', { budget_net: '40000.00' })] });
+  const m = mergeRows(ex, td, M_META);
+  const io = m.rows.nexus_sales_ios[0];
+  assert.equal(io.updated_by, 'seed'); assert.equal(io.updated_at, '2026-10-19T02:25:30.000Z');
+  assert.equal(m.rows.nexus_sales_agencies[0].updated_by, 'seed');
+});
+
+await ok('mergeRows：內容有變或新增 → updated_by/updated_at = meta', () => {
+  const ex = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(3, 'A', { budget_net: '40000' })] });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A', { budget_net: '50000.00' }), ioRow(2, 'NEW')] });
+  const m = mergeRows(ex, td, M_META);
+  for (const io of m.rows.nexus_sales_ios) { assert.equal(io.updated_by, 'sync'); assert.equal(io.updated_at, M_META.at); }
+  assert.equal(m.rows.nexus_sales_ios.find((r) => r.source_ref === 'A')!.budget_net, '50000.00');
+});
+
+await ok('mergeRows：今天有的 IO last_seen_at = meta.date', () => {
+  const m = mergeRows(rowsOf({ nexus_sales_agencies: [AG1()] }), rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A')] }), M_META);
+  assert.equal(m.rows.nexus_sales_ios[0].last_seen_at, '2026-10-22');
+});
+
+await ok('mergeRows：既有 last_seen_at 為 NULL → 以 updated_at 台北日期補上；今天沒出現的 IO 列入 vanishedIoIds', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [AG1()],
+    nexus_sales_ios: [ioRow(3, 'GONE', { updated_at: '2026-10-18T17:30:00.000Z' }), ioRow(4, 'STAY', { updated_at: '2026-10-18T17:30:00.000Z' })],
+  });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'STAY')] });
+  const m = mergeRows(ex, td, M_META);
+  const gone = m.rows.nexus_sales_ios.find((r) => r.source_ref === 'GONE')!;
+  assert.equal(gone.last_seen_at, '2026-10-19'); // UTC 10/18 17:30 = 台北 10/19 01:30
+  assert.deepEqual(m.vanishedIoIds, [3]);
+});
+
+await ok('mergeRows：vanished 只算「上次成功同步還在」的（last_seen_at = 既有最大值），更早就消失的不算', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [AG1()],
+    nexus_sales_ios: [ioRow(1, 'A', { last_seen_at: '2026-10-20' }), ioRow(2, 'B', { last_seen_at: '2026-10-18' })],
+  });
+  const m = mergeRows(ex, rowsOf({ nexus_sales_agencies: [AG1()] }), M_META);
+  assert.deepEqual(m.vanishedIoIds, [1]);
+});
+
+await ok('mergeRows：assignments 依鍵沿用 id，新規則往後編', () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(3, 'A')],
+    nexus_sales_io_assignments: [mk('nexus_sales_io_assignments', { id: 7, io_id: 3, platform: 'D', account_id: '1' })],
+  });
+  const td = rowsOf({
+    nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, 'A')],
+    nexus_sales_io_assignments: [
+      mk('nexus_sales_io_assignments', { id: 1, io_id: 1, platform: 'D', account_id: '1' }),
+      mk('nexus_sales_io_assignments', { id: 2, io_id: 1, platform: 'M', account_id: '9' }),
+    ],
+  });
+  const m = mergeRows(ex, td, M_META);
+  assert.deepEqual(m.rows.nexus_sales_io_assignments.map((r) => [r.id, r.platform]).sort(), [[7, 'D'], [8, 'M']]);
+});
+
+await ok('mergeRows：真實種子對空表合併 → 與 seedToRows 同筆數、通過 checkKeys；再合併一次結果不變（冪等）', () => {
+  const m1 = mergeRows(emptyRows(), ROWS, M_META);
+  assert.deepEqual(SALES_TABLES.map((t) => m1.rows[t].length), SALES_TABLES.map((t) => ROWS[t].length));
+  checkKeys(m1.rows);
+  const m2 = mergeRows(m1.rows, ROWS, M_META);
+  assert.deepEqual(m2.rows, m1.rows);
+  assert.deepEqual(m2.vanishedIoIds, []);
 });
 
 // <<後續 Task 的測試接在這裡>>
