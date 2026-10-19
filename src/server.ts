@@ -20,6 +20,7 @@ import { registerCoupangAds, BASE_PATH as COUPANGADS } from './tools/coupangads/
 import { registerD1VideoAd, BASE_PATH as D1VIDEOAD } from './tools/d1videoad/route.js';
 import { registerNexus, BASE_PATH as NEXUS } from './tools/nexus/route.js'; // tool#9 nexus 資料倉庫
 import { registerPacing, BASE_PATH as PACING } from './tools/pacing/route.js'; // tool#10 走速
+import { registerSales } from './tools/sales/route.js'; // 業績層級資料每日同步（只有 /cron，沒有頁面）
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
@@ -130,6 +131,7 @@ registerCoupangAds(app);
 registerD1VideoAd(app);
 registerNexus(app);
 registerPacing(app);
+registerSales(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));

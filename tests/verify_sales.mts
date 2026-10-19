@@ -16,6 +16,8 @@ import { deliverTabs, fetchSalesSheets, FINANCE_SHEET_ID, DELIVER_SHEET_ID, FINA
 import { checkSanity } from '../src/tools/sales/sanity.js';
 import { runSync, formatSyncAlert, formatSyncFailure, type SyncResult } from '../src/tools/sales/sync.js';
 import type { SuspectedDup } from '../src/tools/sales/dupes.js';
+import Fastify from 'fastify';
+import { registerSales, BASE_PATH as SALES_BASE } from '../src/tools/sales/route.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -965,6 +967,51 @@ await ok('formatSyncAlert：正常 → null；rejected → 含每條 problem；d
 await ok('formatSyncFailure：含日期與錯誤訊息', () => {
   const t = formatSyncFailure(new Error('沒有讀取試算表 X 的權限'), '2026-10-19');
   assert.ok(t.includes('2026-10-19') && t.includes('沒有讀取試算表 X 的權限') && t.includes('失敗'));
+});
+
+// ---------- route（Task 6）----------
+
+async function salesApp(run: typeof runSync) {
+  const posted: string[] = [];
+  const app = Fastify({ logger: false });
+  registerSales(app, { runSync: run, postChat: async (t: string) => { posted.push(t); return true; } });
+  await app.ready();
+  return { app, posted };
+}
+process.env.DIAG_KEY = 'test-key';
+
+await ok('route：key 錯 → 404，不跑 runSync', async () => {
+  let called = 0;
+  const { app } = await salesApp((async () => { called++; return baseResult({}); }) as typeof runSync);
+  const res = await app.inject({ method: 'POST', url: `${SALES_BASE}/cron?key=wrong` });
+  assert.equal(res.statusCode, 404); assert.equal(called, 0);
+});
+
+await ok('route：dry=1 → 200、回摘要與 alert、不 postChat', async () => {
+  let gotOpts: any;
+  const { app, posted } = await salesApp((async (o: any) => { gotOpts = o; return baseResult({ status: 'dry', dupes: [fakeDup(1)] }); }) as typeof runSync);
+  const res = await app.inject({ method: 'POST', url: `${SALES_BASE}/cron?key=test-key&dry=1` });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.status, 'dry'); assert.ok(String(body.alert).includes('疑似'));
+  assert.ok(!('seed' in body));
+  assert.equal(gotOpts.dry, true); assert.equal(gotOpts.deps.allowProdWrite, false);
+  assert.deepEqual(posted, []);
+});
+
+await ok('route：非 dry 有 alert → postChat 一次；allowProdWrite=true', async () => {
+  let gotOpts: any;
+  const { app, posted } = await salesApp((async (o: any) => { gotOpts = o; return baseResult({ dupes: [fakeDup(1)] }); }) as typeof runSync);
+  const res = await app.inject({ method: 'POST', url: `${SALES_BASE}/cron?key=test-key` });
+  assert.equal(res.statusCode, 200); assert.equal(posted.length, 1);
+  assert.equal(gotOpts.deps.allowProdWrite, true); assert.equal(gotOpts.by, 'sync');
+});
+
+await ok('route：runSync 丟錯 → 500、非 dry 時 postChat 一次', async () => {
+  const { app, posted } = await salesApp((async () => { throw new Error('爆了'); }) as typeof runSync);
+  const res = await app.inject({ method: 'POST', url: `${SALES_BASE}/cron?key=test-key` });
+  assert.equal(res.statusCode, 500); assert.equal(posted.length, 1);
+  assert.ok(posted[0].includes('爆了'));
 });
 
 // <<後續 Task 的測試接在這裡>>

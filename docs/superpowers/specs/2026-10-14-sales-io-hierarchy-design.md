@@ -294,10 +294,7 @@ CREATE TABLE reporting.nexus_sales_io_assignments (
 
 ## 8. 之後（不在本 spec）
 
-- **下一步：定期從兩份試算表同步到 BQ**（2026-10-19 使用者決定，讓資料保持最新）。現在只有 10/16、10/19 手動跑過兩次種子，沒有排程。規劃方向：
-  - ad_tools 線上加一個排程（例如每天一次），用線上服務帳號直接讀兩份試算表，照現有種子流程整批重寫 `nexus_sales_*`（不再經過 `poc/` 的 JSON 匯出）。
-  - 月表走速（`src/tools/pacing/source.ts`）線上已經讀得到；財務表要先分享給 `439393162392-compute@developer.gserviceaccount.com`（檢視者即可）。
-  - 這段期間試算表是唯一來源；**人工維護（管理介面）是再下一階段**，屆時另行規劃同步與人工資料怎麼並存（現在的整批重寫會蓋掉人工資料）。
+- **定期從兩份試算表同步到 BQ**：已另立設計 `docs/superpowers/specs/2026-10-19-sales-daily-sync-design.md`（每天 06:00、只增不減、IO 為單位保留、id 固定）。**人工維護（管理介面）是再下一階段**，屆時另行規劃同步與人工資料怎麼並存。
 - 管理介面：主檔維護、別名合併、IO 平台預算填寫、歸屬規則（含 campaign 規則、從衝突清單一鍵補）、未歸屬帳戶指定。
 - 歸屬計算引擎：可以直接在 BQ 用 `nexus_sales_io_assignments` JOIN `nexus_integrated_daily`（帳戶＋campaign＋日），campaign 層規則也不用另外準備花費資料。
 - `/ad-performance` 接上層級：`ad_report.py` 的查詢多 JOIN `nexus_sales_io_assignments`→`nexus_sales_ios`→`nexus_sales_clients`／`nexus_sales_agencies`，新增 client／經銷商／屬性維度；對不到的帳戶繼續用 `ad_brand_rules.py` 解析出的品牌。
@@ -314,9 +311,9 @@ CREATE TABLE reporting.nexus_sales_io_assignments (
 5. **大型 4A、日系沒有請款資料**：只有月表那一列，沒有發票、代操費、付款方。
 6. **月表 P 預估是剩餘公式**（總預算減 D/R/M），沒填分配就全算 P、可能為負；種子只寫 >0。
 7. **未驗證的假設**：「創異數位」＝台北數位創意的法人名（依據：外貿協會那張 IO 開票給創異數位，月表記在台北數位創意底下）；香港虎鯨＝陸客（沒有帳戶名、月表查不到）；「微型代理商」先當第 6 種屬性。
-8. **重跑會清空全部 `nexus_sales_` 表**：管理介面上線前沒有人工資料，清空不丟東西；介面上線後不再跑這支種子。
+8. ~~重跑會清空全部 `nexus_sales_` 表~~（2026-10-19 起改為每日同步、只增不減，見 daily-sync spec）。**疑似重複的盲點**：沒有任何歸屬規則的 IO，改寫鍵欄位造成的重複偵測不到。
 9. **財務資料進 BQ 的範圍**：只存公司名、統編、付款方式、金額與請款日期；聯絡人、Email、電話、地址不搬。試算表匯出 JSON 放 `poc/`（gitignored），不進 repo。`reporting` dataset 的讀取權限是專案層級（projectReaders／Writers／Owners，加一個個人 OWNER，2026-10-16 查），所以**有專案檢視權限的人都看得到發票金額**；要收緊得另開 dataset 或設欄位權限，本次不做。
 10. **幣別**：IO 金額為台幣未稅；之後對照的實際花費用 `nexus_coverage`（已是台幣）。V（D1 影音）×0.6 換算等做走速時處理。
 11. **BQ 不擋資料錯誤**：唯一鍵、外鍵都只有寫入程式檢查，之後管理介面直接寫 BQ 時也要自己檢查。
-12. **id 每次重跑都會換**：管理介面上線前，其他系統不要把 `nexus_sales_` 的 id 存起來；要引用就用 `name` 或 `(source, source_ref)`。
-13. **寫入程式會隨 ad_tools 部署**：`src/tools/sales/` 會跟著 `src/` 編進 image，但沒有任何路由或排程呼叫它，只有本機跑 `scripts/sales_seed.mts` 才會執行（`scripts/` 不在 Docker image 裡）。
+12. ~~id 每次重跑都會換~~（2026-10-19 起 id 固定；但改了 IO 鍵欄位會變成新 IO、新 id）。
+13. **寫入程式隨 ad_tools 部署**：2026-10-19 起由 `/tools/sales/cron`（Scheduler `sales-sync`）每天呼叫。
