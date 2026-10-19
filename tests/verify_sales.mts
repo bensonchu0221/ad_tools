@@ -938,6 +938,8 @@ await ok('runSync：非 dry → 寫入的是合併後全集（既有但今天沒
   const { bq, stage } = syncBq(ex);
   const r = await runSync({ dry: false, by: 'sync', now: SYNC_NOW, deps: syncDeps(bq), log: quiet });
   assert.equal(r.status, 'written');
+  assert.deepEqual(r.vanishedIoNames, ['OLD（OLD）']);
+  assert.equal(r.newIoNames.length, r.newIos);
   const ios = stage.get(stageTable('nexus_sales_ios'))!;
   assert.ok(ios.some((x) => x.id === 900 && x.source_ref === 'OLD'));
   assert.ok(ios.length > 1);
@@ -950,7 +952,7 @@ const fakeDup = (i: number): SuspectedDup => ({
   accounts: ['D37975'], overlap: ['2026-09-03', '2026-09-30'],
 });
 const baseResult = (o: Partial<SyncResult>): SyncResult => ({
-  date: '2026-10-19', status: 'written', problems: [], stats: null, newIos: 0, vanishedIos: 0, dupes: [], seed: null, ms: 1, ...o,
+  date: '2026-10-19', status: 'written', problems: [], stats: null, newIos: 0, vanishedIos: 0, newIoNames: [], vanishedIoNames: [], dupes: [], seed: null, ms: 1, ...o,
 });
 
 await ok('formatSyncAlert：正常 → null；rejected → 含每條 problem；dupes 12 組 → 列 10 組＋「另 2 組」', () => {

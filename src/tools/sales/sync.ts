@@ -27,6 +27,7 @@ export interface SyncResult {
   problems: string[];
   stats: Record<SalesTable, TableStats> | null;
   newIos: number; vanishedIos: number;
+  newIoNames: string[]; vanishedIoNames: string[]; // 「名稱（source_ref）」，最多 MAX_NAMES 筆；給 log／dry-run 核對用，不發 Chat
   dupes: SuspectedDup[];
   seed: Seed | null; // CLI 產覆蓋率報告用
   ms: number;
@@ -41,7 +42,8 @@ export async function runSync(opts: {
   const log = opts.log ?? console.log;
   const d: SyncDeps = { readSheet: sheetsApiReader, loadAccounts, allowProdWrite: false, ...opts.deps };
   const done = (o: Partial<SyncResult>): SyncResult => ({
-    date, status: opts.dry ? 'dry' : 'written', problems: [], stats: null, newIos: 0, vanishedIos: 0, dupes: [], seed: null, ...o, ms: Date.now() - t0,
+    date, status: opts.dry ? 'dry' : 'written', problems: [], stats: null, newIos: 0, vanishedIos: 0, newIoNames: [], vanishedIoNames: [],
+    dupes: [], seed: null, ...o, ms: Date.now() - t0,
   });
 
   const sheets = await fetchSalesSheets(date, d.readSheet);
@@ -64,13 +66,17 @@ export async function runSync(opts: {
   log(`讀入：財務 ${finance.length} 列、客戶資料 ${customers.length} 列、月表 ${tabs.join('/')} 共 ${deliver.length} 列；`
     + `IO 今天 ${today.nexus_sales_ios.length}、新增 ${merged.newIoIds.length}、剛消失 ${merged.vanishedIoIds.length}、合併後 ${merged.rows.nexus_sales_ios.length}`);
   if (!opts.dry) await writeRowsToBq(merged.rows, log, d.bq, { allowProd: d.allowProdWrite });
+  const byId = new Map(merged.rows.nexus_sales_ios.map((r) => [Number(r.id), r]));
+  const names = (ids: number[]) => ids.slice(0, MAX_NAMES).map((id) => `${byId.get(id)?.name}（${byId.get(id)?.source_ref}）`);
   return done({
     stats: merged.stats, newIos: merged.newIoIds.length, vanishedIos: merged.vanishedIoIds.length,
+    newIoNames: names(merged.newIoIds), vanishedIoNames: names(merged.vanishedIoIds),
     dupes: findSuspectedDuplicates(merged.rows, merged.vanishedIoIds, date), seed,
   });
 }
 
 const MAX_DUPES_IN_CHAT = 10;
+const MAX_NAMES = 20;
 
 /** Google Chat 通知文字；不需要通知回 null（spec §2-3：只在資料異常未寫入、疑似重複時發）。 */
 export function formatSyncAlert(r: SyncResult): string | null {
