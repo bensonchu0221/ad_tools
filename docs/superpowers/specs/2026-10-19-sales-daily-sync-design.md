@@ -4,6 +4,8 @@
 前置：`docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md`（以下稱「層級 spec」；表結構 §4、種子規則 §6、已知限制 §9）
 模組：`src/tools/sales/`
 
+**狀態（2026-10-19）**：已上線。BQ 加 `last_seen_at`、部署 a2efe83、線上 dry-run 比對後第一次正式寫入（8 表既有 id 全數不變、342 張 IO `last_seen_at` 補齊）；Cloud Scheduler `sales-sync`（每天 06:00 台北、不重試）已建立並手動觸發一次，結果與前次逐列相同（冪等）。
+
 ## 1. 目的與為什麼
 
 `nexus_sales_*` 8 張表目前只在 10/16、10/19 手動跑過兩次種子，資料會一天天變舊。使用者要它**每天自動跟上兩份試算表**。現在還沒有人抱怨資料太舊，這是主動維持新鮮度。
