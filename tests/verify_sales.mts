@@ -14,6 +14,8 @@ import { fromBq, mergeRows } from '../src/tools/sales/merge.js';
 import { findSuspectedDuplicates } from '../src/tools/sales/dupes.js';
 import { deliverTabs, fetchSalesSheets, FINANCE_SHEET_ID, DELIVER_SHEET_ID, FINANCE_TABS, type SheetReader } from '../src/tools/sales/sheets.js';
 import { checkSanity } from '../src/tools/sales/sanity.js';
+import { runSync, formatSyncAlert, formatSyncFailure, type SyncResult } from '../src/tools/sales/sync.js';
+import type { SuspectedDup } from '../src/tools/sales/dupes.js';
 
 let n = 0;
 const ok = (name: string, fn: () => void | Promise<void>) => Promise.resolve(fn()).then(() => { n++; console.log(`✓ ${name}`); });
@@ -865,6 +867,104 @@ await ok('checkSanity：廣告金額 90% 讀不到 → 報', () => {
   const p = checkSanity(sanityIn({ finance: finN(10, 9, 'amount') }));
   assert.equal(p.length, 1);
   assert.ok(p[0].includes('廣告金額'));
+});
+
+// ---------- sync（Task 5）----------
+
+/** Row → tabledata.list 回來的樣子（全字串、TIMESTAMP 是秒數）。 */
+function toRaw(t: SalesTable, r: Row): Record<string, string | null> {
+  const o: Record<string, string | null> = {};
+  for (const f of SALES_SCHEMA[t]) {
+    const v = r[f.name] ?? null;
+    o[f.name] = v === null ? null : f.type === 'TIMESTAMP' ? String(Date.parse(String(v)) / 1000) : String(v);
+  }
+  return o;
+}
+/** 假 BQ：existing＝正式表現況（null＝表不存在）；記錄呼叫、load 進暫存表的列，交易把暫存表搬到正式表。 */
+function syncBq(existing: SalesRows | null) {
+  const calls: string[] = [];
+  const stage = new Map<string, Record<string, unknown>[]>();
+  const full = new Map<string, unknown[]>();
+  if (existing) for (const t of SALES_TABLES) full.set(fullTable(t), existing[t].map((r) => toRaw(t, r)));
+  const bq: BqOps = {
+    ensureTable: async () => false,
+    deleteTable: async () => {},
+    loadRows: async (t, _s, rows) => { calls.push(`load ${t}`); stage.set(t, rows); },
+    dryRun: async () => 0,
+    query: async () => { calls.push('query'); for (const t of SALES_TABLES) full.set(fullTable(t), stage.get(stageTable(t)) ?? []); return []; },
+    listRows: async (t) => {
+      calls.push(`list ${t}`);
+      const v = full.get(t);
+      if (!v) throw new Error(`Not found: Table ${t}`);
+      return v;
+    },
+  };
+  return { bq, calls, stage };
+}
+const SYNC_NOW = new Date('2026-10-19T00:00:00.000Z'); // 台北 10/19
+const syncDeps = (bq: BqOps, reader: SheetReader = fakeReader(okTabs('2026-10-19'))) => ({ readSheet: reader, loadAccounts: async () => ACC, bq });
+
+await ok('runSync：dry → 不呼叫 loadRows/query，status=dry，stats 有值', async () => {
+  const { bq, calls } = syncBq(emptyRows());
+  const r = await runSync({ dry: true, by: 'sync', now: SYNC_NOW, deps: syncDeps(bq), log: quiet });
+  assert.equal(r.status, 'dry'); assert.equal(r.date, '2026-10-19');
+  assert.ok(!calls.some((c) => c.startsWith('load') || c === 'query'));
+  assert.equal(r.stats!.nexus_sales_ios.today, r.stats!.nexus_sales_ios.merged);
+  assert.ok(r.stats!.nexus_sales_ios.today > 0);
+});
+
+await ok('runSync：BQ 表還不存在（第一次）→ 當成空表', async () => {
+  const { bq } = syncBq(null);
+  const r = await runSync({ dry: true, by: 'sync', now: SYNC_NOW, deps: syncDeps(bq), log: quiet });
+  assert.equal(r.stats!.nexus_sales_ios.kept, 0);
+});
+
+await ok('runSync：健全性不過 → status=rejected、沒讀 BQ、沒寫', async () => {
+  const { bq, calls } = syncBq(emptyRows());
+  const reader: SheetReader = async (id, tab) => (id === FINANCE_SHEET_ID && tab === FINANCE_TABS.io ? [FIN_HEADER] : fakeReader(okTabs('2026-10-19'))(id, tab));
+  const r = await runSync({ dry: false, by: 'sync', now: SYNC_NOW, deps: syncDeps(bq, reader), log: quiet });
+  assert.equal(r.status, 'rejected');
+  assert.ok(r.problems.some((p) => p.includes('財務走期表讀回 0 列')));
+  assert.deepEqual(calls, []);
+});
+
+await ok('runSync：非 dry → 寫入的是合併後全集（既有但今天沒有的 IO 仍在 load 的列裡）', async () => {
+  const ex = rowsOf({
+    nexus_sales_agencies: [mk('nexus_sales_agencies', { id: 50, name: '舊經銷商', source: 'deliver' })],
+    nexus_sales_ios: [ioRow(900, 'OLD', { agency_id: 50, last_seen_at: '2026-10-18', start_date: '2026-09-01', end_date: '2026-09-30' })],
+  });
+  const { bq, stage } = syncBq(ex);
+  const r = await runSync({ dry: false, by: 'sync', now: SYNC_NOW, deps: syncDeps(bq), log: quiet });
+  assert.equal(r.status, 'written');
+  const ios = stage.get(stageTable('nexus_sales_ios'))!;
+  assert.ok(ios.some((x) => x.id === 900 && x.source_ref === 'OLD'));
+  assert.ok(ios.length > 1);
+  assert.equal(r.vanishedIos, 1);
+});
+
+const fakeDup = (i: number): SuspectedDup => ({
+  vanished: { id: i, name: `舊${i}`, sourceRef: `v${i}`, start: '2026-09-01', end: '2026-09-30' },
+  current: { id: 100 + i, name: `新${i}`, sourceRef: `c${i}`, start: '2026-09-03', end: '2026-09-30' },
+  accounts: ['D37975'], overlap: ['2026-09-03', '2026-09-30'],
+});
+const baseResult = (o: Partial<SyncResult>): SyncResult => ({
+  date: '2026-10-19', status: 'written', problems: [], stats: null, newIos: 0, vanishedIos: 0, dupes: [], seed: null, ms: 1, ...o,
+});
+
+await ok('formatSyncAlert：正常 → null；rejected → 含每條 problem；dupes 12 組 → 列 10 組＋「另 2 組」', () => {
+  assert.equal(formatSyncAlert(baseResult({})), null);
+  const rej = formatSyncAlert(baseResult({ status: 'rejected', problems: ['問題一', '問題二'] }))!;
+  assert.ok(rej.includes('未寫入') && rej.includes('問題一') && rej.includes('問題二'));
+  const d = formatSyncAlert(baseResult({ dupes: Array.from({ length: 12 }, (_, i) => fakeDup(i + 1)) }))!;
+  assert.ok(d.includes('12 組'));
+  assert.ok(d.includes('舊10') && !d.includes('舊11'));
+  assert.ok(d.includes('另 2 組'));
+  assert.ok(d.includes('D37975') && d.includes('2026-09-03'));
+});
+
+await ok('formatSyncFailure：含日期與錯誤訊息', () => {
+  const t = formatSyncFailure(new Error('沒有讀取試算表 X 的權限'), '2026-10-19');
+  assert.ok(t.includes('2026-10-19') && t.includes('沒有讀取試算表 X 的權限') && t.includes('失敗'));
 });
 
 // <<後續 Task 的測試接在這裡>>

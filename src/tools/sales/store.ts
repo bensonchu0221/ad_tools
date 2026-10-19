@@ -4,9 +4,10 @@
 import { bqDeleteTable, bqDryRun, bqEnsureTable, bqListTableRows, bqLoadRows, bqQuery } from '../../core/bigquery.js';
 import type { BqField, BqTableSpec } from '../../core/bigquery.js';
 import { pacingBhConfigs, pacingKnownAccounts, pacingWarehouseSpend } from '../../core/store.js';
+import { fromBq, type BqRaw } from './merge.js';
 import { mergeAccounts, validAccountId, type Account } from './names.js';
 import type { CoverageRow } from './report.js';
-import { checkKeys, swapSql, swapStatements, type SalesRows } from './rows.js';
+import { checkKeys, swapSql, swapStatements, type Row, type SalesRows } from './rows.js';
 import { SALES_SCHEMA, SALES_TABLES, SALES_TABLE_DESC, fullTable, stageTable, type SalesTable } from './schema.js';
 
 /** 換表 16 句 DML 的預估掃描量上限。表都很小，正常是 0 bytes；超過代表表名指錯了。1 GiB ≈ US$0.006。 */
@@ -84,6 +85,22 @@ export async function writeRowsToBq(
   for (const t of SALES_TABLES) {
     out[t] = (await bq.listRows(fullTable(t))).length; // tabledata.list，不計費
     if (out[t] !== rows[t].length) throw new Error(`${fullTable(t)} 回讀 ${out[t]} 列，應為 ${rows[t].length} 列`);
+  }
+  return out;
+}
+
+/** 8 張表現況（tabledata.list，不計費）並解碼成 Row。表還不存在（第一次）回空陣列。 */
+export async function readRowsFromBq(bq: BqOps = realBq): Promise<SalesRows> {
+  const out = {} as SalesRows;
+  for (const t of SALES_TABLES) {
+    let raw: unknown[];
+    try {
+      raw = await bq.listRows(fullTable(t));
+    } catch (e: any) {
+      if (e?.code === 404 || /not found/i.test(String(e?.message ?? e))) raw = [];
+      else throw e;
+    }
+    out[t] = fromBq(t, raw as BqRaw[]) as Row[];
   }
   return out;
 }
