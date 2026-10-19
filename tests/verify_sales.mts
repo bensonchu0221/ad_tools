@@ -1051,6 +1051,23 @@ await ok('mergeRows：既有主檔兩列名稱正規化後相同 → 丟錯，�
   assert.throws(() => mergeRows(ex, emptyRows(), M_META), /重複/);
 });
 
+await ok('mergeRows：月表 IO 只差帳戶名（補上或改掉）→ 視為同一張（沿用 id），source_ref 換成今天的', () => {
+  const dv = (id: number, ref: string) => ioRow(id, ref, { source: 'deliver', last_seen_at: '2026-10-21' });
+  const ex = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [dv(332, 'deliver|Freakout||陳重文競選服務處|202610')] });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [dv(1, 'deliver|Freakout|經銷商_FreakOut_選舉專案|陳重文競選服務處|202610')] });
+  const m = mergeRows(ex, td, M_META);
+  assert.equal(m.rows.nexus_sales_ios.length, 1);
+  assert.equal(m.rows.nexus_sales_ios[0].id, 332);
+  assert.equal(m.rows.nexus_sales_ios[0].source_ref, 'deliver|Freakout|經銷商_FreakOut_選舉專案|陳重文競選服務處|202610');
+  assert.deepEqual(m.vanishedIoIds, []);
+});
+
+await ok('mergeRows：財務 IO 的鍵不受影響（帳戶名是鍵的一部分時照舊區分）', () => {
+  const ex = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(5, '甲公司|#帳戶A|2026-01-01')] });
+  const td = rowsOf({ nexus_sales_agencies: [AG1()], nexus_sales_ios: [ioRow(1, '甲公司|#帳戶B|2026-01-01')] });
+  assert.equal(mergeRows(ex, td, M_META).rows.nexus_sales_ios.length, 2);
+});
+
 // <<後續 Task 的測試接在這裡>>
 
 console.log(`\n全部通過：${n} 項`);

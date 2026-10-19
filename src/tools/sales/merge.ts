@@ -127,8 +127,17 @@ export function mergeRows(existing: SalesRows, today: SalesRows, meta: { date: s
   // ---------- IO ----------
   const exIos = existing.nexus_sales_ios.map((r) =>
     r.last_seen_at === null || r.last_seen_at === undefined ? { ...r, last_seen_at: taipeiDate(String(r.updated_at)) } : r);
-  // source_ref 是組裡第一列的原始文字，正規化後再比：多一個空白、全半形、組內列順序換了都還是同一張 IO（只增不減下否則會永久多一張）
-  const ioKey = (r: Row) => `${r.source}|${normName(String(r.source_ref))}`;
+  // source_ref 是組裡第一列的原始文字，正規化後再比：多一個空白、全半形、組內列順序換了都還是同一張 IO（只增不減下否則會永久多一張）。
+  // 月表 IO 的 source_ref＝deliver|代理商|帳戶名|廣告主|起始月份，比對時不看帳戶名：帳戶名常是事後才補（2026-10-19 現有 176 張月表 IO 有 83 張空白），
+  // 補上就變新 IO、舊的永久留著重複算，而且舊的沒有歸屬規則、重複偵測也抓不到。今天兩列只差帳戶名時 mergeIdTable 會丟錯（不會默默併掉）。
+  const ioKey = (r: Row) => {
+    const ref = String(r.source_ref);
+    if (r.source === 'deliver') {
+      const p = ref.split('|');
+      if (p.length === 5) return `deliver|${normName(p[1])}|${normName(p[3])}|${p[4]}`;
+    }
+    return `${r.source}|${normName(ref)}`;
+  };
   const io = mergeIdTable('nexus_sales_ios', exIos, today.nexus_sales_ios, ioKey, (r) => stamp({
     ...r,
     agency_id: must(agencyMap, r.agency_id, '經銷商'),

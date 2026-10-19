@@ -61,7 +61,7 @@
 | clients | `normName(name)` | 更新、沿用 id | 保留 |
 | billing_parties | `normName(name)` | 更新、沿用 id | 保留 |
 | aliases | `(entity_type, alias_norm)` | 更新指向 | 保留 |
-| ios | `(source, source_ref)` | 欄位全部以今天為準、沿用 id、`last_seen_at`＝今天 | **整張保留**（含子表），`last_seen_at` 不動 |
+| ios | `(source, normName(source_ref))`；月表 IO 不看帳戶名段＝`(代理商, 廣告主, 起始月份)`（2026-10-19 上線前發現：帳戶名常事後補，補上就重複；見 §6 盲點） | 欄位全部以今天為準、沿用 id、`last_seen_at`＝今天 | **整張保留**（含子表），`last_seen_at` 不動 |
 | io_periods | 見 §4.3 | | |
 | io_allocations | 見 §4.3 | | |
 | io_assignments | 見 §4.3 | | |
