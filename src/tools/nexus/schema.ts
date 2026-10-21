@@ -100,7 +100,7 @@ export const P_SCHEMA: BqField[] = [
 // 裝置表：四平台共用一張。粒度各平台不同（D/R/P 到 campaign、M 只到帳戶 → campaign_id 為 NULL）。
 // 轉換事件各平台語意不同，放 events（JSON 字串，平台原生事件名 → 次數），由報表工具依自己的桶定義取用。
 export const DEVICE_SCHEMA: BqField[] = [
-  DATE, S('platform', 'D/R/M/P', 'REQUIRED'), ACCOUNT_ID, S('account_name'), S('campaign_id'),
+  DATE, S('platform', 'D/R/M/P/D1', 'REQUIRED'), ACCOUNT_ID, S('account_name'), S('campaign_id'),
   S('device', 'PC / Mobile / Tablet / Others'),
   I('imp'), I('click'), F('spend'),
   S('events', 'JSON：平台原生轉換事件名 → 次數'),
@@ -136,10 +136,61 @@ export const M_DEVICE_CONV_SCHEMA: BqField[] = [
   SYNCED_AT,
 ];
 
+// D1 影音（2026-10-21，設計 docs/superpowers/specs/2026-10-21-nexus-d1-ad-daily-design.md）：Action4 素材×日。
+// D 平台報表 API 一格影音都沒有，影音只在 Action4（D1 後台自己的報表來源）。使用者要求「Action4 有多少欄位就存多少」，
+// 表裡一律存原值：charge 不 ÷1000、不換客戶價，換算只在 view（與之後的 AM dashboard）做。
+// 欄位清單寫死（BQ schema 要穩定）；Action4 回了清單外的欄位照樣留在 raw，job 訊息帶警告。
+const D1_DEVICES = ['mobile', 'pc'] as const;
+const D1_METRIC_SUFFIX = [
+  'video_imp', 'video_imp_over', 'video_vertical_imp', 'video_vertical_imp_over', 'video_link', 'video_inview',
+  'video_2s', 'video_3s', 'video_25', 'video_50', 'video_75', 'video_95', 'video_100', 'video_full',
+  'video_playTimeSeconds', 'video_replay',
+] as const;
+const D1_CHARGE_SUFFIX = ['video_imp', 'video_imp_over', 'video_vertical_imp', 'video_vertical_imp_over'] as const;
+const snake = (s: string) => s.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+/** Action4 頂層數值欄（原名）與對應的 BQ 欄名，順序一一對應 */
+export const D1_ACTION4_METRICS: string[] = D1_DEVICES.flatMap((d) => D1_METRIC_SUFFIX.map((m) => `${d}_${m}`));
+export const D1_METRIC_COLS: string[] = D1_ACTION4_METRICS.map(snake);
+/** Action4 charge 子表欄（原名，含 M_ 高精度版）與對應的 BQ 欄名 */
+export const D1_ACTION4_CHARGES: string[] = ['', 'M_'].flatMap((pre) => D1_DEVICES.flatMap((d) => D1_CHARGE_SUFFIX.map((m) => `${pre}${d}_${m}`)));
+export const D1_CHARGE_COLS: string[] = D1_ACTION4_CHARGES.map((c) => `charge_${c.toLowerCase()}`);
+/** D1 後台「金額」＝客戶價 × 0.6（與 pacing/calc.ts V_RATE 同一個數；實測 D1 CPM 72 對預算表客戶 CPM 120）。只用在 view。 */
+export const D1_CLIENT_RATE = 0.6;
+
+function d1MetricDesc(a4: string): string {
+  const notes: Record<string, string> = {
+    video_imp: '收費曝光（橫式）', video_vertical_imp: '收費曝光（直式）', video_imp_over: '超預算未計費曝光（橫式）',
+    video_vertical_imp_over: '超預算未計費曝光（直式）', video_link: '點擊', video_100: '完整播放（D1 後台「已播放數」）',
+  };
+  const suffix = a4.replace(/^(mobile|pc)_/, '');
+  return `Action4 ${a4}${notes[suffix] ? `：${notes[suffix]}` : ''}；D1 後台只算 mobile`;
+}
+function d1ChargeDesc(a4: string): string {
+  return a4.startsWith('M_')
+    ? `Action4 charge.${a4}：同名欄位的 10^6 倍高精度版（原值）`
+    : `Action4 charge.${a4}（原值＝CPM×曝光）：D1 金額＝÷1000；客戶價＝再 ÷${D1_CLIENT_RATE}`;
+}
+
+export const D1_SCHEMA: BqField[] = [
+  { ...DATE, description: '數據日（台北日；Action4 只回有量的日子）' },
+  S('account_id', 'Firestore campaign.account（帳戶名，D1 沒有數字帳戶 ID）', 'REQUIRED'), S('account_name', '同 account_id'),
+  S('agency', 'campaign.agency'), S('campaign_id', 'campaign mongo id'), S('campaign_name'),
+  { name: 'vertical_video', type: 'BOOL', description: '直式影音' },
+  { name: 'campaign_deleted', type: 'BOOL', description: 'campaign 已刪除（被刪之前的數字照收）' },
+  S('ad_id', '素材 mongo id；campaign 有量卻查無素材時為 NULL（數字是 campaign 層）'),
+  S('ad_title', '素材 title'), S('ad_tag', '素材 tag（D1 後台素材卡上方中括號）'),
+  S('ad_text', '影音說明文（ad.video.description；素材頂層 description 全空，別用）'), S('ad_url', '落地頁'),
+  I('ad_status', '素材 status（停用的素材也照收）'), S('ad_created_at', '素材 createdtime 原字串（YYYY/MM/DD HH:mm:ss）'),
+  ...D1_ACTION4_METRICS.map((a4, i) => I(D1_METRIC_COLS[i], d1MetricDesc(a4))),
+  ...D1_ACTION4_CHARGES.map((a4, i) => F(D1_CHARGE_COLS[i], d1ChargeDesc(a4))),
+  S('raw', '當天 Action4 原始物件 JSON（含 charge）；清單外的新欄位也在這裡'),
+  SYNCED_AT,
+];
+
 // customer 對照表：目前由 AE/AM 在系統外維護，這張先建空表當「介面」。之後不論改成 Sheet 外部表
 // 或從 Cloud SQL 同步，只要表名與欄位不變，view 與 Looker 都不用改。
 export const CUSTOMER_MAP_SCHEMA: BqField[] = [
-  S('platform', 'D/R/M/P', 'REQUIRED'), ACCOUNT_ID, S('customer_name', '客戶名稱'),
+  S('platform', 'D/R/M/P/D1', 'REQUIRED'), ACCOUNT_ID, S('customer_name', '客戶名稱'),
   S('note'), { name: 'updated_at', type: 'TIMESTAMP' },
 ];
 
@@ -148,8 +199,9 @@ export const FACT_TABLE: Record<Platform, string> = {
   R: nexusTable('r_cr_daily'),
   M: nexusTable('m_teaser_daily'),
   P: nexusTable('p_creative_daily'),
+  D1: nexusTable('d1_ad_daily'),
 };
-export const FACT_SCHEMA: Record<Platform, BqField[]> = { D: D_SCHEMA, R: R_SCHEMA, M: M_SCHEMA, P: P_SCHEMA };
+export const FACT_SCHEMA: Record<Platform, BqField[]> = { D: D_SCHEMA, R: R_SCHEMA, M: M_SCHEMA, P: P_SCHEMA, D1: D1_SCHEMA };
 export const DEVICE_TABLE = nexusTable('device_daily');
 export const MEDIA_TABLE = nexusTable('media_daily');
 export const M_DEVICE_CONV_TABLE = nexusTable('m_device_conv_daily');
@@ -161,6 +213,7 @@ export const TABLE_SPECS: BqTableSpec[] = [
   { table: FACT_TABLE.R, schema: R_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id'], description: 'nexus：R 平台 素材×日' },
   { table: FACT_TABLE.M, schema: M_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id'], description: 'nexus：M 平台 teaser×日' },
   { table: FACT_TABLE.P, schema: P_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id'], description: 'nexus：P 平台 素材×日' },
+  { table: FACT_TABLE.D1, schema: D1_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id'], description: 'nexus：D1 影音 素材×日（Action4 原值）' },
   { table: DEVICE_TABLE, schema: DEVICE_SCHEMA, partitionField: 'date', clustering: ['platform', 'account_id'], description: 'nexus：四平台 裝置×日' },
   // 叢集照 dashboard 主查詢：某天某媒體 → 各帳戶
   { table: MEDIA_TABLE, schema: MEDIA_SCHEMA, partitionField: 'date', clustering: ['platform', 'media', 'account_id'], description: 'nexus：四平台 媒體×帳戶×日' },
@@ -169,7 +222,7 @@ export const TABLE_SPECS: BqTableSpec[] = [
 ];
 
 /**
- * 統一 view：四平台投影成同一套欄位，再 LEFT JOIN customer 對照。Looker 與各報表工具讀這層。
+ * 統一 view：五平台（D/R/M/P/D1）投影成同一套欄位，再 LEFT JOIN customer 對照。Looker 與各報表工具讀這層。
  * 沒有對照到的帳戶 customer 退回 account_name，老闆的報表不會因為對照表沒填而少數字。
  * ⚠️ 底下的表都開了 requirePartitionFilter ⇒ 查 view 也必須帶 date 條件（Looker 請設定日期範圍）。
  * 轉換不放進來：四平台轉換語意不同，硬加總會誤導；要看轉換請用各平台原始表。
@@ -198,6 +251,14 @@ WITH unioned AS (
          creative_id, creative_name, COALESCE(NULLIF(title, 'Unknown'), creative_name), NULL, NULL,
          impressions, clicks, spend, NULL
   FROM ${q(FACT_TABLE.P)}
+  UNION ALL
+  -- D1 影音：只算 mobile（D1 後台、BH、tool#8 都只算 mobile）；花費換成客戶價＝D1 金額 ÷ ${D1_CLIENT_RATE}。
+  -- ⚠️ 0.6 是從 CPM 72 對客戶 CPM 120 得出，CPM 非 72 的 campaign（例 chubblife 2026-05~06 CPM 90）客戶價可能不準
+  SELECT 'D1', date, account_id, account_name, campaign_id, campaign_name, NULL, NULL,
+         ad_id, ad_title, COALESCE(NULLIF(ad_text, ''), ad_title), ad_url, NULL,
+         mobile_video_imp + mobile_video_vertical_imp, mobile_video_link,
+         (charge_mobile_video_imp + charge_mobile_video_vertical_imp) / 1000 / ${D1_CLIENT_RATE}, NULL
+  FROM ${q(FACT_TABLE.D1)}
 )
 SELECT u.*, m.customer_name, COALESCE(m.customer_name, u.account_name) AS customer
 FROM unioned u

@@ -13,7 +13,10 @@ import {
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
-import { D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, M_DEVICE_CONV_SCHEMA, integratedViewSql } from '../src/tools/nexus/schema.js';
+import {
+  D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, M_DEVICE_CONV_SCHEMA, integratedViewSql,
+  D1_SCHEMA, D1_METRIC_COLS, D1_CHARGE_COLS, D1_ACTION4_METRICS, D1_ACTION4_CHARGES, D1_CLIENT_RATE, FACT_TABLE,
+} from '../src/tools/nexus/schema.js';
 import {
   reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, summarizeConvRecon, reconLevel, fmtMatch, reconDue, reconDueDates, RECON,
 } from '../src/tools/nexus/recon.js';
@@ -530,12 +533,12 @@ await ok('R 媒體分批：單一帳戶仍截斷且有 fetchSingle → 改用分
   assert.deepEqual(rows, [{ user_id: '1' }, { user_id: '2', paged: true }]);
 });
 
-await ok('view SQL：四平台 UNION＋customer 對照先收斂成一帳一列', () => {
+await ok('view SQL：五平台（含 D1）UNION＋customer 對照先收斂成一帳一列', () => {
   const sql = integratedViewSql();
-  for (const t of ['nexus_d_ad_daily', 'nexus_r_cr_daily', 'nexus_m_teaser_daily', 'nexus_p_creative_daily', 'nexus_customer_account_map']) {
+  for (const t of ['nexus_d_ad_daily', 'nexus_r_cr_daily', 'nexus_m_teaser_daily', 'nexus_p_creative_daily', 'nexus_d1_ad_daily', 'nexus_customer_account_map']) {
     assert.ok(sql.includes(t), t);
   }
-  assert.equal((sql.match(/UNION ALL/g) ?? []).length, 3);
+  assert.equal((sql.match(/UNION ALL/g) ?? []).length, 4);
   assert.match(sql, /GROUP BY platform, account_id/);
 });
 
@@ -1306,6 +1309,38 @@ await ok('狀態頁：M 卡片多一行「轉換層」並依吻合上色；浮�
   const none = healthBase();
   none.recon = { checkedAt: '2026-09-24 04:32:00', rows: [cvRow('7', [100, 0, 10, 2])] }; // 還沒回補
   assert.doesNotMatch(statusPage({ input: none, health: evaluateHealth(none), batchJobs, jobs: batchJobs }), />轉換層[ ：]/);
+});
+
+// ────────────────────────────── D1 影音（2026-10-21） ──────────────────────────────
+
+await ok('D1 schema：Action4 32 個主欄＋16 個 charge 全收、另有 raw；欄名轉 snake_case', () => {
+  assert.equal(D1_METRIC_COLS.length, 32);
+  assert.equal(D1_CHARGE_COLS.length, 16);
+  assert.equal(D1_ACTION4_METRICS.length, 32);
+  assert.equal(D1_ACTION4_CHARGES.length, 16);
+  const names = D1_SCHEMA.map((f) => f.name);
+  for (const c of ['date', 'account_id', 'agency', 'campaign_id', 'vertical_video', 'campaign_deleted', 'ad_id', 'ad_title', 'ad_tag', 'ad_text', 'ad_url',
+    'ad_status', 'ad_created_at', 'mobile_video_imp', 'pc_video_vertical_imp_over', 'mobile_video_play_time_seconds', 'pc_video_2s',
+    'charge_mobile_video_imp', 'charge_m_pc_video_vertical_imp_over', 'raw', 'synced_at']) assert.ok(names.includes(c), c);
+  assert.equal(new Set(names).size, names.length, '欄名不可重複');
+  assert.ok(D1_ACTION4_METRICS.includes('mobile_video_playTimeSeconds'));
+  assert.equal(D1_METRIC_COLS[D1_ACTION4_METRICS.indexOf('mobile_video_playTimeSeconds')], 'mobile_video_play_time_seconds');
+  assert.equal(D1_CHARGE_COLS[D1_ACTION4_CHARGES.indexOf('M_mobile_video_imp')], 'charge_m_mobile_video_imp');
+  assert.equal(FACT_TABLE.D1, 'popinpoc1.reporting.nexus_d1_ad_daily');
+  assert.equal(D1_SCHEMA.find((f) => f.name === 'charge_mobile_video_imp')!.type, 'FLOAT64');
+  assert.match(D1_SCHEMA.find((f) => f.name === 'charge_mobile_video_imp')!.description ?? '', /÷1000/);
+});
+
+await ok('D1 view：只算 mobile、花費 ÷1000÷0.6 換客戶價', () => {
+  assert.equal(D1_CLIENT_RATE, 0.6);
+  const sql = integratedViewSql();
+  const seg = sql.slice(sql.indexOf("'D1'"), sql.indexOf('FROM', sql.indexOf("'D1'")));
+  assert.ok(seg.length > 0, '沒有 D1 段');
+  assert.match(seg, /mobile_video_imp \+ mobile_video_vertical_imp/);
+  assert.match(seg, /mobile_video_link/);
+  assert.match(seg, /\(charge_mobile_video_imp \+ charge_mobile_video_vertical_imp\) \/ 1000 \/ 0\.6/);
+  assert.doesNotMatch(seg, /pc_video|imp_over/);
+  assert.match(sql, /`popinpoc1\.reporting\.nexus_d1_ad_daily`/);
 });
 
 console.log(`\n全部 ${n} 項通過`);
