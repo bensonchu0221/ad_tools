@@ -2228,7 +2228,8 @@ export async function getCoupangStatsSyncedAt(sd: string, ed: string): Promise<s
 // nexus_coverage 記「每個平台帳戶每天寫進 BQ 幾列」：①全空的帳戶可以跳過 BQ 寫入（D 每天 200 多個帳戶
 // 大多沒投放，不必每個都跑一次 BQ transaction）②防呆：以前有數字、這次抓回 0 列時拒寫 ③狀態頁用。
 
-export type NexusPlatform = 'D' | 'R' | 'M' | 'P';
+// D1＝D1 影音（Action4，2026-10-21）。平台代號兩個字元 ⇒ Cloud SQL platform 欄是 VARCHAR(4)（原本 CHAR(1)）
+export type NexusPlatform = 'D' | 'R' | 'M' | 'P' | 'D1';
 export type NexusJobKind = 'daily' | 'backfill';
 
 export interface NexusJobInput {
@@ -2260,7 +2261,7 @@ async function nexusPool(): Promise<mysql.Pool> {
       id BIGINT AUTO_INCREMENT PRIMARY KEY,
       batch VARCHAR(64) NOT NULL,
       kind ENUM('daily','backfill') NOT NULL,
-      platform CHAR(1) NOT NULL,
+      platform VARCHAR(4) NOT NULL,
       account_id VARCHAR(64) NOT NULL,
       account_name VARCHAR(255) NOT NULL DEFAULT '',
       sd DATE NOT NULL,
@@ -2280,7 +2281,7 @@ async function nexusPool(): Promise<mysql.Pool> {
   `);
   await p.query(`
     CREATE TABLE IF NOT EXISTS nexus_coverage (
-      platform CHAR(1) NOT NULL,
+      platform VARCHAR(4) NOT NULL,
       account_id VARCHAR(64) NOT NULL,
       dt DATE NOT NULL,
       account_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -2296,7 +2297,7 @@ async function nexusPool(): Promise<mysql.Pool> {
   await p.query(`
     CREATE TABLE IF NOT EXISTS nexus_recon (
       dt DATE NOT NULL,
-      platform CHAR(1) NOT NULL,
+      platform VARCHAR(4) NOT NULL,
       account_id VARCHAR(64) NOT NULL,
       account_name VARCHAR(255) NOT NULL DEFAULT '',
       f_imp BIGINT NOT NULL DEFAULT 0, f_click BIGINT NOT NULL DEFAULT 0, f_spend DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -2322,6 +2323,15 @@ async function nexusPool(): Promise<mysql.Pool> {
     await p.query(`ALTER TABLE nexus_recon
       ADD COLUMN cf_click BIGINT NULL, ADD COLUMN cf_interest BIGINT NULL, ADD COLUMN cf_decision BIGINT NULL, ADD COLUMN cf_buy BIGINT NULL,
       ADD COLUMN cd_click BIGINT NULL, ADD COLUMN cd_interest BIGINT NULL, ADD COLUMN cd_decision BIGINT NULL, ADD COLUMN cd_buy BIGINT NULL`);
+  }
+  // 2026-10-21 平台代號多了 D1（兩個字元）：CHAR(1) 在非嚴格模式會把 'D1' 靜默截成 'D'，混進 D 平台的 job／覆蓋紀錄，
+  // 所以三張表都先放寬再說（MODIFY 會重建表，只在欄寬還不夠時才做）
+  const [pcols] = await p.query(
+    `SELECT table_name AS t, character_maximum_length AS len FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND column_name = 'platform' AND table_name IN ('nexus_jobs','nexus_coverage','nexus_recon')`
+  );
+  for (const r of pcols as any[]) {
+    if (Number(r.len ?? r.LEN) < 4) await p.query(`ALTER TABLE ${String(r.t ?? r.T)} MODIFY platform VARCHAR(4) NOT NULL`);
   }
   nexusSchemaReady = true;
   return p;

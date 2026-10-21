@@ -24,7 +24,7 @@ export const BACKFILL_START = '2026-05-21';
 /** 每日排程重抓天數（T-1、T-2）。 */
 export const DAILY_DAYS = 2;
 /** 回補每個 job 的日期長度：D 的 per-ad 限流 1 req/s 最慢，切小才不會超過 Cloud Run 600 秒。 */
-export const BACKFILL_CHUNK_DAYS: Record<NexusPlatform, number> = { D: 14, R: 30, M: 30, P: 30 };
+export const BACKFILL_CHUNK_DAYS: Record<NexusPlatform, number> = { D: 14, R: 30, M: 30, P: 30, D1: 30 };
 /** M 裝置 job（Redash 全平台）的回補切段：Redash 一次查太多天會排很久，切 7 天。 */
 export const M_DEVICE_CHUNK_DAYS = 7;
 /** M 裝置 job 的帳戶欄：'*'＝全平台，寫裝置表＋事實表的 client: 墊底列（其餘事實列由各帳戶 job 寫）。 */
@@ -129,6 +129,8 @@ const ACCOUNT_ID_RE: Record<NexusPlatform, RegExp> = {
   R: /^\d+$/,
   M: /^(client:)?\d+$/,
   P: /^(\d{3}-\d{3}-\d{4}|\(unattributed\))$/,
+  // D1 影音的帳戶鍵是 Firestore campaign 的帳戶名（例 4A_CPM_juliat、Pharma_Icareyou_45845@A）；64＝Cloud SQL account_id 欄寬
+  D1: /^[A-Za-z0-9_.@-]{1,64}$/,
 };
 export const isValidAccountId = (platform: NexusPlatform, id: unknown): boolean => ACCOUNT_ID_RE[platform].test(String(id ?? ''));
 

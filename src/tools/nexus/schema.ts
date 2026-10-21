@@ -15,7 +15,7 @@ import type { BqField, BqTableSpec } from '../../core/bigquery.js';
 export const NEXUS_PREFIX = process.env.NEXUS_BQ_PREFIX ?? 'popinpoc1.reporting.nexus_';
 export const nexusTable = (name: string) => `${NEXUS_PREFIX}${name}`;
 
-export type Platform = 'D' | 'R' | 'M' | 'P';
+export type Platform = 'D' | 'R' | 'M' | 'P' | 'D1';
 
 const S = (name: string, description?: string, mode: BqField['mode'] = 'NULLABLE'): BqField =>
   ({ name, type: 'STRING', mode, description });

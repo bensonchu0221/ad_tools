@@ -315,6 +315,13 @@ await ok('寫入前檢查：日期超出區間或帳戶不符都拒寫', () => {
   assertRowsInSlice([{ date: '2026-09-22', account_id: '2' }], '2026-09-21', '2026-09-22', null, 'x');
 });
 
+await ok('帳戶 ID 格式：D1 是 Firestore 帳戶名（英數＿.@-，最長 64），空白／空字串／超長不合法', () => {
+  for (const id of ['4A_CPM_juliat', 'Pharma_Icareyou_45845@A', 'betty@popin.cccc', 'CPM_MundoPixarExperience', 'x'.repeat(64)]) {
+    assert.ok(isValidAccountId('D1', id), id);
+  }
+  for (const id of ['', 'nan x', '帳戶', 'x'.repeat(65)]) assert.ok(!isValidAccountId('D1', id), id);
+});
+
 await ok('帳戶 ID 格式：D/R 純數字、M 可帶 client:、P 為 xxx-xxx-xxxx 或 (unattributed)；nan／空字串一律不合法', () => {
   for (const [p, id] of [['D', '37975'], ['R', '10208'], ['M', '866244'], ['M', `${M_UNMAPPED_PREFIX}991479`], ['P', '686-552-3336'], ['P', P_UNATTRIBUTED]] as const) {
     assert.ok(isValidAccountId(p, id), `${p} ${id}`);
