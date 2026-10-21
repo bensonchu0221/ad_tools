@@ -746,9 +746,9 @@ const rr = (platform: any, accountId: string, f: [number, number, number], d: [n
   fact: { imp: f[0], click: f[1], spend: f[2] }, device: { imp: d[0], click: d[1], spend: d[2] },
 });
 
-await ok('比對 SQL：四張事實表＋裝置表＋媒體表＋M 轉換兩邊都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
+await ok('比對 SQL：五張事實表（含 D1）＋裝置表＋媒體表＋M 轉換兩邊都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
   const sql = reconSql('2026-09-23');
-  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 8);
+  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 9);
   assert.match(sql, /nexus_media_daily/);
   assert.match(sql, /FULL OUTER JOIN m USING \(platform, account_id\)/);
   assert.match(sql, /SUM\(charge\)/);
@@ -1441,6 +1441,17 @@ await ok('D1 job：整平台寫入（accountId null）、覆蓋紀錄只算 mobi
   deps.today = '2026-10-21';
   await runNexusJob({ platform: 'D1', accountId: '*', accountName: 'D1 影音全平台', sd: '2026-09-21', ed: '2026-09-22' }, () => {}, deps);
   assert.deepEqual(calls, ['write:D1:null:1', 'cov:D1:null:1']);
+});
+
+await ok('比對 SQL：D1 事實投影＝mobile＋pc 收費曝光（不含 over）、兩個 link、charge 和 ÷1000', () => {
+  const sql = reconSql('2026-10-14');
+  const seg = sql.slice(sql.indexOf("'D1' AS platform"), sql.indexOf('GROUP BY', sql.indexOf("'D1' AS platform")));
+  assert.ok(seg.length > 20, '沒有 D1 段');
+  for (const c of ['mobile_video_imp', 'mobile_video_vertical_imp', 'pc_video_imp', 'pc_video_vertical_imp', 'mobile_video_link', 'pc_video_link',
+    'charge_mobile_video_imp', 'charge_pc_video_vertical_imp']) assert.ok(seg.includes(c), c);
+  assert.doesNotMatch(seg, /imp_over/);
+  assert.match(seg, /\/ 1000/);
+  assert.match(seg, /nexus_d1_ad_daily/);
 });
 
 console.log(`\n全部 ${n} 項通過`);

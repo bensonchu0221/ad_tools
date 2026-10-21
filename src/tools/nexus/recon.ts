@@ -32,12 +32,15 @@ export type Metric = (typeof METRICS)[number];
 export function reconSql(dt: string): string {
   const d = `DATE ${sqlString(dt)}`;
   const q = (t: string) => `\`${t}\``;
-  // 各平台事實表的曝光／點擊／花費欄名不同
+  // 各平台事實表的曝光／點擊／花費（欄名或運算式）。D1 跟裝置表一樣是 mobile＋pc 全裝置、不含 *_imp_over、
+  // 花費＝charge ÷1000 的 D1 金額原值；素材層（素材 nid）vs 裝置層（campaign nid）是兩次獨立的 Action4 查詢
+  const d1Imp = ['mobile_video_imp', 'mobile_video_vertical_imp', 'pc_video_imp', 'pc_video_vertical_imp'];
   const cols: Record<NexusPlatform, [string, string, string]> = {
     D: ['imp', 'click', 'charge'],
     R: ['impression', 'click', 'payment_revenue'],
     M: ['imp', 'click', 'spend'],
     P: ['impressions', 'clicks', 'spend'],
+    D1: [d1Imp.join(' + '), 'mobile_video_link + pc_video_link', `(${d1Imp.map((c) => `charge_${c}`).join(' + ')}) / 1000`],
   };
   const facts = (Object.keys(cols) as NexusPlatform[]).map((p) => {
     const [imp, click, spend] = cols[p];
