@@ -149,7 +149,7 @@ export function pickCampaigns(all: D1VideoCampaign[], input: ReportInput): D1Vid
 }
 
 /** 併發跑 worker pool，保留輸入順序。 */
-async function pooled<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function pooled<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let idx = 0;
   await Promise.all(

@@ -92,6 +92,10 @@ export interface D1VideoAd {
   copy: string;
   /** 建立時間（D1 存的字串，如 `2026/06/01 20:05:45`）。素材標題大量撞名，靠這欄與 id 才分得開 */
   createdAt: string;
+  /** D1 後台素材卡上方中括號的廣告標籤（676 支只有 160 支有值） */
+  tag?: string;
+  /** 落地頁 */
+  url?: string;
 }
 
 /**
@@ -110,7 +114,7 @@ export async function listD1VideoAds(campaignIds: string[]): Promise<D1VideoAd[]
   const docs = await col
     .find(
       { campaign: { $in: campaignIds } },
-      { projection: { title: 1, campaign: 1, status: 1, deleted: 1, createdtime: 1, video: 1 } }
+      { projection: { title: 1, campaign: 1, status: 1, deleted: 1, createdtime: 1, video: 1, tag: 1, url: 1 } }
     )
     .toArray();
   return docs.map(mapVideoAdDoc);
@@ -131,6 +135,8 @@ export function mapVideoAdDoc(d: Document): D1VideoAd {
     deleted: d.deleted === true,
     copy: String((d.video as Record<string, unknown> | undefined)?.description ?? ''),
     createdAt: String(d.createdtime ?? ''),
+    tag: String(d.tag ?? ''),
+    url: String(d.url ?? ''),
   };
 }
 

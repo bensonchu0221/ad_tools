@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
   toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, toMDeviceConvRows,
+  toD1Rows, toD1DeviceRows, d1MobileImp, d1MobileSpend,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -1341,6 +1342,68 @@ await ok('D1 view：只算 mobile、花費 ÷1000÷0.6 換客戶價', () => {
   assert.match(seg, /\(charge_mobile_video_imp \+ charge_mobile_video_vertical_imp\) \/ 1000 \/ 0\.6/);
   assert.doesNotMatch(seg, /pc_video|imp_over/);
   assert.match(sql, /`popinpoc1\.reporting\.nexus_d1_ad_daily`/);
+});
+
+const d1Camp = { id: 'c1', name: 'juliat_Video_橫式', account: '4A_CPM_juliat', agency: 'popintw', verticalVideo: false, deleted: true };
+const d1Ad = { id: 'a1', campaignId: 'c1', title: 'juliArt', status: 0, deleted: false, copy: '夏天頭皮油悶癢？', createdAt: '2026/09/05 01:32:25', tag: '產品形象_淨化液', url: 'https://lp' };
+// 實測 2026-09-21 campaign 6a964798… 的形狀（沒量的欄位整個不出現）
+const d1Day = () => ({
+  mobile_video_imp: 1349, mobile_video_vertical_imp: 100, mobile_video_imp_over: 7, mobile_video_link: 1, mobile_video_100: 440, mobile_video_playTimeSeconds: 1342,
+  pc_video_imp: 38, pc_video_100: 16,
+  charge: { mobile_video_imp: 97128, mobile_video_vertical_imp: 7200, M_mobile_video_imp: 97128000000, pc_video_imp: 2736, mobile_video_imp_over: 504 },
+});
+
+await ok('D1 事實列：缺欄存 0、charge 存原值不 ÷1000、raw 是當天原始物件、日期轉 YYYY-MM-DD、素材欄位接回', () => {
+  const { rows, unknown } = toD1Rows(d1Camp, d1Ad, { '20260921': d1Day() }, T);
+  assert.equal(rows.length, 1);
+  const r = rows[0];
+  assert.deepEqual(Object.keys(r).sort(), keysOf(D1_SCHEMA));
+  assert.equal(r.date, '2026-09-21');
+  assert.equal(r.account_id, '4A_CPM_juliat');
+  assert.equal(r.account_name, '4A_CPM_juliat');
+  assert.equal(r.campaign_deleted, true);
+  assert.equal(r.ad_id, 'a1');
+  assert.equal(r.ad_text, '夏天頭皮油悶癢？');
+  assert.equal(r.ad_tag, '產品形象_淨化液');
+  assert.equal(r.ad_status, 0);
+  assert.equal(r.mobile_video_imp, 1349);
+  assert.equal(r.mobile_video_play_time_seconds, 1342);
+  assert.equal(r.pc_video_link, 0);
+  assert.equal(r.charge_mobile_video_imp, 97128);
+  assert.equal(r.charge_m_mobile_video_imp, 97128000000);
+  assert.equal(r.charge_pc_video_vertical_imp, 0);
+  assert.deepEqual(JSON.parse(String(r.raw)), d1Day());
+  assert.deepEqual(unknown, []);
+});
+
+await ok('D1 事實列：清單外的數值欄位回報 unknown（raw 照存）；查無素材時 ad_id 為 NULL', () => {
+  const day = { ...d1Day(), mobile_video_new: 3, charge: { ...d1Day().charge, M_new_thing: 1 } };
+  const { rows, unknown } = toD1Rows(d1Camp, null, { '20260921': day }, T);
+  assert.deepEqual(unknown.sort(), ['charge.M_new_thing', 'mobile_video_new']);
+  assert.equal(rows[0].ad_id, null);
+  assert.equal(rows[0].ad_title, null);
+  assert.equal(JSON.parse(String(rows[0].raw)).mobile_video_new, 3);
+});
+
+await ok('D1 裝置列：Mobile＝imp＋vertical（不含 over）、spend＝charge÷1000 原值；PC 同理；整列 0 不寫', () => {
+  const rows = toD1DeviceRows(d1Camp, { '20260921': d1Day(), '20260922': { mobile_video_imp_over: 5, charge: { mobile_video_imp_over: 360 } } }, T);
+  assert.deepEqual(rows.map((r) => `${r.date}|${r.device}`), ['2026-09-21|Mobile', '2026-09-21|PC']);
+  const m = rows[0], pc = rows[1];
+  assert.deepEqual(Object.keys(m).sort(), keysOf(DEVICE_SCHEMA));
+  assert.equal(m.platform, 'D1');
+  assert.equal(m.campaign_id, 'c1');
+  assert.equal(m.imp, 1449);
+  assert.equal(m.click, 1);
+  assert.equal(m.spend, 104.328);
+  assert.equal(m.events, null);
+  assert.equal(pc.imp, 38);
+  assert.equal(pc.spend, 2.736);
+});
+
+await ok('D1 事實列 → mobile 收費曝光／D1 金額（coverage 與 BH 同口徑：只 mobile、不含 over）', () => {
+  const { rows } = toD1Rows(d1Camp, d1Ad, { '20260921': d1Day() }, T);
+  assert.equal(d1MobileImp(rows[0]), 1449);
+  assert.equal(d1MobileSpend(rows[0]), 104.328);
 });
 
 console.log(`\n全部 ${n} 項通過`);

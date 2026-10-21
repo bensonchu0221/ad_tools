@@ -16,7 +16,13 @@ import { fetchPrismReportAll, normalizePrismDate } from '../../core/prism.js';
 import { fetchCvDetailMap } from '../adstream/run.js';
 import { parseLooseDate } from '../weeklyreport/report.js';
 import { bqQuery, sqlString } from '../../core/bigquery.js';
-import { D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, type Platform } from './schema.js';
+import {
+  D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, type Platform,
+  D1_ACTION4_METRICS, D1_METRIC_COLS, D1_ACTION4_CHARGES, D1_CHARGE_COLS,
+} from './schema.js';
+import { listD1VideoCampaigns, listD1VideoAds, type D1VideoCampaign, type D1VideoAd } from '../../core/firestore_d1.js';
+import { fetchCampaignStats, isDateKey, type Action4Report } from '../../core/action4.js';
+import { pooled } from '../d1videoad/report.js';
 
 export type Row = Record<string, unknown>;
 /**
@@ -872,4 +878,109 @@ export async function fetchPAll(sd: string, ed: string, syncedAt: string, onPhas
     dimensions: ['date', 'advertiser', 'campaign_id', 'domain', 'slot'], metrics: ['impressions', 'clicks', 'spend'],
   });
   return { facts: toPRows(raw, syncedAt), device: toPDeviceRows(dev, syncedAt), media: toPMediaRows(med, syncedAt), warnings: [] };
+}
+
+// ────────────────────────────── D1 影音（2026-10-21） ──────────────────────────────
+// 來源＝Action4（D1 後台自己的報表來源，公網免認證）＋Firestore article-action（campaign／素材清單）。
+// 表存原值（charge 不 ÷1000、不換客戶價），換算只在 view 做。坑都在 src/tools/d1videoad/CLAUDE.md。
+
+/** tool#8 實測：18 支併發 6 約 1 秒，Action4 沒有限流問題 */
+export const D1_CONCURRENCY = 6;
+const D1_METRIC_SET = new Set(D1_ACTION4_METRICS);
+const D1_CHARGE_SET = new Set(D1_ACTION4_CHARGES);
+const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+
+/**
+ * Action4 素材（或 campaign）×日 → 事實列。ad=null＝campaign 有量卻查無素材，數字掛在 ad_id NULL 底下（總數不會少）。
+ * unknown＝清單外的數值欄位名（照樣存在 raw，呼叫端轉成 job 警告）。純函式。
+ */
+export function toD1Rows(c: D1VideoCampaign, ad: D1VideoAd | null, report: Action4Report, syncedAt: string): { rows: Row[]; unknown: string[] } {
+  const unknown = new Set<string>();
+  const rows = Object.entries(report).filter(([k]) => isDateKey(k)).map(([day, v]) => {
+    const charge = (v.charge ?? {}) as Record<string, unknown>;
+    for (const [k, x] of Object.entries(v)) if (k !== 'charge' && typeof x === 'number' && !D1_METRIC_SET.has(k)) unknown.add(k);
+    for (const [k, x] of Object.entries(charge)) if (typeof x === 'number' && !D1_CHARGE_SET.has(k)) unknown.add(`charge.${k}`);
+    const r: Row = {
+      date: ymdDash(day), account_id: c.account, account_name: c.account, agency: str(c.agency),
+      campaign_id: c.id, campaign_name: str(c.name), vertical_video: c.verticalVideo, campaign_deleted: c.deleted,
+      ad_id: ad?.id ?? null, ad_title: str(ad?.title), ad_tag: str(ad?.tag), ad_text: str(ad?.copy), ad_url: str(ad?.url),
+      ad_status: ad ? ad.status : null, ad_created_at: str(ad?.createdAt),
+    };
+    D1_ACTION4_METRICS.forEach((a4, i) => { r[D1_METRIC_COLS[i]] = int(num(v[a4])); });
+    D1_ACTION4_CHARGES.forEach((a4, i) => { r[D1_CHARGE_COLS[i]] = num(charge[a4]); });
+    r.raw = JSON.stringify(v);
+    r.synced_at = syncedAt;
+    return r;
+  });
+  return { rows, unknown: [...unknown] };
+}
+
+/** 收費曝光／點擊／D1 金額（÷1000 原值，不換客戶價）。不含 *_imp_over（超預算未計費），對齊 D1 後台與 BH。 */
+function d1DeviceSum(v: Record<string, unknown>, charge: Record<string, unknown>, dev: 'mobile' | 'pc') {
+  return {
+    imp: num(v[`${dev}_video_imp`]) + num(v[`${dev}_video_vertical_imp`]),
+    click: num(v[`${dev}_video_link`]),
+    spend: money((num(charge[`${dev}_video_imp`]) + num(charge[`${dev}_video_vertical_imp`])) / 1000),
+  };
+}
+
+/** campaign 層 Action4 → 裝置表（Mobile／PC 各一列；整列 0 不寫）。spend＝D1 金額原值。純函式。 */
+export function toD1DeviceRows(c: D1VideoCampaign, report: Action4Report, syncedAt: string): Row[] {
+  const out: Row[] = [];
+  for (const [day, v] of Object.entries(report)) {
+    if (!isDateKey(day)) continue;
+    for (const [dev, device] of [['mobile', 'Mobile'], ['pc', 'PC']] as const) {
+      const s = d1DeviceSum(v as Record<string, unknown>, (v.charge ?? {}) as Record<string, unknown>, dev);
+      if (!s.imp && !s.click && !s.spend) continue;
+      out.push({
+        date: ymdDash(day), platform: 'D1', account_id: c.account, account_name: c.account, campaign_id: c.id,
+        device, imp: int(s.imp), click: int(s.click), spend: s.spend, events: null, spend_usd: null, synced_at: syncedAt,
+      });
+    }
+  }
+  return out;
+}
+
+/** 事實列 → mobile 收費曝光（覆蓋紀錄用，與 BH bh_daily_stats 同口徑） */
+export const d1MobileImp = (r: Row) => num(r.mobile_video_imp) + num(r.mobile_video_vertical_imp);
+/** 事實列 → mobile D1 金額（÷1000 原值，不換客戶價；走速自己再 ÷0.6） */
+export const d1MobileSpend = (r: Row) => money((num(r.charge_mobile_video_imp) + num(r.charge_mobile_video_vertical_imp)) / 1000);
+
+const hasVolume = (rep: Action4Report) => Object.keys(rep).some(isDateKey);
+
+/**
+ * D1 全平台（台灣影音 campaign 含已刪除）。先打 campaign 層（產生裝置列、決定哪些 campaign 有量），
+ * 有量的 campaign 才抓素材清單逐支打素材層（campaign 層＝素材加總，tool#8 實測差 0）。
+ * 不回 media：Action4 沒有媒體維度；給空陣列會被 runNexusJob 的媒體層防呆當成 API 異常。
+ * 任何一支 Action4 失敗就整個丟出（fail-closed，照 BH v_client.py），不寫半套。
+ */
+export async function fetchD1All(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<FetchResult> {
+  const start = compact(sd), stop = compact(ed);
+  onPhase('D1 影音 campaign 清單（Firestore）');
+  const campaigns = await listD1VideoCampaigns();
+  let requests = 0;
+  onPhase(`D1 campaign 層 ${campaigns.length} 支 ${sd}~${ed}`);
+  const campReports = await pooled(campaigns, D1_CONCURRENCY, async (c) => { requests++; return fetchCampaignStats(c.id, start, stop); });
+  const ran = campaigns.map((c, i) => ({ c, rep: campReports[i] })).filter((x) => hasVolume(x.rep));
+  const device = ran.flatMap(({ c, rep }) => toD1DeviceRows(c, rep, syncedAt));
+
+  onPhase(`D1 素材層（${ran.length} 支有量的 campaign）`);
+  const ads = await listD1VideoAds(ran.map((x) => x.c.id));
+  const adsBy = new Map<string, D1VideoAd[]>();
+  for (const a of ads) adsBy.set(a.campaignId, [...(adsBy.get(a.campaignId) ?? []), a]);
+  const units = ran.flatMap(({ c }) => (adsBy.get(c.id) ?? []).map((a) => ({ c, a })));
+  const adReports = await pooled(units, D1_CONCURRENCY, async (u) => { requests++; return fetchCampaignStats(u.a.id, start, stop); });
+
+  const facts: Row[] = [];
+  const unknown = new Set<string>();
+  const warnings: string[] = [];
+  const push = (r: { rows: Row[]; unknown: string[] }) => { facts.push(...r.rows); r.unknown.forEach((k) => unknown.add(k)); };
+  units.forEach((u, i) => push(toD1Rows(u.c, u.a, adReports[i], syncedAt)));
+  for (const { c, rep } of ran) {
+    if (adsBy.has(c.id)) continue;
+    push(toD1Rows(c, null, rep, syncedAt));
+    warnings.push(`campaign ${c.name}（${c.id}）有量但 Firestore 查無素材，以 campaign 層寫入（ad_id NULL）`);
+  }
+  if (unknown.size) warnings.push(`Action4 有清單外的欄位（已存在 raw，schema 要不要加欄再決定）：${[...unknown].sort().join(', ')}`);
+  return { facts, device, warnings, requests };
 }
