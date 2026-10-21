@@ -813,7 +813,7 @@ await ok('狀態頁：刻度一帳一格、R/P 畫整圈、吻合按鈕與明細
   assert.match(html, /aria-controls="rp-D"/);
   assert.match(html, /<dialog class="rp glass" id="rp-D"/); // 明細是浮動視窗，不佔版面
   assert.match(html, /class="tick"[\s\S]*class="tk-fg"/); // 自動更新倒數環
-  assert.match(html, /<h3 class="pf-t"[^>]*>[\s\S]*?<span class="nw">Discovery<\/span>/); // 平台名斜線大字
+  assert.match(html, /<h3 class="pf-t"[^>]*><span class="nw" data-text="Discovery">Discovery<\/span><\/h3>/); // 平台名斜線分割字（兩層由 CSS 用 data-text 畫）
   // 叉叉是 dialog 直接子元素（固定在右上角、不跟內容捲）；玻璃圖層由 JS 插入，伺服器端不輸出
   assert.match(html, /<dialog class="rp glass" id="rp-D"[^>]*><button type="button" class="rp-x"[^>]*><\/button><div class="rp-in"/);
   assert.ok(!html.includes('rp-tint'), '白罩已拿掉（2026-09-27 材質定案：漸進式模糊、不蓋白罩）');

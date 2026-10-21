@@ -84,12 +84,10 @@ function dialText(jobs: NexusJobRow[], accountsWithData: number): { center: stri
   return { center, line: `全部完成，${last.slice(11, 16)}`, tone: 'success' };
 }
 
-/** 平台名：一條斜線＋三倍大的窄體字，整個字從斜線後面往右滑出（斜線同時是遮罩邊，第一個字左上角會被切掉一點）。
- *  試過逐字從斜線出來：照閱讀順序出場的話後面的字一定要穿過前面的字，中途會疊成一坨，所以改整字滑出。 */
+/** 平台名：斜線分割字（2026-10-21 使用者選定，照 split_text_effect_studio.html「極簡純白」）。
+ *  .nw 本身的字是透明的（留給反白選取／螢幕閱讀器），看到的兩層由 CSS 的 ::before／::after 用 data-text 畫。 */
 function platformTitle(p: NexusPlatform): string {
-  return `<h3 class="pf-t" style="--p:${PLATFORMS.indexOf(p)}">
-      <svg class="sl" viewBox="0 0 34 112" aria-hidden="true"><line x1="0" y1="112" x2="34" y2="0" /></svg>
-      <span class="nm"><span class="nw">${PNAME[p]}</span></span></h3>`;
+  return `<h3 class="pf-t" style="--p:${PLATFORMS.indexOf(p)}"><span class="nw" data-text="${PNAME[p]}">${PNAME[p]}</span></h3>`;
 }
 
 // ────────────────────────────── 比對明細 ──────────────────────────────
@@ -244,8 +242,7 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
     }
 
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
-      <header class="pf-h"><span class="src src-${p.toLowerCase()}">${p}</span>
-        <div class="pf-hd">${platformTitle(p)}
+      <header class="pf-h"><div class="pf-hd">${platformTitle(p)}
           <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台一次抓' : ''; })()}</span></div></header>
       <div class="dial-box"${reconRows ? ` data-p="${p}" title="看吻合明細"` : ''}>${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
@@ -378,32 +375,37 @@ const STYLE = `
   .board{display:grid;grid-template-columns:repeat(4,1fr);margin-top:22px}
   .pf{padding:22px 20px 20px;border-left:1px solid var(--hair);display:flex;flex-direction:column;min-width:0}
   .pf:first-child{border-left:none}
-  .pf-h{--tf:clamp(26px,calc((100cqi - 26px) / 4.6),42px);display:flex;align-items:flex-start;gap:6px}
-  .pf-h .src{margin-top:calc(var(--tf) * .31)} /* 跟平台名的字腰對齊（42px 時 13px） */
-  .pf-hd{min-width:0}
-  .pf-c{display:block;margin:2px 0 0 10px;font-size:12px;color:var(--mut)}
-
-  /* 平台名：Saira Semi Condensed 42px（原本 14px 的三倍），前面一條斜線、顏色跟平台色塊一樣。
-     斜線＝.nm 的 clip-path 左緣（同一條對角線），所以字是「從斜線後面」出來；第一個字左上角被切掉一小塊。
-     字級跟著格子寬度縮（container query）：4 欄在 900~1100px 視窗時格子變窄，固定 42px 會把字尾切掉。
-     4.6em＝最長的 Discovery（約 4.26em）＋斜線前導 .2em＋餘裕；26px＝平台色塊＋間距（cqi 已是扣掉內距的內容寬） */
   .pf{container-type:inline-size}
+  .pf-h{display:flex}
+  .pf-hd{min-width:0}
+  .pf-c{display:block;margin:2px 0 0;font-size:12px;color:var(--mut)}
+
+  /* 平台名：斜線分割字（2026-10-21 使用者看過 v1~v5 demo 選定 v5；照 split_text_effect_studio.html「極簡純白」）。
+     Montserrat 900 斜體，一條由左下往右上的切線把字分兩層：上半實心、下半鏤空 1px 細框，兩層都是平台色；
+     兩層沿切線反向錯開一點，滑過標題時錯開加大 2.1 倍。座標照原版（原版字級 110px）：
+     切線左 69.25%→右 33.25%（含 1.5% 縫，% 是各字自己的寬高，短字切線稍陡）、錯開 3.8px／1.4px＝.0345em／.0127em。
+     框線不照比例縮（40px 時只剩 .5px 看不到），固定 1px。原版框線是 #94A3B8（配深底），淺底上太淡，改平台色。
+     字級跟著格子寬度縮（container query）：Discovery 實測 5.69em（含左右內距 .5em），扣掉左移 .2em、加斜體右側出血 ≈5.6em；
+     上限 40px（1550px 視窗約 40px、960px 約 34px）。左移 .2em 抵掉內距，跟下面的帳戶數貼齊 */
   .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E}
-  .pf-t{position:relative;margin:0;font:700 var(--tf)/1.12 'Saira Semi Condensed',var(--disp);
-    letter-spacing:.005em;color:var(--ink)}
-  .pf-t .sl{position:absolute;z-index:1;left:0;top:0;width:.34em;height:100%;overflow:visible;pointer-events:none} /* 斜線壓在字上面：字是從它後面出來 */
-  /* viewBox 34×112＝.34em×1.12em 同比例，線寬跟著字級等比縮放（42px 時約 2.2px） */
-  .pf-t .sl line{stroke:var(--pc,var(--accent));stroke-width:5.2;stroke-linecap:round}
-  .pf-t .nm{display:block;white-space:nowrap;padding:0 .04em 0 .2em;clip-path:polygon(.34em 0,100% 0,100% 100%,0 100%)}
-  .pf-t .nw{display:inline-block}
-  /* 開場：斜線先由下往上畫出，字再從斜線後面滑出（起點整個字都在斜線左側，被 clip 藏住）。
+  .pf-t{--tf:clamp(22px,calc(100cqi / 5.6),40px);--dx:.0345em;--dy:.0127em;margin:0 0 0 -.2em;
+    font:italic 900 var(--tf)/1.05 'Montserrat',var(--disp);letter-spacing:-.02em;white-space:nowrap}
+  .pf-t .nw{display:inline-block;position:relative;padding:.15em .25em;color:transparent}
+  /* content 的「/ ""」＝替代文字為空，螢幕閱讀器不會再唸一次 */
+  .pf-t .nw::before,.pf-t .nw::after{content:attr(data-text);content:attr(data-text) / "";
+    position:absolute;inset:0;padding:inherit;pointer-events:none;transition:transform .45s cubic-bezier(.22,1,.36,1)}
+  .pf-t .nw::before{color:var(--pc);clip-path:polygon(0 0,100% 0,100% 33.25%,0 69.25%);
+    transform:translate(calc(var(--dx) * -1),var(--dy))}
+  .pf-t .nw::after{color:transparent;-webkit-text-stroke:1px var(--pc);clip-path:polygon(0 70.75%,100% 34.75%,100% 100%,0 100%);
+    transform:translate(var(--dx),calc(var(--dy) * -1))}
+  .pf-t:hover .nw::before{transform:translate(calc(var(--dx) * -2.1),calc(var(--dy) * 2.1))}
+  .pf-t:hover .nw::after{transform:translate(calc(var(--dx) * 2.1),calc(var(--dy) * -2.1))}
+  /* 開場：兩半從切線兩端反向滑進來對齊。fill 只用 backwards（播完放手，hover 的 transform 才接得上）。
      使用者自己打開或按重新整理都會播；30 秒自動重整、點倒數環立即更新不播（html.intro-seen） */
-  html:not(.intro-seen) .pf-t .sl line{stroke-dasharray:118;stroke-dashoffset:118;animation:slash .35s ease-out forwards;
-    animation-delay:calc(var(--p) * 110ms + 100ms)}
-  html:not(.intro-seen) .pf-t .nw{animation:emerge 1s cubic-bezier(.16,1,.3,1) both;
-    animation-delay:calc(var(--p) * 110ms + 260ms)}
-  @keyframes slash{to{stroke-dashoffset:0}}
-  @keyframes emerge{from{transform:translateX(calc(-100% - .3em))}}
+  html:not(.intro-seen) .pf-t .nw::before{animation:split-in-a .9s cubic-bezier(.16,1,.3,1) backwards;animation-delay:calc(var(--p) * 110ms + 100ms)}
+  html:not(.intro-seen) .pf-t .nw::after{animation:split-in-b .9s cubic-bezier(.16,1,.3,1) backwards;animation-delay:calc(var(--p) * 110ms + 100ms)}
+  @keyframes split-in-a{from{transform:translate(-.6em,.05em);opacity:0}}
+  @keyframes split-in-b{from{transform:translate(.6em,-.05em);opacity:0}}
   .dial-box{position:relative;width:148px;height:148px;margin:18px auto 10px}
   .dial{width:100%;height:100%;display:block}
   .dial-box[data-p]{cursor:pointer;transition:transform .25s cubic-bezier(.2,.9,.3,1.3)}
@@ -588,8 +590,8 @@ const STYLE = `
     .rp-x{top:24px;right:24px}
   }
   @media(prefers-reduced-motion:reduce){
-    .ring-running,.bf-bar i,.bf-bar i::after,html:not(.intro-seen) .pf-t .nw{animation:none}
-    html:not(.intro-seen) .pf-t .sl line{animation:none;stroke-dashoffset:0}
+    .ring-running,.bf-bar i,.bf-bar i::after,html:not(.intro-seen) .pf-t .nw::before,html:not(.intro-seen) .pf-t .nw::after{animation:none}
+    .pf-t .nw::before,.pf-t .nw::after{transition:none}
     dialog.rp[open]::backdrop{animation:none}
     .dial-box[data-p]{transition:none}
   }
