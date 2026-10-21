@@ -46,6 +46,7 @@ const SB_CSS = `
     padding:4px 0;border-bottom:2px solid transparent;white-space:nowrap;transition:color .15s,border-color .15s}
   .toolnav a:hover{color:var(--ink)}
   .toolnav a.on{color:var(--ink);border-bottom-color:var(--accent)}
+  .toolnav a.dragging{opacity:.35}
   .logout{margin-left:auto;font-family:var(--mono);font-size:12.5px;color:var(--mut);text-decoration:none;white-space:nowrap}
   .logout:hover{color:var(--ink)}
   /* 標題群 */
@@ -143,6 +144,49 @@ const SB_CSS = `
   }
 `;
 
+// 分頁可拖曳排序（不跳視窗、放開即存）：每人一份存 DB（home_quick_links.nav_order，經 /me/nav-order），跨電腦同步。
+// localStorage 當快取：載入時先照快取排（畫面出來前就排好、不閃），再背景向 DB 對齊；新電腦第一次會從預設順序跳一次。
+// 只存 key 陣列；NAV 新增的工具不在已存順序裡 → 接在最後；已移除的工具自動忽略。
+const NAV_ORDER_JS = `(function(){
+  var KEY='sb_nav_order', API='/me/nav-order', nav=document.querySelector('.toolnav'); if(!nav) return;
+  function links(){return Array.prototype.slice.call(nav.querySelectorAll('a[data-k]'));}
+  function keys(){return links().map(function(a){return a.dataset.k;});}
+  function apply(saved){
+    var all=links(), order=[];
+    saved.forEach(function(k){all.forEach(function(a){if(a.dataset.k===k&&order.indexOf(a)<0)order.push(a);});});
+    all.forEach(function(a){if(order.indexOf(a)<0)order.push(a);});
+    order.forEach(function(a){nav.appendChild(a);});
+  }
+  function cache(o){try{localStorage.setItem(KEY,JSON.stringify(o));}catch(e){}}
+  try{apply(JSON.parse(localStorage.getItem(KEY)||'[]'));}catch(e){}
+  var touched=false; // 使用者已拖過 → 晚回來的 DB 結果不可蓋掉剛拖好的順序
+  fetch(API,{headers:{Accept:'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(touched||!d||!Array.isArray(d.order)||!d.order.length) return;
+    apply(d.order); cache(d.order);
+  }).catch(function(){});
+  function save(){
+    var o=keys(); cache(o);
+    fetch(API,{method:'PUT',keepalive:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({order:o})}).catch(function(){});
+  }
+  var dragEl=null, before='';
+  nav.addEventListener('dragstart',function(e){
+    var a=e.target.closest&&e.target.closest('a[data-k]'); if(!a) return;
+    dragEl=a; touched=true; before=keys().join(','); a.classList.add('dragging');
+    e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/plain','');
+  });
+  nav.addEventListener('dragover',function(e){
+    if(!dragEl) return; e.preventDefault();
+    var t=e.target.closest&&e.target.closest('a[data-k]'); if(!t||t===dragEl) return;
+    var r=t.getBoundingClientRect();
+    nav.insertBefore(dragEl, e.clientX>r.left+r.width/2 ? t.nextSibling : t);
+  });
+  nav.addEventListener('drop',function(e){if(dragEl)e.preventDefault();});
+  nav.addEventListener('dragend',function(){
+    if(!dragEl) return; dragEl.classList.remove('dragging'); dragEl=null;
+    if(keys().join(',')!==before) save(); // 沒換位置就不寫 DB
+  });
+})();`;
+
 export interface SbPageOpts {
   title: string;
   active?: string; // NAV key：標示目前所在工具，分頁高亮
@@ -154,7 +198,7 @@ export interface SbPageOpts {
 
 export function sbPage(o: SbPageOpts): string {
   const nav = NAV.map(
-    (n) => `<a href="${n.href}"${n.key === o.active ? ' class="on"' : ''}>${n.label}</a>`
+    (n) => `<a href="${n.href}" data-k="${n.key}" draggable="true"${n.key === o.active ? ' class="on"' : ''}>${n.label}</a>`
   ).join('');
   return `<!doctype html>
 <html lang="zh-Hant">
@@ -171,6 +215,7 @@ export function sbPage(o: SbPageOpts): string {
     <nav class="toolnav">${nav}</nav>
     <a class="logout" href="/logout">logout ↗</a>
   </div>
+<script>${NAV_ORDER_JS}</script>
   <div class="wrap" style="max-width:${o.width ?? '760px'}">${o.body}</div>
 ${o.script ? `<script>${o.script}</script>` : ''}
 </body>

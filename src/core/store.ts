@@ -1178,7 +1178,7 @@ export async function dbDiagnostics() {
   return { ok: true, counts, ...syncStatus() };
 }
 
-// ---------- 首頁快捷自訂（home_quick_links；本工具自管、每人一份、key=email） ----------
+// ---------- 首頁快捷自訂（home_quick_links；本工具自管、每人一份、key=email；另一欄 nav_order 存頂部導覽列順序） ----------
 // 內建 7 個快捷仍寫死在 slotboard.ts 當「活的預設清單」；這裡只存每人的「覆蓋層」。
 
 /** 個人新增的快捷（url 一律 http/https、開新分頁） */
@@ -1223,6 +1223,16 @@ async function ensureQuickLinksSchema(p: mysql.Pool): Promise<void> {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) DEFAULT CHARSET=utf8mb4`
   );
+  // 頂部導覽列（sbui NAV）每人拖曳後的順序，與快捷同一列、獨立一欄：兩邊各自只 upsert 自己的欄位，互不覆蓋
+  const dbName = process.env.DB_NAME ?? 'ad_tools';
+  const [cols] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+     WHERE table_schema = ? AND table_name = 'home_quick_links' AND column_name = 'nav_order'`,
+    [dbName]
+  );
+  if (((cols as any[])[0]?.c ?? 0) === 0) {
+    await p.query(`ALTER TABLE home_quick_links ADD COLUMN nav_order TEXT NULL`);
+  }
   quickLinksSchemaReady = true;
 }
 
@@ -1254,6 +1264,36 @@ export async function saveQuickLinks(email: string, overlay: QuickLinkOverlay): 
     `INSERT INTO home_quick_links (email, overlay) VALUES (?, ?)
      ON DUPLICATE KEY UPDATE overlay = VALUES(overlay)`,
     [email, json]
+  );
+}
+
+/** 取某使用者的頂部導覽列順序（NAV key 陣列）；查無/DB 不可用/JSON 壞 → 回 []（＝預設順序）。 */
+export async function getNavOrder(email: string): Promise<string[]> {
+  const p = getPool();
+  if (!p) return [];
+  try {
+    await ensureQuickLinksSchema(p);
+    const [rows] = await p.query(
+      `SELECT nav_order FROM home_quick_links WHERE email = ? LIMIT 1`,
+      [email]
+    );
+    const raw = (rows as any[])[0]?.nav_order;
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** upsert 某使用者的導覽列順序；只動 nav_order 欄，不碰快捷 overlay（新列的 overlay 先放空覆蓋層）。 */
+export async function saveNavOrder(email: string, order: string[]): Promise<void> {
+  const p = getPool();
+  if (!p) throw new Error('DB 不可用');
+  await ensureQuickLinksSchema(p);
+  await p.query(
+    `INSERT INTO home_quick_links (email, overlay, nav_order) VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE nav_order = VALUES(nav_order)`,
+    [email, JSON.stringify(EMPTY_OVERLAY), JSON.stringify(order)]
   );
 }
 

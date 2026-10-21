@@ -23,7 +23,7 @@ import { registerPacing, BASE_PATH as PACING } from './tools/pacing/route.js'; /
 import { registerSales } from './tools/sales/route.js'; // 業績層級資料每日同步（只有 /cron，沒有頁面）
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
-import { dbDiagnostics, getQuickLinks, saveQuickLinks } from './core/store.js';
+import { dbDiagnostics, getQuickLinks, saveQuickLinks, getNavOrder, saveNavOrder } from './core/store.js';
 
 // 工具註冊表：新增 tool 2/3 時在這裡加一筆即可
 interface Tool {
@@ -88,6 +88,26 @@ app.put('/home/quick-links', async (req, reply) => {
   if (!v.ok) return reply.code(400).send({ error: v.error });
   try {
     await saveQuickLinks(email, v.overlay);
+  } catch (e: any) {
+    return reply.code(500).send({ error: String(e?.message ?? e) });
+  }
+  reply.send({ ok: true });
+});
+
+// 頂部導覽列順序（core/sbui 拖曳排序）：每人一份存 DB，跨電腦同步；前端另有 localStorage 當快取避免閃動
+app.get('/me/nav-order', async (req, reply) => {
+  const email = currentUser(req) ?? '@local';
+  reply.send({ order: await getNavOrder(email) });
+});
+
+app.put('/me/nav-order', async (req, reply) => {
+  const email = currentUser(req) ?? '@local';
+  const order = (req.body as any)?.order;
+  // 防呆（非安全邊界）：NAV key 陣列，數量/長度設上限防塞爆
+  if (!Array.isArray(order) || order.length > 50 || !order.every((x: any) => typeof x === 'string' && x.length <= 64))
+    return reply.code(400).send({ error: 'order 需為字串陣列' });
+  try {
+    await saveNavOrder(email, order);
   } catch (e: any) {
     return reply.code(500).send({ error: String(e?.message ?? e) });
   }
