@@ -10,6 +10,7 @@ import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
   NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm, isValidAccountId, writeSlice,
+  parsePlatforms, d1WindowError, D1_BACKFILL_START, backfillStart,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
 import { getCampaigns } from '../src/core/popin.js';
@@ -1404,6 +1405,42 @@ await ok('D1 事實列 → mobile 收費曝光／D1 金額（coverage 與 BH 同
   const { rows } = toD1Rows(d1Camp, d1Ad, { '20260921': d1Day() }, T);
   assert.equal(d1MobileImp(rows[0]), 1449);
   assert.equal(d1MobileSpend(rows[0]), 104.328);
+});
+
+await ok('回補平台參數：D1 不能被當成 D（舊寫法 \'D1\'.includes(\'D\') 會把 D 也排進去）；預設 DRMP 不含 D1', () => {
+  assert.deepEqual(parsePlatforms('D1'), ['D1']);
+  assert.deepEqual(parsePlatforms('d1'), ['D1']);
+  assert.deepEqual(parsePlatforms('DRMP'), ['D', 'R', 'M', 'P']);
+  assert.deepEqual(parsePlatforms('D,D1'), ['D', 'D1']);
+  assert.deepEqual(parsePlatforms('D1D'), ['D1', 'D']);
+  assert.deepEqual(parsePlatforms('X'), []);
+  assert.equal(D1_BACKFILL_START, '2026-05-01');
+  assert.equal(backfillStart('D1'), '2026-05-01');
+  assert.equal(backfillStart('D'), '2026-05-21');
+});
+
+await ok('D1 區間保護：起日早於台北今天往前 12 個月就擋（Action4 會靜默回空）', () => {
+  assert.equal(d1WindowError('2025-10-21', '2026-10-21'), null);
+  assert.match(d1WindowError('2025-10-20', '2026-10-21') ?? '', /12 個月/);
+});
+
+await ok('D1 job：起日過舊 → 不打 API、直接 NexusNoRetryError', async () => {
+  let fetched = 0;
+  const { deps } = fakeDeps({});
+  deps.fetch = async () => { fetched++; return { facts: [], device: [], warnings: [] }; };
+  deps.today = '2026-10-21';
+  await assert.rejects(runNexusJob({ platform: 'D1', accountId: '*', accountName: 'D1 影音全平台', sd: '2025-09-01', ed: '2025-09-30' }, () => {}, deps), NexusNoRetryError);
+  assert.equal(fetched, 0);
+});
+
+await ok('D1 job：整平台寫入（accountId null）、覆蓋紀錄只算 mobile 收費曝光與 D1 金額', async () => {
+  const { rows } = toD1Rows(d1Camp, d1Ad, { '20260921': d1Day() }, T);
+  const cov = coverageEntries('D1', rows);
+  assert.deepEqual(cov, [{ accountId: '4A_CPM_juliat', accountName: '4A_CPM_juliat', dt: '2026-09-21', factRows: 1, imp: 1449, spend: 104.328 }]);
+  const { deps, calls } = fakeDeps({ facts: rows });
+  deps.today = '2026-10-21';
+  await runNexusJob({ platform: 'D1', accountId: '*', accountName: 'D1 影音全平台', sd: '2026-09-21', ed: '2026-09-22' }, () => {}, deps);
+  assert.deepEqual(calls, ['write:D1:null:1', 'cov:D1:null:1']);
 });
 
 console.log(`\n全部 ${n} 項通過`);

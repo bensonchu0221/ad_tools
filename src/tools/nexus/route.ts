@@ -1,8 +1,8 @@
 // tool#9 nexus 資料倉庫：排程入口＋狀態頁。
 // 四平台（D/R/M/P）全帳戶「素材 × 日」每日寫進 BQ `popinpoc1.reporting.nexus_*`，給 Looker 與各報表工具共用。
 //   POST /cron?key=           每日入列（Cloud Scheduler，台北 05:00）：T-2~T-1
-//   POST /backfill/cron?key=&sd=&ed=  回補入列（手動打一次；預設 2026-05-21 ~ T-3）
-//   POST /worker/cron?key=    worker（Cloud Scheduler 每分鐘）：D/R/M/P 四條線同時跑，各自在時間預算內連續認領該平台的 job
+//   POST /backfill/cron?key=&sd=&ed=&platforms=  回補入列（手動打一次；預設 DRMP 2026-05-21 ~ T-3；D1 要 platforms=D1，預設 2026-05-01 起）
+//   POST /worker/cron?key=    worker（Cloud Scheduler 每分鐘）：D/R/M/P/D1 五條線同時跑，各自在時間預算內連續認領該平台的 job
 //   POST /setup/cron?key=     建表＋view（冪等；worker 第一次寫入也會自動做）
 //   POST /health/cron?key=[&dry=1]  每日健檢（Cloud Scheduler，台北 07:00）→ Google Chat；dry=1 只算不發
 //   POST /recon/cron?key=[&dt=][&dry=1]  手動重跑正確性比對（預設 T-1）；dry=1 只回 BQ 預估掃描量、不執行
@@ -15,16 +15,16 @@ import {
   nexusRBackfillState,
 } from '../../core/store.js';
 import {
-  BACKFILL_START, addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError, NexusDeferError,
-  NexusQuotaError, rBackfillBlock, twHhmm,
+  addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError, NexusDeferError,
+  NexusQuotaError, rBackfillBlock, twHhmm, parsePlatforms, backfillStart,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
 import { runRecon, reconSql, reconDueDates } from './recon.js';
 import { statusPage } from './page.js';
 import type { NexusPlatform } from '../../core/store.js';
 
-/** worker 的四條線（一平台一條） */
-const NEXUS_LANES: NexusPlatform[] = ['D', 'R', 'M', 'P'];
+/** worker 的五條線（一平台一條） */
+const NEXUS_LANES: NexusPlatform[] = ['D', 'R', 'M', 'P', 'D1'];
 
 export const BASE_PATH = '/tools/nexus';
 
@@ -59,13 +59,16 @@ export function registerNexus(app: FastifyInstance): void {
   app.post(`${BASE_PATH}/backfill/cron`, async (req, reply) => {
     if (!keyOk(req)) return reply.code(404).send('not found');
     const q = req.query as any;
-    const sd = String(q.sd ?? BACKFILL_START);
     // 預設回補到 T-3：T-2/T-1 交給每日排程，避免同一天兩邊搶著寫
     const ed = String(q.ed ?? addDays(twToday(), -(1 + 2)));
-    if (!ymdOk(sd) || !ymdOk(ed) || sd > ed) return reply.code(400).send({ error: '日期無效' });
-    const platforms = String(q.platforms ?? 'DRMP').toUpperCase();
+    // D1 要明講（platforms=D1）；不給 sd 時各平台用自己的起點（D1 2026-05-01、其他 2026-05-21）
+    const platforms = parsePlatforms(String(q.platforms ?? 'DRMP'));
+    if (!platforms.length) return reply.code(400).send({ error: 'platforms 無效（D／R／M／P／D1）' });
+    const starts = platforms.map((p) => String(q.sd ?? backfillStart(p)));
+    if (!ymdOk(ed) || starts.some((sd) => !ymdOk(sd) || sd > ed)) return reply.code(400).send({ error: '日期無效' });
     const targets = (await listTargets()).filter((t) => platforms.includes(t.platform));
-    const jobs = planBackfill(targets, sd, ed);
+    const jobs = platforms.flatMap((p, i) => planBackfill(targets.filter((t) => t.platform === p), starts[i], ed));
+    const sd = [...starts].sort()[0];
     const batch = `backfill:${sd}~${ed}`;
     const r = await enqueueNexusJobs(batch, 'backfill', jobs);
     app.log.info({ batch, ...r }, 'nexus backfill enqueued');

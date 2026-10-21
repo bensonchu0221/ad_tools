@@ -13,7 +13,11 @@ import {
   nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs, withNexusBqWriteLock,
   type NexusJobInput, type NexusJobRow, type NexusCoverageEntry, type NexusPlatform,
 } from '../../core/store.js';
-import { fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, M_UNMAPPED_PREFIX, type Row, type FetchResult } from './fetch.js';
+import {
+  fetchDAccount, fetchMAccount, fetchMRedashDevice, fetchRAll, fetchPAll, fetchD1All, d1MobileImp, d1MobileSpend, M_UNMAPPED_PREFIX,
+  type Row, type FetchResult,
+} from './fetch.js';
+import { exceedsAction4Window } from '../../core/action4.js';
 import {
   FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, MEDIA_TABLE, MEDIA_SCHEMA, M_DEVICE_CONV_TABLE, M_DEVICE_CONV_SCHEMA,
   TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX, integratedViewSql,
@@ -21,6 +25,25 @@ import {
 
 /** 回補起點＝P 平台最早有資料的日子（使用者拍板 2026-05-21）。 */
 export const BACKFILL_START = '2026-05-21';
+/** D1 影音回補起點（使用者 2026-10-21：跟其他表一樣久、切齊月初）。Action4 只查得到 12 個月，2027-05-01 以前要回補完。 */
+export const D1_BACKFILL_START = '2026-05-01';
+/** 回補沒給 sd 時各平台的起點。 */
+export const backfillStart = (p: NexusPlatform): string => (p === 'D1' ? D1_BACKFILL_START : BACKFILL_START);
+/**
+ * 回補的 platforms 參數 → 平台清單。'D1' 一定要先比對：舊寫法 platforms.includes(t.platform) 在 platforms='D1' 時
+ * 會連 D 一起排進去（'D1'.includes('D')）。允許 'DRMP'、'D,D1'、'd1'。純函式。
+ */
+export function parsePlatforms(s: string): NexusPlatform[] {
+  const out: NexusPlatform[] = [];
+  for (const m of s.toUpperCase().matchAll(/D1|[DRMP]/g)) if (!out.includes(m[0] as NexusPlatform)) out.push(m[0] as NexusPlatform);
+  return out;
+}
+/** D1 job 起日早於台北今天往前 12 個月 ⇒ Action4 會靜默回空（D1 apiUtils.php:115），回傳錯誤訊息；沒問題回 null。純函式。 */
+export function d1WindowError(sd: string, today: string): string | null {
+  return exceedsAction4Window(sd.replace(/-/g, ''), today.replace(/-/g, ''))
+    ? `D1 起日 ${sd} 早於 ${today} 往前 12 個月：Action4 只查得到 12 個月，會靜默回空，不抓也不寫`
+    : null;
+}
 /** 每日排程重抓天數（T-1、T-2）。 */
 export const DAILY_DAYS = 2;
 /** 回補每個 job 的日期長度：D 的 per-ad 限流 1 req/s 最慢，切小才不會超過 Cloud Run 600 秒。 */
@@ -148,6 +171,7 @@ export async function listTargets(): Promise<AccountRef[]> {
     ...d, ...m,
     { platform: 'R' as const, accountId: '*', accountName: 'R 全平台' },
     { platform: 'P' as const, accountId: '*', accountName: 'P 全平台' },
+    { platform: 'D1' as const, accountId: '*', accountName: 'D1 影音全平台' },
     // 放最後：它要用到同一批次 M 各帳戶剛寫好的計費金額來分配花費
     { platform: 'M' as const, accountId: M_DEVICE_JOB, accountName: 'M 裝置（Redash 全平台）' },
   ].filter((t) => !isSkipped(t));
@@ -330,10 +354,13 @@ export async function writeSlice(o: {
   }
 }
 
-// 覆蓋紀錄用：各平台的曝光／花費欄名
-const IMP_KEY: Record<NexusPlatform, string> = { D: 'imp', R: 'impression', M: 'imp', P: 'impressions' };
-const SPEND_KEY: Record<NexusPlatform, string> = { D: 'charge', R: 'payment_revenue', M: 'spend', P: 'spend' };
-const CLICK_KEY: Record<NexusPlatform, string> = { D: 'click', R: 'click', M: 'click', P: 'clicks' };
+// 覆蓋紀錄用：各平台的曝光／花費／點擊取法。D1 沒有單一欄位：只算 mobile 收費曝光與 D1 金額（與 BH bh_daily_stats 同口徑）
+const col = (k: string) => (r: Row) => Number(r[k]) || 0;
+const IMP_OF: Record<NexusPlatform, (r: Row) => number> = { D: col('imp'), R: col('impression'), M: col('imp'), P: col('impressions'), D1: d1MobileImp };
+const SPEND_OF: Record<NexusPlatform, (r: Row) => number> = { D: col('charge'), R: col('payment_revenue'), M: col('spend'), P: col('spend'), D1: d1MobileSpend };
+const CLICK_OF: Record<NexusPlatform, (r: Row) => number> = {
+  D: col('click'), R: col('click'), M: col('click'), P: col('clicks'), D1: (r) => col('mobile_video_link')(r) + col('pc_video_link')(r),
+};
 
 /** 事實列 → 每帳戶每天一筆覆蓋紀錄。純函式。 */
 export function coverageEntries(platform: NexusPlatform, facts: Row[]): NexusCoverageEntry[] {
@@ -346,8 +373,8 @@ export function coverageEntries(platform: NexusPlatform, facts: Row[]): NexusCov
       acc.set(key, e);
     }
     e.factRows += 1;
-    e.imp += Number(r[IMP_KEY[platform]]) || 0;
-    e.spend = Math.round((e.spend + (Number(r[SPEND_KEY[platform]]) || 0)) * 10000) / 10000;
+    e.imp += IMP_OF[platform](r);
+    e.spend = Math.round((e.spend + SPEND_OF[platform](r)) * 10000) / 10000;
   }
   return [...acc.values()];
 }
@@ -375,6 +402,7 @@ async function fetchForJob(job: NexusJobInput, syncedAt: string, onPhase: (p: st
     }
     case 'R': return fetchRAll(job.sd, job.ed, syncedAt, onPhase);
     case 'P': return fetchPAll(job.sd, job.ed, syncedAt, onPhase);
+    case 'D1': return fetchD1All(job.sd, job.ed, syncedAt, onPhase);
   }
 }
 
@@ -383,6 +411,8 @@ export interface JobDeps {
   coveredRows: typeof nexusCoveredRows;
   writeSlice: typeof writeSlice;
   replaceCoverage: typeof replaceNexusCoverage;
+  /** 台北今天（tests 固定用；不給就取現在） */
+  today?: string;
 }
 const realDeps: JobDeps = { fetch: fetchForJob, coveredRows: nexusCoveredRows, writeSlice, replaceCoverage: replaceNexusCoverage };
 
@@ -406,6 +436,10 @@ export async function runNexusJob(
   if (accountId !== null && !isValidAccountId(job.platform, accountId)) {
     const table = job.platform === 'M' ? 'nexus.mgid_tokens' : 'nexus.d_tokens';
     throw new NexusNoRetryError(`${label}：帳戶 ID「${accountId}」不合法，不抓也不寫（${table} 有壞資料，例如 BH Excel AccID 空白被讀成 'nan'；改成正確 ID 或刪掉那列）`);
+  }
+  if (job.platform === 'D1') {
+    const err = d1WindowError(job.sd, deps.today ?? twToday());
+    if (err) throw new NexusNoRetryError(`${label}：${err}`);
   }
   let res: FetchResult;
   try {
@@ -434,12 +468,12 @@ export async function runNexusJob(
   // 媒體層防呆：素材層有點擊、媒體層卻 0 列＝媒體報表出狀況，整個 job 失敗重試（不能把媒體表這段清空）。
   // 用點擊不用曝光：M 的媒體報表整支排除生涯零點擊 campaign，只有零點擊曝光的帳戶本來就可能 0 列。
   if (res.media && !res.media.length) {
-    const clicks = res.facts.reduce((s, r) => s + (Number(r[CLICK_KEY[job.platform]]) || 0), 0);
+    const clicks = res.facts.reduce((s, r) => s + CLICK_OF[job.platform](r), 0);
     if (clicks > 0) throw new Error(`${label}：素材層有 ${clicks} 次點擊，媒體報表卻回 0 列，疑似 API 異常，不寫入`);
   }
   // M 裝置轉換防呆：同上，素材層有點擊、裝置轉換報表卻 0 列＝API 出狀況，不能把這段清空
   if (res.mDeviceConv && !res.mDeviceConv.length) {
-    const clicks = res.facts.reduce((s, r) => s + (Number(r[CLICK_KEY[job.platform]]) || 0), 0);
+    const clicks = res.facts.reduce((s, r) => s + CLICK_OF[job.platform](r), 0);
     if (clicks > 0) throw new Error(`${label}：素材層有 ${clicks} 次點擊，裝置轉換報表卻回 0 列，疑似 API 異常，不寫入`);
   }
 
