@@ -388,6 +388,7 @@ const STYLE = `
      字級跟著格子寬度縮（container query）：Discovery 實測 5.69em（含左右內距 .5em），扣掉左移 .2em、加斜體右側出血 ≈5.6em；
      上限 40px（1550px 視窗約 40px、960px 約 34px）。左移 .2em 抵掉內距，跟下面的帳戶數貼齊 */
   .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E} .pf-d1{--pc:#C2410C}
+  .src-d1{background:#C2410C} /* 共用 sbui.ts 只有 D/R/M/P 的色塊（job 表用得到） */
   .pf-t{--tf:clamp(22px,calc(100cqi / 5.6),40px);--dx:.0345em;--dy:.0127em;margin:0 0 0 -.2em;
     font:italic 900 var(--tf)/1.05 'Montserrat',var(--disp);letter-spacing:-.02em;white-space:nowrap}
   .pf-t .nw{display:inline-block;position:relative;padding:.15em .25em;color:transparent}
