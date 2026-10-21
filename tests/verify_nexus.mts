@@ -1474,4 +1474,17 @@ await ok('狀態頁：D1 第五張卡片（全平台一次抓）', () => {
   assert.equal((html.match(/<article class="pf pf-/g) ?? []).length, 5);
 });
 
+await ok('狀態頁：今天批次沒有某平台的 job 時，平台名下方那行照樣佔位（不然環形讀數往上一行、跟旁邊對不齊）', () => {
+  // 2026-10-21 實例：D1 上線時今天的每日批次已在 04:00 入列，沒有 D1 job ⇒ D1 卡的 .pf-c 是空的
+  const input = healthBase();
+  const batchJobs = [bjob(1, 'D', 'success'), { ...bjob(2, 'R', 'success'), accountId: '*' }];
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs, jobs: batchJobs });
+  const pfc = (p: string) => html.match(new RegExp(`<article class="pf pf-${p}">[\\s\\S]*?<span class="pf-c">([^<]*)</span>`))![1];
+  assert.equal(pfc('d1'), '全平台一次抓');
+  assert.equal(pfc('p'), '全平台一次抓');
+  assert.equal(pfc('m'), '—');
+  assert.equal(pfc('d'), '1 帳戶');
+  assert.equal(pfc('r'), '全平台一次抓');
+});
+
 console.log(`\n全部 ${n} 項通過`);

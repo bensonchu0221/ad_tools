@@ -17,6 +17,9 @@ import {
 
 const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P', 'D1'];
 const PNAME: Record<NexusPlatform, string> = { D: 'Discovery', R: 'Rixbee', M: 'MGID', P: 'Prism', D1: 'D1 Video' };
+/** 一個 job 抓整個平台的（R／P／D1）：平台名下方固定寫「全平台一次抓」。
+ *  不能看今天有沒有 job：沒有 job 時那行變空字串、高度變 0，環形讀數往上一行跟旁邊對不齊（2026-10-21 D1 上線當天） */
+const WHOLE_PLATFORM = new Set<NexusPlatform>(['R', 'P', 'D1']);
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const num = (n: number) => Math.round(n).toLocaleString('en-US');
@@ -243,7 +246,7 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
 
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
       <header class="pf-h"><div class="pf-hd">${platformTitle(p)}
-          <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : pj.length ? '全平台一次抓' : ''; })()}</span></div></header>
+          <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : WHOLE_PLATFORM.has(p) ? '全平台一次抓' : '—'; })()}</span></div></header>
       <div class="dial-box"${reconRows ? ` data-p="${p}" title="看吻合明細"` : ''}>${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
       <dl class="pf-num">
