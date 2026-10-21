@@ -1,4 +1,5 @@
 ## D1 影音報表核心（tool#8，`/tools/d1videoad`，`src/tools/d1videoad/`）
+- **2026-10-21 起 nexus 倉庫已收 D1 影音**（`nexus_d1_ad_daily`，平台代號 `D1`，見 `nexus/CLAUDE.md`）：Action4 全欄位＋素材層，不受 12 個月限制（從 2026-05-01 起存）。本工具目前仍即時打 Action4，之後改讀倉庫是下一輪；口徑對過完全一致。
 - 目的：D1 系統兩種廣告型態（廣編／影音）中的**影音**，做一份 AM 自己查得到的報表。分層：`core/firestore_d1.ts`（campaign 清單/名稱/影音旗標）＋`core/action4.ts`（成效）→ `metrics.ts`（口徑純函式）→ `report.ts`（組裝）→ `xlsx.ts`／`page.ts`／`route.ts`
 - **⚠️⚠️ D 平台報表 API（s2s.popin.cc）一格影音資料都沒有**，別再去那邊找。三重實證（2026-09-01）：①掃 `nexus.d_tokens` **全部 242 個帳號、8302 個 campaign** 的 `campaign/lists`，`type` **100% 是 `native`**、0 個 `video`，`charge_type` 只有 cpc/ocpc/max_cv（`poc/probe_d_video_types.mts`）；②官方文件 mhtml 全文解碼後搜 `video/play/quartile/播放`，**沒有任何播放指標**（只有 `cv_complete_registration`＝表單完成註冊，不同東西）；③文件 §3.4 明寫 Video Ads/Wave 的 campaign 打 date_reporting 會報錯，根因就在 D1 原始碼 `popin-discovery-v2/app/Http/Controllers/Api/Campaign.php:607` 的 `if (is_wave || is_video) return 80000 'not supported campaign.'`（`CampaignModel.php:70` 定義 `is_video = type === 'video'`）
 - **資料源 ①：Action4（成效）** `https://action4.popin.cc/popin-action/?op=article&nid={campaignId}&country=&start=YYYYMMDD&stop=YYYYMMDD&categories=ca_all`
