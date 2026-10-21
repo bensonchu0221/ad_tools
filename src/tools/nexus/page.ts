@@ -387,8 +387,8 @@ const STYLE = `
      框線不照比例縮（40px 時只剩 .5px 看不到），固定 1px。原版框線是 #94A3B8（配深底），淺底上太淡，改平台色。
      字級跟著格子寬度縮（container query）：Discovery 實測 5.69em（含左右內距 .5em），扣掉左移 .2em、加斜體右側出血 ≈5.6em；
      上限 40px（1550px 視窗約 40px、960px 約 34px）。左移 .2em 抵掉內距，跟下面的帳戶數貼齊 */
-  .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E} .pf-d1{--pc:#C2410C}
-  .src-d1{background:#C2410C} /* 共用 sbui.ts 只有 D/R/M/P 的色塊（job 表用得到） */
+  .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E} .pf-d1{--pc:#1178ff}
+  .src-d1{background:#1178ff} /* 共用 sbui.ts 只有 D/R/M/P 的色塊（job 表用得到） */
   .pf-t{--tf:clamp(22px,calc(100cqi / 5.6),40px);--dx:.0345em;--dy:.0127em;margin:0 0 0 -.2em;
     font:italic 900 var(--tf)/1.05 'Montserrat',var(--disp);letter-spacing:-.02em;white-space:nowrap}
   .pf-t .nw{display:inline-block;position:relative;padding:.15em .25em;color:transparent}
@@ -502,7 +502,7 @@ const STYLE = `
   .rp-empty{font-size:13px;color:var(--mut);margin:14px 0 0}
   /* 近 14 天收益小柱狀圖：放在吻合三指標右邊，只看形狀（不標數字、無 Y 軸），平台色、T-1 實色其餘淡一階 */
   .rp-row{display:flex;align-items:flex-end;justify-content:space-between;gap:16px 40px;flex-wrap:wrap}
-  .sb-d{--pc:var(--ink)} .sb-r{--pc:var(--slate)} .sb-m{--pc:#5B54D6} .sb-p{--pc:#0F766E} .sb-d1{--pc:#C2410C}
+  .sb-d{--pc:var(--ink)} .sb-r{--pc:var(--slate)} .sb-m{--pc:#5B54D6} .sb-p{--pc:#0F766E} .sb-d1{--pc:#1178ff}
   .sb{margin:14px 0 4px;width:min(100%,340px)}
   .sb figcaption{font-size:11.5px;color:var(--mut);margin-bottom:6px}
   .sb-bars{display:flex;align-items:flex-end;gap:5px;height:52px;border-bottom:1px solid rgba(20,22,26,.18)}
