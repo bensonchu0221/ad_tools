@@ -870,7 +870,7 @@ await ok('狀態頁：今天還沒入列、還沒比對也能畫', () => {
   input.recon = { checkedAt: null, rows: [] };
   const html = statusPage({ input, health: evaluateHealth(input), batchJobs: [], jobs: [] });
   assert.match(html, /今天的批次還沒開跑/);
-  assert.equal((html.match(/ring-empty/g) ?? []).length, 4 + 1); // 四個平台＋CSS 定義一次
+  assert.equal((html.match(/ring-empty/g) ?? []).length, 5 + 1); // 五個平台（含 D1）＋CSS 定義一次
   assert.match(html, /跑完後比對/);
 });
 
@@ -1452,6 +1452,26 @@ await ok('比對 SQL：D1 事實投影＝mobile＋pc 收費曝光（不含 over�
   assert.doesNotMatch(seg, /imp_over/);
   assert.match(seg, /\/ 1000/);
   assert.match(seg, /nexus_d1_ad_daily/);
+});
+
+await ok('健檢 D1：量小、整天沒投放是常態 ⇒ T-1 沒資料且前 7 天也沒量不亮燈；前 7 天有量、T-1 掉到 0 才亮跌幅', () => {
+  const quiet = evaluateHealth(healthBase());
+  assert.equal(quiet.level, 'ok');
+  assert.doesNotMatch([...quiet.items.map((i) => i.text), ...quiet.summary].join('|'), /D1/);
+
+  const drop = healthBase();
+  for (let k = 2; k <= 8; k++) drop.coverage.push({ platform: 'D1', accountId: '4A_CPM_juliat', accountName: '4A_CPM_juliat', dt: addDays(drop.today, -k), rows: 2, imp: 5000, spend: 360 });
+  const r = evaluateHealth(drop);
+  assert.ok(r.items.some((i) => i.level === 'alert' && /D1/.test(i.text) && /中位數/.test(i.text)), JSON.stringify(r.items));
+  assert.ok(!r.items.some((i) => /D1.*沒有任何資料/.test(i.text)));
+});
+
+await ok('狀態頁：D1 第五張卡片（全平台一次抓）', () => {
+  const input = healthBase();
+  const batchJobs = [bjob(1, 'D', 'success'), { ...bjob(9, 'D1' as any, 'success'), accountId: '*' }];
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs, jobs: batchJobs });
+  assert.match(html, /<article class="pf pf-d1">[\s\S]*?全平台一次抓/);
+  assert.equal((html.match(/<article class="pf pf-/g) ?? []).length, 5);
 });
 
 console.log(`\n全部 ${n} 項通過`);

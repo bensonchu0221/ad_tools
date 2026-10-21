@@ -42,8 +42,8 @@ export const HEALTH = {
   dupMinImp: 1000,
 };
 
-const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P'];
-const PNAME: Record<NexusPlatform, string> = { D: 'D（Discovery）', R: 'R（Rixbee）', M: 'M（MGID）', P: 'P（Prism）' };
+const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P', 'D1'];
+const PNAME: Record<NexusPlatform, string> = { D: 'D（Discovery）', R: 'R（Rixbee）', M: 'M（MGID）', P: 'P（Prism）', D1: 'D1（影音）' };
 
 function median(xs: number[]): number {
   if (!xs.length) return 0;
@@ -114,11 +114,13 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       byDay.set(c.dt, d);
     }
     const y = byDay.get(t1) ?? { rows: 0, imp: 0, spend: 0, accounts: 0 };
-    if (y.rows === 0) {
+    // D1 影音量小（2025-10~2026-10 有量的 campaign 才 59 支），整天沒投放是常態 ⇒ 不報「沒有任何資料」，
+    // 交給下面的比例檢查：前 7 天有量、T-1 掉到 0 才亮跌幅；前 7 天也沒量就安靜
+    if (y.rows === 0 && p !== 'D1') {
       items.push({ level: 'alert', text: `${PNAME[p]} ${t1} 沒有任何資料` });
       continue;
     }
-    summary.push(`${p} ${fmt(y.accounts)} 帳／曝光 ${fmt(y.imp)}／花費 ${fmt(y.spend)}`);
+    if (y.rows > 0) summary.push(`${p} ${fmt(y.accounts)} 帳／曝光 ${fmt(y.imp)}／花費 ${fmt(y.spend)}`);
     const prior = [2, 3, 4, 5, 6, 7, 8].map((k) => byDay.get(addDays(inp.today, -k)) ?? { imp: 0, spend: 0 });
     for (const [key, label] of [['imp', '曝光'], ['spend', '花費']] as const) {
       const med = median(prior.map((x) => x[key]));

@@ -15,8 +15,8 @@ import {
   type PlatformRecon, type ConvRecon,
 } from './recon.js';
 
-const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P'];
-const PNAME: Record<NexusPlatform, string> = { D: 'Discovery', R: 'Rixbee', M: 'MGID', P: 'Prism' };
+const PLATFORMS: NexusPlatform[] = ['D', 'R', 'M', 'P', 'D1'];
+const PNAME: Record<NexusPlatform, string> = { D: 'Discovery', R: 'Rixbee', M: 'MGID', P: 'Prism', D1: 'D1 Video' };
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const num = (n: number) => Math.round(n).toLocaleString('en-US');
@@ -202,7 +202,7 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
   const items = health.items.map((i) =>
     `<li class="hi-${i.level}">${esc(i.text).replace(/\n/g, '<br>')}</li>`).join('');
 
-  // ── 四個平台 ──
+  // ── 五個平台 ──
   const reconRows = recon?.checkedAt ? recon.rows : null;
   const cards: string[] = [];
   const panels: string[] = [];
@@ -372,7 +372,7 @@ const STYLE = `
   .hitems li.hi-alert::before{background:var(--err)}
 
   /* 四個平台 */
-  .board{display:grid;grid-template-columns:repeat(4,1fr);margin-top:22px}
+  .board{display:grid;grid-template-columns:repeat(5,1fr);margin-top:22px}
   .pf{padding:22px 20px 20px;border-left:1px solid var(--hair);display:flex;flex-direction:column;min-width:0}
   .pf:first-child{border-left:none}
   .pf{container-type:inline-size}
@@ -387,7 +387,7 @@ const STYLE = `
      框線不照比例縮（40px 時只剩 .5px 看不到），固定 1px。原版框線是 #94A3B8（配深底），淺底上太淡，改平台色。
      字級跟著格子寬度縮（container query）：Discovery 實測 5.69em（含左右內距 .5em），扣掉左移 .2em、加斜體右側出血 ≈5.6em；
      上限 40px（1550px 視窗約 40px、960px 約 34px）。左移 .2em 抵掉內距，跟下面的帳戶數貼齊 */
-  .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E}
+  .pf-d{--pc:var(--ink)} .pf-r{--pc:var(--slate)} .pf-m{--pc:#5B54D6} .pf-p{--pc:#0F766E} .pf-d1{--pc:#C2410C}
   .pf-t{--tf:clamp(22px,calc(100cqi / 5.6),40px);--dx:.0345em;--dy:.0127em;margin:0 0 0 -.2em;
     font:italic 900 var(--tf)/1.05 'Montserrat',var(--disp);letter-spacing:-.02em;white-space:nowrap}
   .pf-t .nw{display:inline-block;position:relative;padding:.15em .25em;color:transparent}
@@ -501,7 +501,7 @@ const STYLE = `
   .rp-empty{font-size:13px;color:var(--mut);margin:14px 0 0}
   /* 近 14 天收益小柱狀圖：放在吻合三指標右邊，只看形狀（不標數字、無 Y 軸），平台色、T-1 實色其餘淡一階 */
   .rp-row{display:flex;align-items:flex-end;justify-content:space-between;gap:16px 40px;flex-wrap:wrap}
-  .sb-d{--pc:var(--ink)} .sb-r{--pc:var(--slate)} .sb-m{--pc:#5B54D6} .sb-p{--pc:#0F766E}
+  .sb-d{--pc:var(--ink)} .sb-r{--pc:var(--slate)} .sb-m{--pc:#5B54D6} .sb-p{--pc:#0F766E} .sb-d1{--pc:#C2410C}
   .sb{margin:14px 0 4px;width:min(100%,340px)}
   .sb figcaption{font-size:11.5px;color:var(--mut);margin-bottom:6px}
   .sb-bars{display:flex;align-items:flex-end;gap:5px;height:52px;border-bottom:1px solid rgba(20,22,26,.18)}
@@ -564,7 +564,7 @@ const STYLE = `
 
   @media(max-width:900px){
     .board{grid-template-columns:1fr 1fr}
-    .pf:nth-child(3){border-left:none}
+    .pf:nth-child(2n+1){border-left:none}
     .pf:nth-child(n+3){border-top:1px solid var(--hair)}
   }
   @media(max-width:600px){
@@ -574,7 +574,7 @@ const STYLE = `
     .hitems li{padding-left:42px}.hitems li::before{left:18px}
     /* 手機：一個平台一列，刻度圈在左、數字在右 */
     .board{grid-template-columns:1fr}
-    .pf,.pf:nth-child(3){border-left:none}
+    .pf,.pf:nth-child(2n+1){border-left:none}
     .pf:nth-child(n+2){border-top:1px solid var(--hair)}
     .pf{display:grid;grid-template-columns:104px 1fr;column-gap:16px;padding:16px}
     .pf-h{grid-column:1/-1}
