@@ -122,19 +122,9 @@ export const MEDIA_SCHEMA: BqField[] = [
   SYNCED_AT,
 ];
 
-// M 裝置轉換表（2026-10-15）：MGID statistics-reports day×deviceType，「日 × 帳戶 × 裝置」三段轉換。
-// 起因：M 裝置表（nexus_device_daily）由 Redash 產生，Redash 查詢 13252 只輸出 main goal（conv_buy），
-// 沒有 goal1（conv_decision）／goal2（conv_interest）⇒ 整合週報的裝置分析拿不到這兩桶。
-// 不塞進 nexus_device_daily：那邊的 M 曝光／花費是 Redash 到 campaign 層，同表兩份會重複加總、粒度也不同。
-// imp／click／spend 一起存（API 本來就回、用來跟事實表比對點擊），但 M 裝置的曝光／花費仍以 nexus_device_daily 為準。
-// 2026-10-15 實測 6/05~10/14 共 40 帳戶：三段轉換與事實表逐帳戶逐月 100% 一致，點擊只差 1 次（864475）。
-export const M_DEVICE_CONV_SCHEMA: BqField[] = [
-  DATE, ACCOUNT_ID, S('account_name'), S('device', 'PC / Mobile / Tablet / Others'),
-  I('imp', 'statistics-reports impressions（比 teaser-stat 少 0.01~0.1%，曝光請用 nexus_device_daily）'),
-  I('click'), F('spend', '花費（帳戶幣別）'),
-  I('conv_interest', 'goal2'), I('conv_decision', 'goal1'), I('conv_buy', 'Main goal'),
-  SYNCED_AT,
-];
+// M 裝置三段轉換（2026-10-21 起）：寫在裝置表 events（conv_buy／conv_decision＝goal1／conv_interest＝goal2，來源 Redash）。
+// 2026-10-15~10-21 曾另建 nexus_m_device_conv_daily（statistics-reports day×deviceType，因為當時 Redash 沒有 goal1／goal2），
+// Redash 加了 add_goal_1／2 後停寫；BQ 上的表與舊資料保留未刪（沒有程式再讀寫它）。
 
 // D1 影音（2026-10-21，設計 docs/superpowers/specs/2026-10-21-nexus-d1-ad-daily-design.md）：Action4 素材×日。
 // D 平台報表 API 一格影音都沒有，影音只在 Action4（D1 後台自己的報表來源）。使用者要求「Action4 有多少欄位就存多少」，
@@ -204,7 +194,6 @@ export const FACT_TABLE: Record<Platform, string> = {
 export const FACT_SCHEMA: Record<Platform, BqField[]> = { D: D_SCHEMA, R: R_SCHEMA, M: M_SCHEMA, P: P_SCHEMA, D1: D1_SCHEMA };
 export const DEVICE_TABLE = nexusTable('device_daily');
 export const MEDIA_TABLE = nexusTable('media_daily');
-export const M_DEVICE_CONV_TABLE = nexusTable('m_device_conv_daily');
 export const CUSTOMER_MAP_TABLE = nexusTable('customer_account_map');
 export const INTEGRATED_VIEW = nexusTable('integrated_daily');
 
@@ -217,7 +206,6 @@ export const TABLE_SPECS: BqTableSpec[] = [
   { table: DEVICE_TABLE, schema: DEVICE_SCHEMA, partitionField: 'date', clustering: ['platform', 'account_id'], description: 'nexus：四平台 裝置×日' },
   // 叢集照 dashboard 主查詢：某天某媒體 → 各帳戶
   { table: MEDIA_TABLE, schema: MEDIA_SCHEMA, partitionField: 'date', clustering: ['platform', 'media', 'account_id'], description: 'nexus：四平台 媒體×帳戶×日' },
-  { table: M_DEVICE_CONV_TABLE, schema: M_DEVICE_CONV_SCHEMA, partitionField: 'date', clustering: ['account_id'], description: 'nexus：M 平台 裝置×帳戶×日 三段轉換（statistics-reports）' },
   { table: CUSTOMER_MAP_TABLE, schema: CUSTOMER_MAP_SCHEMA, description: 'nexus：平台帳戶 → 客戶 對照（人工維護）' },
 ];
 

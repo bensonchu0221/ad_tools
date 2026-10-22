@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
-  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, toMDeviceConvRows,
+  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, mEvents,
   toD1Rows, toD1DeviceRows, d1MobileImp, d1MobileSpend,
 } from '../src/tools/nexus/fetch.js';
 import {
@@ -16,7 +16,7 @@ import {
 import { getCampaigns } from '../src/core/popin.js';
 import { evaluateHealth, formatChat, type HealthInput } from '../src/tools/nexus/health.js';
 import {
-  D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, M_DEVICE_CONV_SCHEMA, integratedViewSql,
+  D_SCHEMA, R_SCHEMA, M_SCHEMA, P_SCHEMA, DEVICE_SCHEMA, MEDIA_SCHEMA, integratedViewSql,
   D1_SCHEMA, D1_METRIC_COLS, D1_CHARGE_COLS, D1_ACTION4_METRICS, D1_ACTION4_CHARGES, D1_CLIENT_RATE, FACT_TABLE,
 } from '../src/tools/nexus/schema.js';
 import {
@@ -160,15 +160,24 @@ await ok('M teaser-stat 校正：曝光／點擊／花費／轉換以 teaser-sta
 });
 
 const rd = (o: Partial<RedashRow>): RedashRow => ({ date: '2026-09-23', clientId: '979850', clientName: '新素簡', campaignId: 'c1', campaignName: '',
-  device: 'desktop', teaserId: '', imp: 0, adRequests: 0, click: 0, spendUsd: 0, spendTwd: 0, convBuy: 0, ...o });
+  device: 'desktop', teaserId: '', imp: 0, adRequests: 0, click: 0, spendUsd: 0, spendTwd: 0, convBuy: 0, convDecision: 0, convInterest: 0, ...o });
 
-await ok('Redash 原始列：欄名對應、缺欄位（查詢被改）直接丟錯', () => {
-  const [r] = toRedashRows([{ 'Date Breakdown': '2026-09-23', 'Client ID': 979850, 'Clients Name': ' 新素簡 ', 'Campaign ID': 12434214, dimension_1: 'mobile',
-    'Impressions (Viewable)': 14966, 'Impressions (Total)': 263901, Clicks: 37, 'Spent, USD': 5.837, 'Spent, TWD': 185.84, 'Conversion (main goal)': 6 }]);
-  assert.deepEqual([r.clientId, r.clientName, r.campaignId, r.imp, r.adRequests, r.click, r.convBuy], ['979850', '新素簡', '12434214', 14966, 263901, 37, 6]);
+await ok('Redash 原始列：欄名對應（含 2026-10-21 新增的 add_goal_1／2）、缺欄位（查詢被改）直接丟錯', () => {
+  const full = { 'Date Breakdown': '2026-09-23', 'Client ID': 979850, 'Clients Name': ' 新素簡 ', 'Campaign ID': 12434214, dimension_1: 'mobile',
+    'Impressions (Viewable)': 14966, 'Impressions (Total)': 263901, Clicks: 37, 'Spent, USD': 5.837, 'Spent, TWD': 185.84,
+    'Conversion (main goal)': 6, 'Conversion (add_goal_1)': 9, 'Conversion (add_goal_2)': 4 };
+  const [r] = toRedashRows([full]);
+  assert.deepEqual([r.clientId, r.clientName, r.campaignId, r.imp, r.adRequests, r.click, r.convBuy, r.convDecision, r.convInterest],
+    ['979850', '新素簡', '12434214', 14966, 263901, 37, 6, 9, 4]);
   assert.throws(() => toRedashRows([{ 'Date Breakdown': '2026-09-23' }]), /缺欄位/);
+  // goal 欄被拿掉也要丟錯：不然 goal1／goal2 會默默變成 0 寫進倉庫
+  for (const k of ['Conversion (add_goal_1)', 'Conversion (add_goal_2)', 'Conversion (main goal)']) {
+    const { [k]: _drop, ...rest } = full as Record<string, unknown>;
+    assert.throws(() => toRedashRows([rest]), (e: Error) => e.message.includes(`缺欄位「${k}」`));
+  }
   // 素材級查詢：Teaser Breakdown 是 teaser ID；裝置查詢沒拆 teaser（'0'／缺欄）時是空字串
-  const base = { 'Date Breakdown': '2026-10-04', 'Client ID': 987757, 'Campaign ID': 12502742, dimension_1: '-', 'Impressions (Viewable)': 1, Clicks: 0, 'Spent, USD': 0 };
+  const base = { 'Date Breakdown': '2026-10-04', 'Client ID': 987757, 'Campaign ID': 12502742, dimension_1: '-', 'Impressions (Viewable)': 1, Clicks: 0, 'Spent, USD': 0,
+    'Conversion (main goal)': 0, 'Conversion (add_goal_1)': 0, 'Conversion (add_goal_2)': 0 };
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '28063408' }])[0].teaserId, '28063408');
   assert.equal(toRedashRows([{ ...base, 'Teaser Breakdown': '0' }])[0].teaserId, '');
   assert.equal(toRedashRows([base])[0].teaserId, '');
@@ -212,39 +221,46 @@ await ok('M 帳戶對照：事實表裡正式帳戶寫過的 campaign（清單�
   assert.equal(facts.length, 0);
 });
 
-await ok('M 墊底：只收對不上 owner 的 campaign、記 client:<Client ID>、Redash 台幣、拿不到的欄位 NULL', () => {
+await ok('M 墊底：只收對不上 owner 的 campaign、記 client:<Client ID>、Redash 台幣、三段轉換照收、拿不到的欄位 NULL', () => {
   const owners = new Map([['c1', { accountId: '860212', accountName: '新素簡', tz: 'Asia/Taipei', currency: 'twd' }]]);
   const facts = toMRedashOrphanFacts({
     rows: [
       rd({ date: '2026-10-04', campaignId: 'c1', teaserId: 't0', imp: 999 }), // 有 token 的帳戶 → 不墊
       rd({ date: '2026-10-04', clientId: '987757', clientName: '蜂王乳', campaignId: 'x1', campaignName: '(SP)蜂王乳', teaserId: '28063408', device: '-',
-        imp: 27182, adRequests: 921039, click: 58, spendUsd: 18.2276, spendTwd: 578.84321, convBuy: 2 }),
+        imp: 27182, adRequests: 921039, click: 58, spendUsd: 18.2276, spendTwd: 578.84321, convBuy: 2, convDecision: 7, convInterest: 3 }),
       rd({ date: '2026-10-04', clientId: '987757', campaignId: 'x1', teaserId: '28063409', device: '-' }), // 全 0 → 不收
+      rd({ date: '2026-10-03', clientId: '987757', campaignId: 'x1', teaserId: '28063411', device: '-', convInterest: 1 }), // 零點擊只有 goal2 → 要收
       rd({ clientId: '987757', campaignId: 'x1', teaserId: '28063410', date: '2026-09-30', imp: 5 }), // 區間外 → 不收
     ],
     owners, sd: '2026-10-01', ed: '2026-10-04', syncedAt: T,
   }).map((r) => ({ ...r }));
-  assert.equal(facts.length, 1);
+  assert.equal(facts.length, 2);
   assert.deepEqual(Object.keys(facts[0]).sort(), keysOf(M_SCHEMA));
   const f = facts[0];
   assert.deepEqual([f.account_id, f.account_name, f.currency, f.campaign_id, f.teaser_id], [`${M_UNMAPPED_PREFIX}987757`, '蜂王乳', 'twd', 'x1', '28063408']);
   assert.deepEqual([f.ad_requests, f.imp, f.click, f.spend, f.conv_buy], [921039, 27182, 58, 578.8432, 2]);
-  assert.deepEqual([f.teaser_title, f.teaser_url, f.teaser_image, f.conv_interest, f.conv_decision], [null, null, null, null, null]);
+  assert.deepEqual([f.conv_decision, f.conv_interest], [7, 3]);
+  assert.deepEqual([f.teaser_title, f.teaser_url, f.teaser_image], [null, null, null]);
+  assert.deepEqual([facts[1].teaser_id, facts[1].click, facts[1].conv_interest, facts[1].conv_decision], ['28063411', 0, 1, 0]);
 });
 
 await ok('M 裝置（Redash）：campaign 對回帳戶、花費按美金比例分配且加總＝計費、spend_usd 原封存', () => {
   const owners = new Map([['c1', { accountId: '860212', accountName: '新素簡', tz: 'Asia/Taipei', currency: 'twd' }]]);
   const { rows, unmapped } = toMRedashDeviceRows({
-    byTz: { 'Asia/Taipei': [rd({ device: 'desktop', imp: 100, click: 3, spendUsd: 2, spendTwd: 63.67, convBuy: 1 }), rd({ device: 'mobile', imp: 50, click: 1, spendUsd: 1, spendTwd: 31.84 }), rd({ device: 'smarttv', imp: 1 })] },
+    byTz: { 'Asia/Taipei': [rd({ device: 'desktop', imp: 100, click: 3, spendUsd: 2, spendTwd: 63.67, convBuy: 1, convDecision: 2 }), rd({ device: 'desktop', convInterest: 1 }),
+      rd({ device: 'mobile', imp: 50, click: 1, spendUsd: 1, spendTwd: 31.84 }), rd({ device: 'smarttv', imp: 1 }), rd({ device: 'tablet', convDecision: 1 })] },
     owners, apiSpend: new Map([['860212|2026-09-23', 95]]), sd: '2026-09-22', ed: '2026-09-23', syncedAt: T,
   });
   assert.deepEqual(unmapped, []);
   assert.deepEqual(Object.keys(rows[0]).sort(), keysOf(DEVICE_SCHEMA));
-  assert.deepEqual(rows.map((r) => [r.account_id, r.campaign_id, r.device]), [['860212', 'c1', 'PC'], ['860212', 'c1', 'Mobile'], ['860212', 'c1', 'Others']]);
-  assert.deepEqual(rows.map((r) => r.spend), [63.3333, 31.6667, 0]);
+  // 平板只有 goal1、沒曝光沒點擊（零點擊也可能有轉換）⇒ 也要留
+  assert.deepEqual(rows.map((r) => [r.account_id, r.campaign_id, r.device]), [['860212', 'c1', 'PC'], ['860212', 'c1', 'Mobile'], ['860212', 'c1', 'Others'], ['860212', 'c1', 'Tablet']]);
+  assert.deepEqual(rows.map((r) => r.spend), [63.3333, 31.6667, 0, 0]);
   assert.equal(rows.reduce((a, r) => a + Number(r.spend), 0), 95);
-  assert.deepEqual(rows.map((r) => r.spend_usd), [2, 1, 0]);
-  assert.deepEqual(JSON.parse(String(rows[0].events)), { conv_buy: 1 });
+  assert.deepEqual(rows.map((r) => r.spend_usd), [2, 1, 0, 0]);
+  assert.deepEqual(JSON.parse(String(rows[0].events)), { conv_buy: 1, conv_decision: 2, conv_interest: 1 }); // 同 campaign 同裝置兩列加總
+  assert.deepEqual(JSON.parse(String(rows[1].events)), {});
+  assert.deepEqual(JSON.parse(String(rows[3].events)), { conv_decision: 1 });
 });
 
 await ok('M 裝置（Redash）：token 表沒有的帳戶記成 client:<Client ID> 不丟、用 Redash 台幣；帳戶只取自己時區那份', () => {
@@ -1165,79 +1181,22 @@ await ok('健檢：媒體層吻合寫進結論；D 媒體層落差亮燈，M 落
   assert.ok(!h.items.some((i) => /M（MGID）.*媒體層/.test(i.text)));
 });
 
-// ────────────── M 裝置轉換（2026-10-15）──────────────
+// ────────────── M 裝置三段轉換（2026-10-15 裝置轉換表；2026-10-21 起改寫進裝置表 events）──────────────
 
-await ok('M 裝置轉換列：欄位＝schema、同天同裝置加總成一列（Others 多代碼）、全 0 丟掉、壞日期丟錯', () => {
-  const acc = { id: '868613', name: '三得利DHA' };
-  const dev = (date: string, device: string, imp: number, click: number, spend: number, i: number, d: number, b: number) =>
-    ({ date, device, imp, click, spend, conv_interest: i, conv_decision: d, conv_buy: b });
-  const rows = toMDeviceConvRows(acc, [
-    dev('2026-10-13', 'Mobile', 100, 5, 1.1, 0, 2, 1),
-    dev('2026-10-13', 'Others', 3, 0, 0.1, 0, 0, 0),
-    dev('2026-10-13', 'Others', 2, 1, 0.2000001, 1, 0, 0),
-    dev('2026-10-13', 'Tablet', 0, 0, 0, 0, 0, 0),
-    dev('2026-10-14', 'PC', 0, 0, 0, 0, 1, 0), // 零點擊也有轉換（864474 9 月實例）⇒ 要留
-  ], T);
-  assert.equal(rows.length, 3);
-  for (const r of rows) assert.deepEqual(Object.keys(r).sort(), keysOf(M_DEVICE_CONV_SCHEMA));
-  const o = rows.find((r) => r.device === 'Others')!;
-  assert.deepEqual([o.imp, o.click, o.spend, o.conv_interest], [5, 1, 0.3, 1]);
-  assert.equal(rows.find((r) => r.device === 'PC')!.conv_decision, 1);
-  assert.ok(rows.every((r) => r.account_id === '868613' && r.synced_at === T));
-  assert.throws(() => toMDeviceConvRows(acc, [dev('garbage', 'PC', 1, 1, 1, 0, 0, 0)], T), /無法解析的日期/);
+await ok('M 裝置 events：三段轉換 0 的不寫、key 順序固定', () => {
+  assert.deepEqual(mEvents({ buy: 0, decision: 0, interest: 0 }), {});
+  assert.deepEqual(JSON.stringify(mEvents({ buy: 1, decision: 2, interest: 3 })), '{"conv_buy":1,"conv_decision":2,"conv_interest":3}');
+  assert.deepEqual(mEvents({ buy: 0, decision: 5, interest: 0 }), { conv_decision: 5 });
 });
 
-await ok('取代 SQL：M 帳戶 job（facts）一併取代裝置轉換表同帳戶這段；裝置類模式不碰；沒給不碰；整平台拒絕', () => {
-  const base = {
+await ok('取代 SQL：M 帳戶 job（facts）只動事實表＋媒體表，不再寫任何裝置轉換表', () => {
+  const sql = buildReplaceSql({
     factTable: 'F', factCols: ['a'], factStage: 'SF', deviceTable: 'V', deviceCols: ['a'], deviceStage: 'SV',
-    mconvTable: 'CT', mconvCols: ['date', 'device'], mconvStage: 'SC', platform: 'M' as const, accountId: '868613',
-    sd: '2026-10-13', ed: '2026-10-14', tables: 'facts' as const,
-  };
-  const sql = buildReplaceSql(base);
-  // 表上沒有 platform 欄：刪除範圍＝日期分區＋帳戶
-  assert.match(sql, /DELETE FROM `CT` WHERE date BETWEEN DATE '2026-10-13' AND DATE '2026-10-14' AND account_id = '868613';/);
-  assert.match(sql, /INSERT INTO `CT` \(date, device\) SELECT date, device FROM `SC`;/);
-  assert.ok(sql.indexOf('`CT`') > sql.indexOf('BEGIN') && sql.indexOf('`CT`') < sql.indexOf('COMMIT')); // 同一個交易
-  assert.doesNotMatch(buildReplaceSql({ ...base, tables: 'device' }), /`CT`/);
-  assert.doesNotMatch(buildReplaceSql({ ...base, accountId: null, tables: 'device_orphans' }), /`CT`/);
-  const empty = buildReplaceSql({ ...base, mconvStage: null }); // 真的沒有就照刪、不插
-  assert.match(empty, /DELETE FROM `CT`/);
-  assert.doesNotMatch(empty, /INSERT INTO `CT`/);
-  const { mconvTable: _t, mconvCols: _c, mconvStage: _s, ...none } = base;
-  assert.doesNotMatch(buildReplaceSql(none), /`CT`/);
-  assert.throws(() => buildReplaceSql({ ...base, accountId: null }), /只能逐帳戶取代/);
-  // 'mconv'（回補腳本）：只動裝置轉換表，事實表／裝置表／媒體表一句都沒有（不能把 7/15~8/15 的 teaser-stat 值改掉）
-  const only = buildReplaceSql({ ...base, mediaTable: 'MT', mediaCols: ['a'], mediaStage: 'SM', tables: 'mconv' });
-  assert.match(only, /DELETE FROM `CT` WHERE date BETWEEN DATE '2026-10-13' AND DATE '2026-10-14' AND account_id = '868613';/);
-  assert.match(only, /INSERT INTO `CT`/);
-  for (const t of ['`F`', '`V`', '`MT`']) assert.ok(!only.includes(t), `mconv 模式不該碰 ${t}`);
-});
-
-await ok('job：M 素材層有點擊、裝置轉換 0 列 → 失敗不寫；有列就一起交給 writeSlice、訊息帶列數', async () => {
-  const mjob = { platform: 'M' as const, accountId: '868613', accountName: 'DHA', sd: '2026-10-13', ed: '2026-10-14' };
-  const fact = { account_id: '868613', account_name: 'DHA', date: '2026-10-13', imp: 50, click: 3, spend: 1, conv_decision: 2 };
-  const media = [{ date: '2026-10-13', account_id: '868613' }];
-  const bad = fakeDeps({});
-  bad.deps.fetch = async () => ({ facts: [fact], device: [], media, mDeviceConv: [], warnings: [] });
-  await assert.rejects(runNexusJob(mjob, () => {}, bad.deps), /裝置轉換報表卻回 0 列/);
-  assert.deepEqual(bad.calls, []);
-
-  let seen: unknown, tables: unknown;
-  const good = fakeDeps({});
-  const conv = [{ date: '2026-10-13', account_id: '868613', device: 'Mobile', conv_decision: 2 }];
-  good.deps.fetch = async () => ({ facts: [fact], device: [], media, mDeviceConv: conv, warnings: [] });
-  good.deps.writeSlice = async (s) => { seen = s.mDeviceConv; tables = s.tables; };
-  const r = await runNexusJob(mjob, () => {}, good.deps);
-  assert.deepEqual(seen, conv);
-  assert.equal(tables, 'facts');
-  assert.match(r.message, /裝置轉換 1 列/);
-});
-
-await ok('M 裝置轉換寫入防呆：非 M 或整平台 job 帶裝置轉換列 → 拒寫（不碰 BQ）', async () => {
-  const row = { date: '2026-10-13', account_id: '1' };
-  await assert.rejects(writeSlice({ platform: 'D', accountId: '1', sd: '2026-10-13', ed: '2026-10-13', facts: [], device: [], mDeviceConv: [row] }), /只收 M 單一帳戶/);
-  await assert.rejects(writeSlice({ platform: 'M', accountId: null, sd: '2026-10-13', ed: '2026-10-13', facts: [], device: [], mDeviceConv: [row] }), /只收 M 單一帳戶/);
-  await assert.rejects(writeSlice({ platform: 'M', accountId: '1', sd: '2026-10-13', ed: '2026-10-13', facts: [], device: [], mDeviceConv: [{ ...row, account_id: '2' }] }), /不是本 job 的 1/);
+    mediaTable: 'MT', mediaCols: ['a'], mediaStage: 'SM', platform: 'M', accountId: '868613', sd: '2026-10-13', ed: '2026-10-14', tables: 'facts',
+  });
+  assert.match(sql, /DELETE FROM `F`/);
+  assert.match(sql, /DELETE FROM `MT`/);
+  assert.doesNotMatch(sql, /`V`|m_device_conv/);
 });
 
 const cvRow = (accountId: string, f: [number, number, number, number], d?: [number, number, number, number], name = `帳${accountId}`): NexusReconRow => ({
@@ -1250,9 +1209,13 @@ const cvRow = (accountId: string, f: [number, number, number, number], d?: [numb
   } : {}),
 });
 
-await ok('比對 SQL／列：M 轉換兩邊排除 client: 墊底；帳戶在裝置轉換表有列才給 conv（排除清單帳戶的舊事實列不會假落差）', () => {
+await ok('比對 SQL／列：M 轉換層＝事實表 vs 裝置表 events、兩邊排除 client: 墊底；帳戶有裝置列才給 conv', () => {
   const sql = reconSql('2026-10-13');
-  assert.match(sql, /nexus_m_device_conv_daily/);
+  assert.doesNotMatch(sql, /m_device_conv/);
+  const cd = sql.slice(sql.indexOf('cd AS ('));
+  for (const k of ['conv_interest', 'conv_decision', 'conv_buy']) assert.match(cd, new RegExp(`JSON_VALUE\\(events, '\\$\\.${k}'\\)`), k);
+  assert.match(cd, /nexus_device_daily/);
+  assert.match(cd, /platform = 'M'/);
   assert.equal((sql.match(/NOT STARTS_WITH\(account_id, 'client:'\)/g) ?? []).length, 2);
   assert.match(sql, /FULL OUTER JOIN cd USING \(platform, account_id\)/);
   const base = { account_name: 'x', f_imp: '1', f_click: '3', f_spend: '1', v_imp: '1', v_click: '3', v_spend: '1' };
@@ -1291,7 +1254,7 @@ await ok('健檢：M 轉換層進結論；落差亮燈並點名帳戶；重新�
 
   inp.recon = { checkedAt: '2026-09-24 04:40:00', rows: [cvRow('1', [100, 0, 10, 2], [100, 0, 5, 2], '貸霸9597')] };
   h = evaluateHealth(inp);
-  assert.ok(h.items.some((i) => i.level === 'alert' && /M（MGID）.*裝置轉換.*50\.0%.*最大：貸霸9597/.test(i.text)), h.items.map((i) => i.text).join(' | '));
+  assert.ok(h.items.some((i) => i.level === 'alert' && /M（MGID）.*素材層與裝置層.*50\.0%.*最大：貸霸9597/.test(i.text)), h.items.map((i) => i.text).join(' | '));
 
   const re = healthBase();
   re.rechecked = [{ dt: '2026-06-11', rows: [cvRow('1', [100, 0, 10, 2], [100, 0, 9, 2])] }];
@@ -1305,7 +1268,7 @@ await ok('狀態頁：M 卡片多一行「轉換層」並依吻合上色；浮�
   const html = statusPage({ input, health: evaluateHealth(input), batchJobs, jobs: batchJobs });
   assert.equal((html.match(/>轉換層 /g) ?? []).length, 1);
   assert.match(html, /class="pf-media pm-alert"[^>]*>轉換層 50\.0%/);
-  assert.match(html, /<dialog class="rp glass" id="rp-M"[\s\S]*?轉換層：素材層與裝置轉換[\s\S]*?class="acct">&lt;貸霸>[\s\S]*?<\/dialog>/);
+  assert.match(html, /<dialog class="rp glass" id="rp-M"[\s\S]*?轉換層：素材層與裝置層[\s\S]*?class="acct">&lt;貸霸>[\s\S]*?<\/dialog>/);
   assert.doesNotMatch(html.match(/<dialog class="rp glass" id="rp-D"[\s\S]*?<\/dialog>/)![0], />轉換層/);
 
   const none = healthBase();

@@ -152,12 +152,12 @@ function reconPanel(p: NexusPlatform, r: PlatformRecon, dt: string, chart = ''):
     ${r.diffs.length > 50 ? `<p class="rp-empty">還有 ${r.diffs.length - 50} 個帳戶沒列出。</p>` : ''}`;
 }
 
-/** M 浮窗下半：轉換層（素材層 vs 裝置轉換表）四項吻合率＋落差帳戶。 */
+/** M 浮窗下半：轉換層（素材層 API vs 裝置表 Redash）四項吻合率＋落差帳戶。 */
 function convPanel(cv: ConvRecon): string {
   const metrics = CONV_METRICS.map((m) => `<div><dt>${CONV_LABEL[m]}</dt><dd>${fmtMatch(cv.byMetric[m])}</dd></div>`).join('');
   const head = `<div class="rp-head rp-sub">
-      <h3>轉換層：素材層與裝置轉換</h3>
-      <p class="rp-note">裝置轉換表（MGID day×裝置）是整合週報裝置分析 goal1／goal2 的來源，點擊與三段轉換應該跟素材層一致。</p>
+      <h3>轉換層：素材層與裝置層</h3>
+      <p class="rp-note">裝置層的三段轉換（MGID Redash）是整合週報裝置分析 goal1／goal2 的來源，點擊與三段轉換應該跟素材層（MGID API）一致。</p>
       <dl class="rp-metrics">${metrics}</dl>
     </div>`;
   if (!cv.diffs.length) return `${head}<p class="rp-empty">每個帳戶四項都在 ${pct(RECON.accountDiff)} 以內。</p>`;
@@ -238,9 +238,9 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
         const ml = mr.graded ? reconLevel(mr.match) : 'ok';
         matchBtn += `<p class="pf-media pm-${ml}" title="媒體表與素材表的點擊／花費加總比對${mr.graded ? '' : '（M 的媒體報表不含零點擊 campaign，有小落差屬正常）'}">媒體層 ${fmtMatch(mr.match)}</p>`;
       }
-      // M 轉換層：素材層 vs 裝置轉換表（點擊＋goal2／goal1／Main goal），分級上色
+      // M 轉換層：素材層 vs 裝置表 events（點擊＋goal2／goal1／Main goal），分級上色
       if (cv && cv.match !== null) {
-        matchBtn += `<p class="pf-media pm-${reconLevel(cv.match)}" title="素材表與裝置轉換表（MGID day×裝置）的點擊、goal2、goal1、Main goal 加總比對">轉換層 ${fmtMatch(cv.match)}</p>`;
+        matchBtn += `<p class="pf-media pm-${reconLevel(cv.match)}" title="素材層（MGID API）與裝置層（MGID Redash）的點擊、goal2、goal1、Main goal 加總比對">轉換層 ${fmtMatch(cv.match)}</p>`;
       }
     }
 

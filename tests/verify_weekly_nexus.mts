@@ -113,18 +113,18 @@ const rNex = buildRDevice([
 ], rb);
 check(eq([...rApi.deviceAgg], [...rNex.deviceAgg]) && eq(rApi.raw, rNex.raw), 'R 裝置：倉庫列（已合併 Others）與 API 列（代碼 3/7）聚合一致');
 
-// ── M 裝置：曝光／花費讀裝置表、轉換讀轉換表，依 帳戶×日×裝置 合併
-const merged = mergeMDevice(
-  [{ date: '2026-09-20', account_id: '875796', device: 'PC', imp: '100', click: '3', spend: '20' },
-   { date: '2026-09-20', account_id: '875796', device: 'Mobile', imp: '900', click: '20', spend: '180' }],
-  [{ date: '2026-09-20', account_id: '875796', device: 'PC', conv_interest: '1', conv_decision: '2', conv_buy: '3' },
-   { date: '2026-09-20', account_id: '875796', device: 'Tablet', conv_interest: '0', conv_decision: '1', conv_buy: '0' }],
-);
+// ── M 裝置：曝光／花費／三段轉換都讀裝置表（轉換已在 SQL 從 events 取出），依 帳戶×日×裝置 加總
+const merged = mergeMDevice([
+  { date: '2026-09-20', account_id: '875796', device: 'PC', imp: '100', click: '3', spend: '20', conv_interest: '1', conv_decision: '2', conv_buy: '3' },
+  { date: '2026-09-20', account_id: '875796', device: 'Mobile', imp: '900', click: '20', spend: '180', conv_interest: '0', conv_decision: '0', conv_buy: '0' },
+  { date: '2026-09-20', account_id: '875796', device: 'Tablet', imp: '0', click: '0', spend: '0', conv_interest: '0', conv_decision: '1', conv_buy: '0' },
+  { date: '2026-09-20', account_id: '875796', device: 'PC', imp: '5', click: '0', spend: '1', conv_interest: '0', conv_decision: '1', conv_buy: '0' },
+]);
 const m = merged.get('875796')!;
-check(m.length === 3, 'M：轉換表有、裝置表沒有的裝置（零點擊也有轉換）也留下');
-check(eq(m.find((r) => r.device === 'PC'), { date: '2026-09-20', device: 'PC', imp: 100, click: 3, spend: 20, conv_interest: 1, conv_decision: 2, conv_buy: 3 }), 'M：同一裝置兩表合成一列');
+check(m.length === 3, 'M：零點擊只有轉換的裝置也留下');
+check(eq(m.find((r) => r.device === 'PC'), { date: '2026-09-20', device: 'PC', imp: 105, click: 3, spend: 21, conv_interest: 1, conv_decision: 3, conv_buy: 3 }), 'M：同帳戶同日同裝置多列加總成一列');
 const mDev = buildMgidDevice(m, { cv1: ['conv_decision'], cv2: [], cv3: [], cv4: [] }, '福穀樂');
-check(mDev.deviceAgg.get('PC')!.cv1 === 2 && mDev.deviceAgg.get('Tablet')!.cv1 === 1 && mDev.raw[0].account_name === '福穀樂', 'M：合併後照週報既有 buildMgidDevice 分桶');
+check(mDev.deviceAgg.get('PC')!.cv1 === 3 && mDev.deviceAgg.get('Tablet')!.cv1 === 1 && mDev.raw[0].account_name === '福穀樂', 'M：合併後照週報既有 buildMgidDevice 分桶');
 
 if (failed) { console.error(`FAIL ${failed}`); process.exit(1); }
 console.log('PASS');

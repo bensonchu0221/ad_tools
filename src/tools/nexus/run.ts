@@ -19,7 +19,7 @@ import {
 } from './fetch.js';
 import { exceedsAction4Window } from '../../core/action4.js';
 import {
-  FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, MEDIA_TABLE, MEDIA_SCHEMA, M_DEVICE_CONV_TABLE, M_DEVICE_CONV_SCHEMA,
+  FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, MEDIA_TABLE, MEDIA_SCHEMA,
   TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX, integratedViewSql,
 } from './schema.js';
 
@@ -227,11 +227,9 @@ export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId
  * 寫哪幾張表：M 的事實表（各帳戶 job）與裝置表（Redash 全平台 job）分開寫，其餘平台一起寫。
  * 'device_orphans'＝M Redash 全平台 job：整段裝置表＋事實表裡 client: 開頭的墊底列（只動這些，正式帳戶的事實列碰不到）。
  * 媒體表跟著事實表走：'both'／'facts' 會一併取代媒體表這段（同平台＋同帳戶），裝置類模式不碰。
- * 'mconv'＝只取代 M 裝置轉換表（2026-10-15 回補腳本 poc/backfill_nexus_m_device_conv.mts 用）：
- *   事實表／裝置表／媒體表都不碰。不能走一般 M 回補：60 天前的日子事實表會從 teaser-stat 改回 statistics-reports，
- *   曝光變少、零點擊 teaser 列消失（7/15~8/15 當初是在 60 天內寫的 teaser-stat 校正值）。
+ * （2026-10-15~10-21 還有 'mconv' 寫 M 裝置轉換表 nexus_m_device_conv_daily；Redash 有 goal1／goal2 之後改寫進裝置表 events，已拿掉）
  */
-export type SliceTables = 'both' | 'facts' | 'device' | 'device_orphans' | 'mconv';
+export type SliceTables = 'both' | 'facts' | 'device' | 'device_orphans';
 
 /** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表、裝置表、媒體表的這段切片刪掉再寫回。 */
 export function buildReplaceSql(o: {
@@ -239,8 +237,6 @@ export function buildReplaceSql(o: {
   deviceTable: string; deviceCols: string[]; deviceStage: string | null;
   /** 不給就不動媒體表 */
   mediaTable?: string; mediaCols?: string[]; mediaStage?: string | null;
-  /** M 裝置轉換表（只有 M 各帳戶 job 給）；不給就不動。表上沒有 platform 欄，取代範圍＝日期＋帳戶 */
-  mconvTable?: string; mconvCols?: string[]; mconvStage?: string | null;
   platform: NexusPlatform; accountId: string | null; sd: string; ed: string; tables?: SliceTables;
 }): string {
   const tables = o.tables ?? 'both';
@@ -252,23 +248,17 @@ export function buildReplaceSql(o: {
     // 這段的墊底列一律先刪：帳戶補了 token 之後重跑，它就不會再是對不上的帳戶，舊墊底列在這裡退場（不會跟正式列重複）
     lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range} AND STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)});`);
     if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
-  } else if (tables !== 'device' && tables !== 'mconv') {
+  } else if (tables !== 'device') {
     lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range}${acct};`);
     if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
   }
-  if (tables !== 'facts' && tables !== 'mconv') {
+  if (tables !== 'facts') {
     lines.push(`DELETE FROM \`${o.deviceTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
     if (o.deviceStage) lines.push(`INSERT INTO \`${o.deviceTable}\` (${cols(o.deviceCols)}) SELECT ${cols(o.deviceCols)} FROM \`${o.deviceStage}\`;`);
   }
   if (o.mediaTable && o.mediaCols && (tables === 'both' || tables === 'facts')) {
     lines.push(`DELETE FROM \`${o.mediaTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
     if (o.mediaStage) lines.push(`INSERT INTO \`${o.mediaTable}\` (${cols(o.mediaCols)}) SELECT ${cols(o.mediaCols)} FROM \`${o.mediaStage}\`;`);
-  }
-  if (o.mconvTable && o.mconvCols && (tables === 'both' || tables === 'facts' || tables === 'mconv')) {
-    // 這張表只有 M、一帳一 job；accountId 為 null（整平台）會把全部 M 帳戶這段刪光，絕不允許
-    if (o.accountId === null) throw new Error('M 裝置轉換表只能逐帳戶取代，accountId 不可為空');
-    lines.push(`DELETE FROM \`${o.mconvTable}\` WHERE ${range}${acct};`);
-    if (o.mconvStage) lines.push(`INSERT INTO \`${o.mconvTable}\` (${cols(o.mconvCols)}) SELECT ${cols(o.mconvCols)} FROM \`${o.mconvStage}\`;`);
   }
   lines.push('COMMIT TRANSACTION;');
   return lines.join('\n');
@@ -308,22 +298,15 @@ export async function retryOnBqConflict<T>(
   }
 }
 
-/**
- * 把一個切片寫進 BQ（整段取代）。media 不給（undefined）＝這次沒抓媒體層，媒體表原封不動；給空陣列＝這段真的沒有、照樣清掉。
- * mDeviceConv 同理（只有 M 各帳戶 job 會給）。
- */
+/** 把一個切片寫進 BQ（整段取代）。media 不給（undefined）＝這次沒抓媒體層，媒體表原封不動；給空陣列＝這段真的沒有、照樣清掉。 */
 export async function writeSlice(o: {
   platform: NexusPlatform; accountId: string | null; sd: string; ed: string; facts: Row[]; device: Row[]; media?: Row[];
-  mDeviceConv?: Row[]; tables?: SliceTables;
+  tables?: SliceTables;
 }): Promise<void> {
   // 防呆先做、再碰 BQ
   assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`, o.platform);
   assertRowsInSlice(o.device, o.sd, o.ed, o.accountId, `${o.platform} 裝置表`, o.platform);
   if (o.media) assertRowsInSlice(o.media, o.sd, o.ed, o.accountId, `${o.platform} 媒體表`, o.platform);
-  if (o.mDeviceConv) {
-    if (o.platform !== 'M' || o.accountId === null) throw new Error(`裝置轉換表只收 M 單一帳戶 job（這次是 ${o.platform} ${o.accountId ?? '全平台'}），拒絕寫入`);
-    assertRowsInSlice(o.mDeviceConv, o.sd, o.ed, o.accountId, 'M 裝置轉換表', 'M');
-  }
   if (o.tables === 'device_orphans') {
     const bad = o.facts.find((r) => !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX));
     if (bad) throw new Error(`M 墊底列的帳戶 ${String(bad.account_id)} 不是 ${M_UNMAPPED_PREFIX} 開頭，拒絕寫入（會跟正式帳戶重複）`);
@@ -338,13 +321,10 @@ export async function writeSlice(o: {
     if (deviceStage) stages.push(deviceStage);
     const mediaStage = o.media ? await loadStage(MEDIA_SCHEMA, o.media, `${tag}_m`) : null;
     if (mediaStage) stages.push(mediaStage);
-    const mconvStage = o.mDeviceConv ? await loadStage(M_DEVICE_CONV_SCHEMA, o.mDeviceConv, `${tag}_c`) : null;
-    if (mconvStage) stages.push(mconvStage);
     const sql = buildReplaceSql({
       factTable: FACT_TABLE[o.platform], factCols: FACT_SCHEMA[o.platform].map((f) => f.name), factStage,
       deviceTable: DEVICE_TABLE, deviceCols: DEVICE_SCHEMA.map((f) => f.name), deviceStage,
       ...(o.media ? { mediaTable: MEDIA_TABLE, mediaCols: MEDIA_SCHEMA.map((f) => f.name), mediaStage } : {}),
-      ...(o.mDeviceConv ? { mconvTable: M_DEVICE_CONV_TABLE, mconvCols: M_DEVICE_CONV_SCHEMA.map((f) => f.name), mconvStage } : {}),
       platform: o.platform, accountId: o.accountId, sd: o.sd, ed: o.ed, tables: o.tables,
     });
     // 四個平台各自一條線同時跑，但都要改共用的裝置表 ⇒ 只有這一步排隊（抓 API、載暫存表照樣平行）
@@ -471,22 +451,16 @@ export async function runNexusJob(
     const clicks = res.facts.reduce((s, r) => s + CLICK_OF[job.platform](r), 0);
     if (clicks > 0) throw new Error(`${label}：素材層有 ${clicks} 次點擊，媒體報表卻回 0 列，疑似 API 異常，不寫入`);
   }
-  // M 裝置轉換防呆：同上，素材層有點擊、裝置轉換報表卻 0 列＝API 出狀況，不能把這段清空
-  if (res.mDeviceConv && !res.mDeviceConv.length) {
-    const clicks = res.facts.reduce((s, r) => s + CLICK_OF[job.platform](r), 0);
-    if (clicks > 0) throw new Error(`${label}：素材層有 ${clicks} 次點擊，裝置轉換報表卻回 0 列，疑似 API 異常，不寫入`);
-  }
 
-  const mconvN = res.mDeviceConv ? `＋裝置轉換 ${res.mDeviceConv.length} 列` : '';
-  onPhase(`寫入 BQ（${res.facts.length} 列＋裝置 ${res.device.length} 列${res.media ? `＋媒體 ${res.media.length} 列` : ''}${mconvN}）`);
+  onPhase(`寫入 BQ（${res.facts.length} 列＋裝置 ${res.device.length} 列${res.media ? `＋媒體 ${res.media.length} 列` : ''}）`);
   await deps.writeSlice({
     platform: job.platform, accountId, sd: job.sd, ed: job.ed, facts: res.facts, device: res.device, media: res.media,
-    mDeviceConv: res.mDeviceConv, tables,
+    tables,
   });
   // 覆蓋紀錄只記事實表；裝置 job 不動它（accountId=null 會把 M 各帳戶的紀錄整段清掉）
   if (!deviceOnly) await deps.replaceCoverage(job.platform, accountId, job.sd, job.ed, coverageEntries(job.platform, res.facts));
   const warn = res.warnings.length ? `；⚠️ ${res.warnings.join('；')}` : '';
-  const media = `${res.media ? `、媒體 ${res.media.length} 列` : ''}${res.mDeviceConv ? `、裝置轉換 ${res.mDeviceConv.length} 列` : ''}`;
+  const media = res.media ? `、媒體 ${res.media.length} 列` : '';
   const reqs = res.requests !== undefined ? `、API 請求 ${res.requests} 次` : '';
   return {
     facts: res.facts.length, device: res.device.length, skipped: false,

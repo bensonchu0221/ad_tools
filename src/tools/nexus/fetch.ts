@@ -6,9 +6,9 @@ import {
 } from '../../core/popin.js';
 import { fetchReport, fetchReportPaged } from '../../core/rixbee.js';
 import {
-  fetchMgidReport, fetchMgidSourceReport, fetchMgidDeviceReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex,
+  fetchMgidReport, fetchMgidSourceReport, fetchCampaignNameMap, fetchTeaserStat, fetchTeaserIndex,
   getClientCurrency, getClientTimezone,
-  type MgidClient, type MgidReportRow, type MgidSourceRow, type MgidDeviceRow,
+  type MgidClient, type MgidReportRow, type MgidSourceRow,
 } from '../../core/mgid.js';
 import { fetchRedashDeviceDaily, fetchRedashTeaserDaily, type RedashRow } from '../../core/mgidRedash.js';
 import { listMgidAccounts, getMgidTokenById, nexusCoverageRows } from '../../core/store.js';
@@ -25,12 +25,9 @@ import { fetchCampaignStats, isDateKey, type Action4Report } from '../../core/ac
 import { pooled } from '../d1videoad/report.js';
 
 export type Row = Record<string, unknown>;
-/**
- * media＝媒體表列（2026-10-08）；沒有媒體層的 job（M 裝置 job）省略。
- * mDeviceConv＝M 裝置轉換表列（2026-10-15）；只有 M 各帳戶 job 有，其他 job 省略＝不動那張表。
- */
+/** media＝媒體表列（2026-10-08）；沒有媒體層的 job（M 裝置 job）省略。 */
 export interface FetchResult {
-  facts: Row[]; device: Row[]; media?: Row[]; mDeviceConv?: Row[]; warnings: string[];
+  facts: Row[]; device: Row[]; media?: Row[]; warnings: string[];
   /** 這個 job 打了幾次平台 API（目前只有 R 記：R 每 token 有每日請求上限，記下來才知道回補一段吃多少額度） */
   requests?: number;
 }
@@ -552,44 +549,13 @@ export async function fetchMAccount(
   const acc = { id: client.apiClientId, name: client.clientName };
   // 媒體層：同一支 statistics-reports 換 day×source 維度（tool#5 同一個函式）。素材層原始列是空的，source 也一定空，省一次。
   // ⚠️ statistics-reports 整支排除生涯零點擊 campaign、也沒走 teaser-stat 校正 ⇒ 總量會比素材層略少（10/6 實測 imp −0.11%）
+  // 裝置三段轉換不在這裡抓：2026-10-21 起 Redash 有 goal1／goal2，由 M 裝置 job 寫進裝置表 events（以前多打一次 day×deviceType）
   let media: Row[] = [];
-  // 裝置轉換：同一支 statistics-reports 換 day×deviceType（週報裝置分析用的那支），補 Redash 裝置表沒有的 goal1／goal2
-  let mDeviceConv: Row[] = [];
   if (raw.length) {
     onPhase(`M ${client.clientName}：媒體報表`);
     media = toMMediaRows(acc, await fetchMgidSourceReport(client, sd, ed), syncedAt);
-    onPhase(`M ${client.clientName}：裝置轉換`);
-    mDeviceConv = toMDeviceConvRows(acc, await fetchMgidDeviceReport(client, sd, ed), syncedAt);
   }
-  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], media, mDeviceConv, warnings: [] };
-}
-
-/**
- * MGID day×deviceType → M 裝置轉換表列。同一天同裝置多列（API 不同 deviceType 歸到同一桶，例如 Others）加總成一列；
- * 六個數字全 0 的列丟掉（加總不受影響）。純函式。
- */
-export function toMDeviceConvRows(account: { id: string; name: string }, raw: MgidDeviceRow[], syncedAt: string): Row[] {
-  const byKey = new Map<string, Row>();
-  for (const r of raw) {
-    const date = requireDate(r.date, 'M');
-    const key = `${date}|${r.device}`;
-    let o = byKey.get(key);
-    if (!o) {
-      o = {
-        date, account_id: account.id, account_name: account.name, device: r.device,
-        imp: 0, click: 0, spend: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0, synced_at: syncedAt,
-      };
-      byKey.set(key, o);
-    }
-    o.imp = (o.imp as number) + int(r.imp);
-    o.click = (o.click as number) + int(r.click);
-    o.spend = money((o.spend as number) + money(r.spend));
-    o.conv_interest = (o.conv_interest as number) + int(r.conv_interest);
-    o.conv_decision = (o.conv_decision as number) + int(r.conv_decision);
-    o.conv_buy = (o.conv_buy as number) + int(r.conv_buy);
-  }
-  return [...byKey.values()].filter((o) =>
-    o.imp || o.click || o.spend || o.conv_interest || o.conv_decision || o.conv_buy);
+  return { facts: toMRows(acc, currency, rows, syncedAt), device: [], media, warnings: [] };
 }
 
 // ── M 裝置表：MGID Redash（全部 Broadciel 帳戶一次撈，含零點擊 campaign） ──
@@ -603,11 +569,22 @@ export interface MOwner { accountId: string; accountName: string; tz: string; cu
 
 const M_DEVICE: Record<string, string> = { desktop: 'PC', mobile: 'Mobile', tablet: 'Tablet' };
 
+/** M 裝置列的 events：三段轉換，0 的不寫（跟以前只有 conv_buy 時一樣省略）。key 順序固定，方便比對。純函式。 */
+export function mEvents(c: { buy: number; decision: number; interest: number }): Record<string, number> {
+  const ev: Record<string, number> = {};
+  if (c.buy) ev.conv_buy = c.buy;
+  if (c.decision) ev.conv_decision = c.decision;
+  if (c.interest) ev.conv_interest = c.interest;
+  return ev;
+}
+
 /**
  * Redash 日×campaign×裝置 → 倉庫裝置列。純函式。
  *  - 帳戶：Redash 的 Client ID 跟 token 表的 api_client_id 是兩套編號，靠 campaign ID（兩邊同一套）對回 owner；
  *    對不上＝token 表缺這個帳戶 → account_id 記 client:<Client ID>，照寫不丟。
  *  - 時區：每個時區查一次，帳戶只取自己時區那份（M 事實表的日期是帳戶本地日，兩邊才對得齊）。
+ *  - 轉換：三段都寫進 events（conv_buy＝main goal、conv_decision＝goal1、conv_interest＝goal2；goal1／goal2 2026-10-21 起 Redash 才有），
+ *    0 的不寫。週報裝置分析、正確性比對的轉換層都讀這裡。
  *  - 花費：Redash 的台幣是美金 × 當天固定匯率，跟 MGID 實際計費差 0.2~0.5%（使用者 2026-09-24 確認）。
  *    ⇒ spend（帳戶幣別）＝該帳戶當天 API 計費金額（apiSpend，來自事實表）依各列美金比例分配，加總與計費一致；
  *      spend_usd 原封存 Redash 美金。API 那邊沒有金額（帳戶缺 token、或事實 job 失敗）才退回 Redash 換算值。
@@ -617,7 +594,7 @@ export function toMRedashDeviceRows(o: {
   sd: string; ed: string; syncedAt: string;
 }): { rows: Row[]; unmapped: { clientId: string; clientName: string }[] } {
   type Acc = { date: string; accountId: string; accountName: string; owner: MOwner | undefined; campaignId: string; device: string;
-    imp: number; click: number; usd: number; twd: number; buy: number };
+    imp: number; click: number; usd: number; twd: number; buy: number; decision: number; interest: number };
   const cells = new Map<string, Acc>();
   const unmapped = new Map<string, string>();
   for (const [tz, list] of Object.entries(o.byTz)) {
@@ -631,15 +608,16 @@ export function toMRedashDeviceRows(o: {
       const device = M_DEVICE[r.device.toLowerCase()] ?? 'Others';
       const key = `${date}|${accountId}|${r.campaignId}|${device}`;
       const c = cells.get(key) ?? { date, accountId, accountName: owner?.accountName ?? r.clientName, owner, campaignId: r.campaignId, device,
-        imp: 0, click: 0, usd: 0, twd: 0, buy: 0 };
+        imp: 0, click: 0, usd: 0, twd: 0, buy: 0, decision: 0, interest: 0 };
       c.imp += r.imp; c.click += r.click; c.usd += r.spendUsd; c.twd += r.spendTwd; c.buy += r.convBuy;
+      c.decision += r.convDecision; c.interest += r.convInterest;
       cells.set(key, c);
     }
   }
   // 依 帳戶×日 分配花費
   const groups = new Map<string, Acc[]>();
   for (const c of cells.values()) {
-    if (!c.imp && !c.click && !c.usd && !c.buy) continue;
+    if (!c.imp && !c.click && !c.usd && !c.buy && !c.decision && !c.interest) continue; // 零點擊也可能有轉換，要留
     const k = `${c.accountId}|${c.date}`;
     groups.set(k, [...(groups.get(k) ?? []), c]);
   }
@@ -647,7 +625,7 @@ export function toMRedashDeviceRows(o: {
   const push = (c: Acc, spend: number, campaignId: string | null = c.campaignId, device = c.device) => rows.push({
     date: c.date, platform: 'M', account_id: c.accountId, account_name: c.accountName, campaign_id: campaignId, device,
     imp: c.imp, click: c.click, spend: money(spend), spend_usd: money(c.usd),
-    events: JSON.stringify(c.buy ? { conv_buy: c.buy } : {}), synced_at: o.syncedAt,
+    events: JSON.stringify(mEvents(c)), synced_at: o.syncedAt,
   });
   for (const [k, list] of groups) {
     const target = o.apiSpend.get(k);
@@ -705,8 +683,9 @@ export function releaseSkippedOwners(
 /**
  * Redash 墊底（2026-10-05 使用者同意）：token 表沒有的帳戶，事實表（素材層）改用 Redash 素材級數字補上，
  * Looker 才不會整個帳戶看不到。account_id 一樣記 client:<Client ID>，前綴本身就是「這是墊底」的標記。
- *  - 拿得到：campaign、teaser ID、ad_requests、曝光、點擊（跟 API 完全一致）、main goal 轉換（記在 conv_buy，跟裝置表同一套）
- *  - 拿不到：標題／圖片／落地頁（NULL）、interest／decision 轉換（NULL＝拿不到，不是 0）
+ *  - 拿得到：campaign、teaser ID、ad_requests、曝光、點擊（跟 API 完全一致）、三段轉換（main goal→conv_buy；
+ *    goal1→conv_decision、goal2→conv_interest 是 2026-10-21 Redash 新增的欄位，之前寫的墊底列這兩欄是 NULL，回補後補上）
+ *  - 拿不到：標題／圖片／落地頁（NULL）
  *  - 花費：Redash 台幣＝美金 × 單一固定匯率。2026-10-05 實測 22 帳戶比 API 計費低 0.02~0.20%（合計 −0.19%），
  *    不做校正（乘係數是假精確），幣別記 twd
  * 只收對不上 owner 的 campaign、日期落在區間內、而且有任何數字的列。純函式。
@@ -719,13 +698,13 @@ export function toMRedashOrphanFacts(o: {
     if (o.owners.has(r.campaignId)) continue;
     const date = ymdDash(r.date);
     if (!date || date < o.sd || date > o.ed) continue;
-    if (!r.imp && !r.click && !r.spendUsd && !r.convBuy && !r.adRequests) continue;
+    if (!r.imp && !r.click && !r.spendUsd && !r.convBuy && !r.convDecision && !r.convInterest && !r.adRequests) continue;
     out.push({
       date, account_id: `${M_UNMAPPED_PREFIX}${r.clientId}`, account_name: r.clientName, currency: 'twd',
       campaign_id: str(r.campaignId), campaign_name: str(r.campaignName),
       teaser_id: str(r.teaserId), teaser_title: null, teaser_url: null, teaser_image: null,
       ad_requests: int(r.adRequests), imp: int(r.imp), click: int(r.click), spend: money(r.spendTwd),
-      conv_interest: null, conv_decision: null, conv_buy: int(r.convBuy),
+      conv_interest: int(r.convInterest), conv_decision: int(r.convDecision), conv_buy: int(r.convBuy),
       synced_at: o.syncedAt,
     });
   }

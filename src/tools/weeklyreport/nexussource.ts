@@ -13,7 +13,7 @@
 // 所以兩條路產出的 DRow／RRow／MRow／PRow 完全同一套欄位，下游聚合與 Excel 不用分辨來源。
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { nexusSuccessRanges, type NexusPlatform } from '../../core/store.js';
-import { FACT_TABLE, DEVICE_TABLE, M_DEVICE_CONV_TABLE, D_CV_COLS } from '../nexus/schema.js';
+import { FACT_TABLE, DEVICE_TABLE, D_CV_COLS } from '../nexus/schema.js';
 import { R_BEHAVIOR_MAP, type DRow, type RRow, type MRow, type PRow, type WeeklyReportInput } from './types.js';
 import type { MgidDeviceRow } from '../../core/mgid.js';
 
@@ -253,23 +253,23 @@ export async function readNexusR(userIds: string[], sd: string, ed: string): Pro
 
 /**
  * M：事實表 → MRow（account_name 由呼叫端依帳號清單補，跟 API 路徑同名）；
- * 裝置＝曝光／點擊／花費讀 nexus_device_daily（Redash，跟事實表同口徑），三段轉換讀 nexus_m_device_conv_daily。
+ * 裝置＝nexus_device_daily（Redash，跟事實表同口徑）：曝光／點擊／花費＋events 裡的三段轉換。
+ * （2026-10-15~10-21 三段轉換另讀 nexus_m_device_conv_daily；Redash 有 goal1／goal2 之後只讀裝置表）
  */
 export async function readNexusM(ids: string[], sd: string, ed: string): Promise<{
   rows: (MRow & { account_id: string })[]; devByAccount: Map<string, MgidDeviceRow[]>;
 }> {
   assertIds('M', ids);
-  const [facts, dev, conv] = await Promise.all([
+  const ev = (k: string) => `SUM(IFNULL(CAST(JSON_VALUE(events, '$.${k}') AS INT64), 0)) AS ${k}`;
+  const [facts, dev] = await Promise.all([
     bqQuery(`SELECT FORMAT_DATE('%Y-%m-%d', date) AS date, account_id, account_name, campaign_id, campaign_name,
         teaser_id, teaser_title, teaser_image, imp, click, spend, conv_interest, conv_decision, conv_buy
       FROM ${tbl(FACT_TABLE.M)} WHERE ${dateCond(sd, ed)} AND account_id IN (${idList(ids)})
       ORDER BY date, campaign_id, teaser_id`),
     bqQuery(`SELECT FORMAT_DATE('%Y-%m-%d', date) AS date, account_id, device,
-        SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
+        SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend, ${ev('conv_interest')}, ${ev('conv_decision')}, ${ev('conv_buy')}
       FROM ${tbl(DEVICE_TABLE)} WHERE ${dateCond(sd, ed)} AND platform = 'M' AND account_id IN (${idList(ids)})
       GROUP BY date, account_id, device`),
-    bqQuery(`SELECT FORMAT_DATE('%Y-%m-%d', date) AS date, account_id, device, conv_interest, conv_decision, conv_buy
-      FROM ${tbl(M_DEVICE_CONV_TABLE)} WHERE ${dateCond(sd, ed)} AND account_id IN (${idList(ids)})`),
   ]);
   const rows = facts.map((r) => ({
     account_id: s(r.account_id), date: s(r.date), account_name: s(r.account_name),
@@ -278,13 +278,11 @@ export async function readNexusM(ids: string[], sd: string, ed: string): Promise
     imp: n(r.imp), click: n(r.click), spend: n(r.spend),
     conv_interest: n(r.conv_interest), conv_decision: n(r.conv_decision), conv_buy: n(r.conv_buy),
   }));
-  return { rows, devByAccount: mergeMDevice(dev, conv) };
+  return { rows, devByAccount: mergeMDevice(dev) };
 }
 
-/** M 裝置：兩張表依（帳戶, 日, 裝置）合併；任一邊有列就留（零點擊也可能有轉換）。純函式。 */
-export function mergeMDevice(
-  dev: Record<string, string | null>[], conv: Record<string, string | null>[]
-): Map<string, MgidDeviceRow[]> {
+/** M 裝置：裝置表列依（帳戶, 日, 裝置）加總、按帳戶分組（轉換已在 SQL 從 events 取出）。純函式。 */
+export function mergeMDevice(dev: Record<string, string | null>[]): Map<string, MgidDeviceRow[]> {
   const acc = new Map<string, MgidDeviceRow & { account: string }>();
   const get = (r: Record<string, string | null>) => {
     const key = `${r.account_id}|${r.date}|${r.device}`;
@@ -295,9 +293,9 @@ export function mergeMDevice(
     }
     return o;
   };
-  for (const r of dev) { const o = get(r); o.imp += n(r.imp); o.click += n(r.click); o.spend += n(r.spend); }
-  for (const r of conv) {
+  for (const r of dev) {
     const o = get(r);
+    o.imp += n(r.imp); o.click += n(r.click); o.spend += n(r.spend);
     o.conv_interest += n(r.conv_interest); o.conv_decision += n(r.conv_decision); o.conv_buy += n(r.conv_buy);
   }
   const out = new Map<string, MgidDeviceRow[]>();

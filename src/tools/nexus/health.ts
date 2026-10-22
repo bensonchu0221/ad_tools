@@ -211,7 +211,7 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       });
     }
     if (mparts.length) summary.push(`媒體層吻合 ${mparts.join('／')}`);
-    // M 轉換層：事實表 vs 裝置轉換表的點擊＋三段轉換（2026-10-15）。實測 100% 一致 ⇒ 分級亮燈
+    // M 轉換層：事實表（API）vs 裝置表 events（Redash，2026-10-21 起；之前是裝置轉換表）的點擊＋三段轉換。實測 100% 一致 ⇒ 分級亮燈
     const cv = summarizeConvRecon(inp.recon.rows);
     if (cv.match !== null) {
       summary.push(`M 轉換層吻合 ${fmtMatch(cv.match)}`);
@@ -219,7 +219,7 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
         const top = cv.diffs.slice(0, 3).map((d) => d.row.accountName || d.row.accountId).join('、');
         items.push({
           level: cv.match < RECON.warn ? 'alert' : 'warn',
-          text: `${PNAME.M} ${t1} 素材層與裝置轉換的點擊／轉換只吻合 ${fmtMatch(cv.match)}（${cv.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}；整合週報裝置分析的 goal1／goal2 會不準）`,
+          text: `${PNAME.M} ${t1} 素材層與裝置層的點擊／轉換只吻合 ${fmtMatch(cv.match)}（${cv.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}；整合週報裝置分析的 goal1／goal2 會不準）`,
         });
       }
     }

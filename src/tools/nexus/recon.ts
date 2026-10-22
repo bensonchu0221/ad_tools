@@ -14,7 +14,7 @@
 // 不會每次開頁面就查 BQ。
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { replaceNexusRecon, type NexusPlatform, type NexusReconRow } from '../../core/store.js';
-import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE, M_DEVICE_CONV_TABLE } from './schema.js';
+import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE } from './schema.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 /** 吻合率門檻：≥ ok 綠、≥ warn 黃、其餘紅。先抓寬一點，跑幾天看實際誤差再調。 */
@@ -51,10 +51,16 @@ export function reconSql(dt: string): string {
   const sums = (t: string) => `SELECT platform, account_id, ANY_VALUE(account_name) AS account_name,
     SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
   FROM ${q(t)} WHERE date = ${d} GROUP BY platform, account_id`;
-  // M 轉換層：事實表 vs M 裝置轉換表的點擊＋三段轉換（client: 墊底帳戶沒有裝置轉換，不列入）
-  const conv = (t: string) => `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name,
+  // M 轉換層：事實表（API）vs 裝置表 events（Redash）的點擊＋三段轉換。client: 墊底帳戶兩邊都是 Redash，比了沒意義，不列入。
+  // （2026-10-15~10-21 裝置那邊讀 nexus_m_device_conv_daily；Redash 有 goal1／goal2 之後改讀裝置表）
+  const notOrphan = `NOT STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)})`;
+  const ev = (k: string) => `SUM(IFNULL(CAST(JSON_VALUE(events, '$.${k}') AS INT64), 0))`;
+  const convFact = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name,
     SUM(click) AS click, SUM(conv_interest) AS interest, SUM(conv_decision) AS decision, SUM(conv_buy) AS buy
-  FROM ${q(t)} WHERE date = ${d} AND NOT STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)}) GROUP BY account_id`;
+  FROM ${q(FACT_TABLE.M)} WHERE date = ${d} AND ${notOrphan} GROUP BY account_id`;
+  const convDevice = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name,
+    SUM(click) AS click, ${ev('conv_interest')} AS interest, ${ev('conv_decision')} AS decision, ${ev('conv_buy')} AS buy
+  FROM ${q(DEVICE_TABLE)} WHERE date = ${d} AND platform = 'M' AND ${notOrphan} GROUP BY account_id`;
   return `
 WITH f AS (
     ${facts}
@@ -63,9 +69,9 @@ WITH f AS (
 ), m AS (
   ${sums(MEDIA_TABLE)}
 ), cf AS (
-  ${conv(FACT_TABLE.M)}
+  ${convFact}
 ), cd AS (
-  ${conv(M_DEVICE_CONV_TABLE)}
+  ${convDevice}
 )
 SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name, cf.account_name, cd.account_name) AS account_name,
   IFNULL(f.imp, 0) AS f_imp, IFNULL(f.click, 0) AS f_click, IFNULL(f.spend, 0) AS f_spend,
@@ -89,10 +95,8 @@ export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow
   const money = (v: string | null | undefined) => Math.round(n(v) * 10000) / 10000;
   const has = (v: unknown) => v === true || v === 'true' || v === '1' || v === 1;
   const withMedia = new Set(raw.filter((r) => has(r.m_has)).map((r) => r.platform));
-  // M 轉換層逐帳戶判斷：該帳戶那天在 M 裝置轉換表有列才比。不能像媒體層用「整個平台那天有沒有列」：
-  // 排除清單的帳戶（860502 等）6~7 月有事實列，但不會再有 job 補裝置轉換 ⇒ 回補後會永遠假落差。
-  // 「事實寫了、裝置轉換漏了」不靠這裡抓：兩者同一個 job、同一個交易寫入，job 另有「有點擊卻 0 列就失敗」的防呆。
-  // client: 墊底帳戶本來就沒有裝置轉換（SQL 已排除）。
+  // M 轉換層逐帳戶判斷：該帳戶那天在裝置表有 M 列才比（沒有裝置列的帳戶，主比對的曝光／點擊／花費已經會亮）。
+  // client: 墊底帳戶兩邊都是 Redash（SQL 已排除）。
   return raw.map((r) => ({
     platform: r.platform as NexusPlatform, accountId: String(r.account_id ?? ''), accountName: String(r.account_name ?? ''),
     fact: { imp: n(r.f_imp), click: n(r.f_click), spend: money(r.f_spend) },

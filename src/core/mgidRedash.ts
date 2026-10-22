@@ -10,6 +10,8 @@
 //    Clicks 與 API 完全一致；`Spent, USD` 是內部原始花費（含 data_fee_usd）；`Spent, TWD`＝USD × 當天固定匯率
 //    （全帳戶同一個，9/23＝31.837），跟 API 的帳戶幣別實際計費金額差 0.2~0.5%，**不可當計費金額用**。
 //  - `Client ID` 是廣告主 Client ID（97/98 開頭），不是 token 表的 api_client_id（86 開頭）。
+//  - 2026-10-21 查詢多了 `Conversion (add_goal_1)`／`(add_goal_2)`（AM 主管加的）＝API conversionsDecision／conversionsInterest：
+//    10/01~10/14 對 nexus 事實表逐 campaign 173/173、對 M 裝置轉換表逐帳戶×裝置 95/95 全同。
 //  - 這把 key 屬於提供者（AM 主管）帳號下的查詢；查詢被改或 key 失效，這裡會直接丟錯（不靜默回空）。
 const BASE = 'https://redash.mgid.com';
 const QUERY_ID = 13252;
@@ -31,7 +33,12 @@ export interface RedashRow {
   click: number;
   spendUsd: number;
   spendTwd: number;
+  /** Conversion (main goal)＝API conversionsBuy */
   convBuy: number;
+  /** Conversion (add_goal_1)＝goal1＝API conversionsDecision */
+  convDecision: number;
+  /** Conversion (add_goal_2)＝goal2＝API conversionsInterest */
+  convInterest: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -88,7 +95,8 @@ async function runRedash(
 export function toRedashRows(raw: any[]): RedashRow[] {
   const n = (v: unknown) => Number(v ?? 0) || 0;
   return raw.map((r) => {
-    for (const k of ['Date Breakdown', 'Client ID', 'Campaign ID', 'dimension_1', 'Impressions (Viewable)', 'Clicks', 'Spent, USD']) {
+    for (const k of ['Date Breakdown', 'Client ID', 'Campaign ID', 'dimension_1', 'Impressions (Viewable)', 'Clicks', 'Spent, USD',
+      'Conversion (main goal)', 'Conversion (add_goal_1)', 'Conversion (add_goal_2)']) {
       if (!(k in r)) throw new Error(`MGID Redash 回傳缺欄位「${k}」（查詢 ${QUERY_ID} 被改了？）`);
     }
     return {
@@ -97,6 +105,7 @@ export function toRedashRows(raw: any[]): RedashRow[] {
       teaserId: /^\d+$/.test(String(r['Teaser Breakdown'] ?? '')) && String(r['Teaser Breakdown']) !== '0' ? String(r['Teaser Breakdown']) : '',
       imp: n(r['Impressions (Viewable)']), adRequests: n(r['Impressions (Total)']), click: n(r.Clicks),
       spendUsd: n(r['Spent, USD']), spendTwd: n(r['Spent, TWD']), convBuy: n(r['Conversion (main goal)']),
+      convDecision: n(r['Conversion (add_goal_1)']), convInterest: n(r['Conversion (add_goal_2)']),
     };
   });
 }
