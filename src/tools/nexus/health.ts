@@ -5,7 +5,7 @@
 // **每天都發一則**（正常時一行綠燈）：健檢自己壞掉時「沒收到訊息」本身就是警訊；只在異常才發的話，
 // 壞掉跟一切正常看起來一模一樣。
 import {
-  nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows, nexusReconFor, nexusReconRecent,
+  nexusBatchStats, nexusRecentFailures, nexusBackfillStats, nexusCoverageRows, nexusReconFor, nexusReconRecent, nexusBatchJobs,
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
@@ -26,6 +26,8 @@ export interface HealthInput {
   recon?: { checkedAt: string | null; rows: NexusReconRow[] };
   /** 近 24 小時重新比對過的更早日期（T-2 重抓、失敗補回、回補）；2026-10-12 起比對不只看 T-1 */
   rechecked?: { dt: string; rows: NexusReconRow[] }[];
+  /** 今天每日批次排到的帳戶（`平台|帳戶 ID`）。④ 用它分辨「帳戶整個沒排 job」與「job 跑了、客戶沒投放」；不給就不看 ④ */
+  batchAccounts?: string[];
 }
 
 /** 門檻（寫成常數方便之後調）。 */
@@ -36,8 +38,14 @@ export const HEALTH = {
   dropRatio: 0.5,
   /** 高於中位數這個倍數 ⇒ 黃燈（可能重複寫入或真的暴量） */
   spikeRatio: 3,
-  /** 帳戶連續幾天有花費、T-1 突然沒有 ⇒ 列出來（黃燈；多半是暫停投放，但也可能是 token 壞掉） */
+  /** 帳戶連續幾天有花費、T-1 沒有、今天批次又沒排它的 job ⇒ 黃燈（token 表被刪／改了 ID） */
   steadyDays: 3,
+  /**
+   * ③ 跌幅／暴增只看「前 7 天每天有花費的帳戶數中位數」≥ 這個數的平台。P、D1 平常只有 1~8 個帳戶，
+   * 一個客戶停投整個平台就掉一半（2026-10-22 重播 9/27~10/22：26 天有 20 天紅燈，幾乎全是 P／D1 客戶停投）。
+   * 小平台的漏抓靠 job 失敗②、0 列拒清空、正確性比對⑤抓。D／M／R 平常約 25 帳。
+   */
+  minAccountsForRatio: 10,
   /** 同平台同一天兩個帳戶列數／曝光／花費完全一樣 ⇒ 紅燈。曝光至少這麼多、花費 > 0 才算（P 有過曝光個位數、花費 0 的巧合） */
   dupMinImp: 1000,
 };
@@ -114,14 +122,17 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       byDay.set(c.dt, d);
     }
     const y = byDay.get(t1) ?? { rows: 0, imp: 0, spend: 0, accounts: 0 };
-    // D1 影音量小（2025-10~2026-10 有量的 campaign 才 59 支），整天沒投放是常態 ⇒ 不報「沒有任何資料」，
-    // 交給下面的比例檢查：前 7 天有量、T-1 掉到 0 才亮跌幅；前 7 天也沒量就安靜
+    // D1 影音量小（2025-10~2026-10 有量的 campaign 才 59 支），整天沒投放是常態 ⇒ 不報「沒有任何資料」；
+    // 帳戶數也遠低於 minAccountsForRatio，跌幅／暴增同樣不看（D1 是全平台一個 job，抓壞了走 ②／0 列拒清空／⑤）
     if (y.rows === 0 && p !== 'D1') {
       items.push({ level: 'alert', text: `${PNAME[p]} ${t1} 沒有任何資料` });
       continue;
     }
     if (y.rows > 0) summary.push(`${p} ${fmt(y.accounts)} 帳／曝光 ${fmt(y.imp)}／花費 ${fmt(y.spend)}`);
-    const prior = [2, 3, 4, 5, 6, 7, 8].map((k) => byDay.get(addDays(inp.today, -k)) ?? { imp: 0, spend: 0 });
+    const priorDays = [2, 3, 4, 5, 6, 7, 8].map((k) => addDays(inp.today, -k));
+    const spenders = priorDays.map((d) => new Set(inp.coverage.filter((c) => c.platform === p && c.dt === d && c.spend > 0).map((c) => c.accountId)).size);
+    if (median(spenders) < HEALTH.minAccountsForRatio) continue; // 帳戶太少：一個客戶停投就是大跌，不看比例
+    const prior = priorDays.map((d) => byDay.get(d) ?? { imp: 0, spend: 0 });
     for (const [key, label] of [['imp', '曝光'], ['spend', '花費']] as const) {
       const med = median(prior.map((x) => x[key]));
       if (med <= 0) continue; // 沒有基準（剛上線或平台前幾天本來就 0）不比
@@ -134,7 +145,10 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     }
   }
 
-  // ④ 帳戶突然沒量：前 N 天天天有花費、T-1 沒有
+  // ④ 帳戶整個不見了：前 N 天天天有花費、T-1 沒有，**而且今天的每日批次沒有它的 job**（token 表被刪掉／改了 ID）。
+  //    job 有跑、API 說沒投放＝客戶自己停了，不報（2026-10-22 重播 9/27~10/22 幾乎天天亮、全是暫停投放，使用者嫌雜訊）；
+  //    API 抽風回 0 列會被 job 的「拒絕清空」防呆擋下、job 失敗走 ②。R／P／D1 是全平台一個 job，不逐帳戶看。
+  const inBatch = inp.batchAccounts ? new Set(inp.batchAccounts) : null;
   const spend = new Map<string, number>();
   const names = new Map<string, string>();
   for (const c of inp.coverage) {
@@ -142,7 +156,8 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     names.set(`${c.platform}|${c.accountId}`, c.accountName);
   }
   const vanished: string[] = [];
-  for (const [key, name] of names) {
+  for (const [key, name] of inBatch && b.total > 0 ? names : []) {
+    if (!['D', 'M'].includes(key.split('|')[0]) || inBatch!.has(key)) continue;
     const steady = Array.from({ length: HEALTH.steadyDays }, (_, i) => addDays(inp.today, -2 - i))
       .every((d) => (spend.get(`${key}|${d}`) ?? 0) > 0);
     if (steady && !((spend.get(`${key}|${t1}`) ?? 0) > 0)) vanished.push(`${key.split('|')[0]} ${name}`);
@@ -150,7 +165,7 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
   if (vanished.length) {
     items.push({
       level: 'warn',
-      text: `${vanished.length} 個帳戶前 ${HEALTH.steadyDays} 天天天有花費、${t1} 突然沒有（暫停投放？token 失效？）：${vanished.slice(0, 10).join('、')}${vanished.length > 10 ? '…' : ''}`,
+      text: `${vanished.length} 個帳戶前 ${HEALTH.steadyDays} 天天天有花費、今天的每日批次卻沒有它的 job（token 表被刪掉或改了 ID？）：${vanished.slice(0, 10).join('、')}${vanished.length > 10 ? '…' : ''}`,
     });
   }
 
@@ -273,22 +288,26 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
 
 /** 從 Cloud SQL 收集健檢要的資料。 */
 export async function gatherHealth(today = twToday()): Promise<HealthInput> {
-  const [batch, failures, backfill, coverage, recon, rechecked] = await Promise.all([
+  const [batch, failures, backfill, coverage, recon, rechecked, batchJobs] = await Promise.all([
     nexusBatchStats(`daily:${today}`),
     nexusRecentFailures(24, 200),
     nexusBackfillStats(),
     nexusCoverageRows(addDays(today, -8), addDays(today, -1)),
     nexusReconFor(addDays(today, -1)),
     nexusReconRecent(24, addDays(today, -1)),
+    nexusBatchJobs(`daily:${today}`),
   ]);
-  return { today, batch, failures, backfill, coverage, recon, rechecked };
+  const batchAccounts = batchJobs.map((j) => `${j.platform}|${j.accountId}`);
+  return { today, batch, failures, backfill, coverage, recon, rechecked, batchAccounts };
 }
 
-/** Google Chat 訊息（純文字＋Chat 支援的 *粗體*）。 */
+/**
+ * Google Chat 訊息（純文字＋Chat 支援的 *粗體*）。只講正常、或哪裡異常；總數據（各平台帳數／曝光／花費、吻合率）
+ * 不放（2026-10-22 使用者：Chat 不用說總數據），要看就點連結開狀態頁。
+ */
 export function formatChat(r: HealthReport, pageUrl: string): string {
   const head = { ok: '🟢 *nexus 資料倉庫 正常*', warn: '🟡 *nexus 資料倉庫 有需要注意的地方*', alert: '🔴 *nexus 資料倉庫 異常*' }[r.level];
   const lines = [`${head}（${r.date} 健檢）`];
-  if (r.summary.length) lines.push(r.summary.join('｜'));
   for (const i of r.items) lines.push(`${i.level === 'alert' ? '🔴' : '🟡'} ${i.text}`);
   lines.push(pageUrl);
   return lines.join('\n');

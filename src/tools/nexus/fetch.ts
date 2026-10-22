@@ -122,18 +122,31 @@ export function toMMediaRows(account: { id: string; name: string }, raw: MgidSou
  *   全 244 帳戶掃 9/23~9/24：③ 漏掉 3 帳戶 4 支 campaign（29262／23505／32325），每日批次靜悄悄寫成「無投放」
  *   或整段取代時把它們刪掉；素材層、裝置層一起漏，正確性比對也抓不到。
  *   拿掉③的代價：每日 D bulk 請求 57 → 約 600 次（10 支 campaign 一次、每 IP 每秒 1 次，約多 9 分鐘），可接受。
+ * ⚠️ D 回的 created_at／end_date 是**台北時間、不帶時區**（'2026-10-05 16:48:31'）。2026-10-22 以前用 parseLooseDate
+ *   照執行環境時區解析，Cloud Run 是 UTC ⇒ 台北 16:00 後建立的 campaign 被當成隔天建立，迄日＝建立當天的 job 把它整支剪掉。
+ *   每日批次隔天當 T-2 會補回，但 D 回補段尾剛好是那天就永久漏（全平台掃出 3 帳戶 8 個 campaign×日、465,179 曝光／3,086 元：
+ *   34196／26932 的 6/17、7/01，1209 的 10/05）。素材層、裝置層一起漏，正確性比對抓不到；是跟 BH bh_daily_stats 對數才發現。
  */
+export function parseTwDate(v: unknown): number | null {
+  const s = String(v ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/.test(s)) {
+    const ts = Date.parse(`${s.replace(' ', 'T')}${s.length === 10 ? 'T00:00:00' : ''}+08:00`);
+    return Number.isFinite(ts) ? ts : null;
+  }
+  return parseLooseDate(v); // 數字 timestamp、帶時區的 ISO 字串照舊
+}
+
 export function pruneDCampaigns(campaigns: any[], sd: string, ed: string): any[] {
   const startTs = new Date(`${sd}T00:00:00+08:00`).getTime();
   const endTs = new Date(`${ed}T23:59:59+08:00`).getTime();
   return campaigns.filter((c) => {
-    const end = parseLooseDate(c.end_date);
+    const end = parseTwDate(c.end_date);
     if (end !== null) {
       const expire = new Date(end);
       expire.setMonth(expire.getMonth() + 3);
       if (startTs > expire.getTime()) return false;
     }
-    const created = parseLooseDate(c.created_at);
+    const created = parseTwDate(c.created_at);
     if (created !== null && created > endTs) return false;
     return true;
   });
@@ -712,6 +725,18 @@ export function toMRedashOrphanFacts(o: {
 }
 
 /**
+ * 防重複計算：清單抓不到的帳戶如果這段已經有事實列（它自己的 job 抓成功了），它的 campaign 會被當成沒 token、
+ * 再用 Redash 墊一份 ⇒ 同一筆數字算兩次。這種多半是暫時性錯誤，整個裝置 job 失敗走重試。
+ * 這段沒有事實列的（token 壞了、帳戶 job 也失敗）照常墊底，正好補上它的缺口。回傳會重複計算的帳戶。純函式。
+ */
+export function mDoubleCountRisk(
+  listFailed: { id: string; name: string }[], coverage: { platform: string; accountId: string; rows: number }[],
+): { id: string; name: string }[] {
+  const hasFacts = new Set(coverage.filter((c) => c.platform === 'M' && c.rows > 0).map((c) => c.accountId));
+  return listFailed.filter((a) => hasFacts.has(a.id));
+}
+
+/**
  * M 全平台裝置表：對照帳戶（各帳戶 campaign 清單、時區、幣別）→ 每個時區查一次 Redash → 轉列。
  * 某個帳戶 token 壞掉只記 warning：它的 campaign 對不上，照樣以 client:<Client ID> 寫入，不丟數字。
  */
@@ -739,16 +764,9 @@ export async function fetchMRedashDevice(
     }
   }
   const apiSpend = new Map<string, number>();
-  const hasFacts = new Set<string>();
-  for (const c of await nexusCoverageRows(sd, ed)) {
-    if (c.platform !== 'M') continue;
-    apiSpend.set(`${c.accountId}|${c.dt}`, c.spend);
-    if (c.rows > 0) hasFacts.add(c.accountId);
-  }
-  // 防重複計算：清單抓不到的帳戶如果這段已經有事實列（它自己的 job 抓成功了），它的 campaign 會被當成沒 token、
-  // 再用 Redash 墊一份 ⇒ 同一筆數字算兩次。這種多半是暫時性錯誤，整個 job 失敗走重試。
-  // 這段沒有事實列的（token 壞了、帳戶 job 也失敗）照常墊底，正好補上它的缺口。
-  const risky = listFailed.filter((a) => hasFacts.has(a.id));
+  const coverage = await nexusCoverageRows(sd, ed);
+  for (const c of coverage) if (c.platform === 'M') apiSpend.set(`${c.accountId}|${c.dt}`, c.spend);
+  const risky = mDoubleCountRisk(listFailed, coverage);
   if (risky.length) {
     throw new Error(`M ${risky.map((a) => `${a.name}（${a.id}）`).join('、')} campaign 清單抓不到、但這段已有事實列，墊底會重複計算，稍後重試`);
   }

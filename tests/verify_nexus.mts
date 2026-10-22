@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
   toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, mEvents,
-  toD1Rows, toD1DeviceRows, d1MobileImp, d1MobileSpend,
+  toD1Rows, toD1DeviceRows, d1MobileImp, d1MobileSpend, fetchRAll, mDoubleCountRisk,
 } from '../src/tools/nexus/fetch.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
@@ -49,6 +49,24 @@ await ok('D campaign 剪枝：created 晚於迄日、end_date+3 月過期才剪�
   ], '2026-09-21', '2026-09-22');
   // 'stale'（updated_at 很舊、沒設結束日）要保留：D 投放中不會更新 updated_at（2026-09-25 實測漏抓 3 帳戶），規則③已拿掉
   assert.deepEqual(kept.map((c) => c.mongo_id), ['stale', 'live', 'weird']);
+});
+
+await ok('D campaign 剪枝：created_at 是台北時間，執行環境在 UTC（Cloud Run）也照台北判斷（2026-10-22 漏 8 個 campaign×日）', () => {
+  const prevTz = process.env.TZ;
+  process.env.TZ = 'UTC';
+  try {
+    const cams = [
+      { mongo_id: 'eve', created_at: '2026-10-05 16:48:31', end_date: '2099-12-31 23:59:59' }, // 1209 nicky 5624019：當天就有 77,431 曝光
+      { mongo_id: 'next', created_at: '2026-10-06 00:10:00' },
+      { mongo_id: 'iso', created_at: '2026-10-05T23:30:00+08:00' },
+    ];
+    assert.deepEqual(pruneDCampaigns(cams, '2026-09-24', '2026-10-05').map((c) => c.mongo_id), ['eve', 'iso']);
+    // end_date 也照台北：迄日 23:59 結束的 campaign，3 個月後的同一天還在保留範圍
+    assert.deepEqual(pruneDCampaigns([{ mongo_id: 'end', end_date: '2026-07-05 23:59:59' }], '2026-10-05', '2026-10-05').map((c) => c.mongo_id), ['end']);
+    assert.deepEqual(pruneDCampaigns([{ mongo_id: 'end', end_date: '2026-07-05 23:59:59' }], '2026-10-06', '2026-10-06').map((c) => c.mongo_id), []);
+  } finally {
+    if (prevTz === undefined) delete process.env.TZ; else process.env.TZ = prevTz;
+  }
 });
 
 await ok('D 事實列：cv 細分與廣告設定接回、欄位＝schema、金額去浮點尾數', () => {
@@ -494,6 +512,32 @@ await ok('R fetchReport：onRequests 回報實際送出的請求數（含破上�
   }
 });
 
+await ok('R 全平台 job：單日仍超過單次列數上限（資料被截斷）→ 整個 job 丟錯不寫', async () => {
+  const realFetch = globalThis.fetch;
+  process.env.RIXBEE_SUPER_TOKEN ||= 'test';
+  // 每次都回「總共 99999 列、只給 1 列」：整週截斷 → 改單日 → 單日仍截斷
+  globalThis.fetch = (async (_u: any, init: any) => {
+    const b = JSON.parse(init.body);
+    return new Response(JSON.stringify({ status: { code: 0 }, data: { data: [{ day: b.start_date, user_id: 1 }], total: 99999 } }));
+  }) as any;
+  try {
+    await assert.rejects(fetchRAll('2026-09-01', '2026-09-01', T, () => {}), /R 資料被截斷，不寫入/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await ok('M 裝置 job：清單抓不到、這段又已有事實列的帳戶 → 會重複墊底（job 要失敗）；沒有事實列的照常墊底', () => {
+  const failed = [{ id: '860511', name: 'TANITA' }, { id: '868612', name: '蜂王乳' }, { id: '868613', name: 'DHA' }];
+  const cov = [
+    { platform: 'M', accountId: '860511', rows: 12 },
+    { platform: 'M', accountId: '868612', rows: 0 }, // 帳戶 job 也沒寫到數字 ⇒ 墊底剛好補缺口
+    { platform: 'D', accountId: '868613', rows: 5 }, // 別的平台同號不算
+  ];
+  assert.deepEqual(mDoubleCountRisk(failed, cov).map((a) => a.id), ['860511']);
+  assert.deepEqual(mDoubleCountRisk([], cov), []);
+});
+
 await ok('R fetchReportPaged：帶 order_key／order、依 total 逐頁抓完；空回應或總數變動就丟錯', async () => {
   const realFetch = globalThis.fetch;
   process.env.RIXBEE_SUPER_TOKEN ||= 'test';
@@ -587,7 +631,18 @@ await ok('健檢：一切正常 → 綠燈、摘要含各平台', () => {
   assert.equal(r.level, 'ok');
   assert.deepEqual(r.items, []);
   assert.match(r.summary.join('|'), /290\/290 成功，04:31 跑完/);
-  assert.match(formatChat(r, 'URL'), /🟢/);
+  // Chat 只說正常＋連結，不帶總數據（2026-10-22 使用者）
+  assert.equal(formatChat(r, 'URL'), '🟢 *nexus 資料倉庫 正常*（2026-09-24 健檢）\nURL');
+});
+
+await ok('健檢 Chat：有異常只列異常項目，不帶各平台總數據／吻合率', () => {
+  const a = healthBase(); a.batch = { ...a.batch, queued: 3, success: 287 };
+  const r = evaluateHealth(a);
+  const text = formatChat(r, 'URL');
+  assert.match(text, /^🔴 \*nexus 資料倉庫 異常\*（2026-09-24 健檢）\n🔴 每日批次還有 3／290/);
+  assert.ok(r.summary.length > 0);
+  for (const s of r.summary) assert.ok(!text.includes(s), `Chat 不該有摘要：${s}`);
+  assert.ok(text.endsWith('\nURL'));
 });
 
 
@@ -644,25 +699,61 @@ await ok('健檢：某平台 T-1 完全沒資料 → 紅燈', () => {
   assert.ok(r.items.some((i) => /P（Prism） 2026-09-23 沒有任何資料/.test(i.text)));
 });
 
-await ok('健檢：T-1 量掉到中位數一半以下 → 紅燈；暴增 3 倍以上 → 黃燈', () => {
-  const a = healthBase();
-  for (const c of a.coverage) if (c.platform === 'R' && c.dt === '2026-09-23') { c.imp = 20000; c.spend = 5000; }
+// 平台有 n 個帳戶天天花錢（③ 只看帳戶數夠多的平台）
+function withAccounts(h: HealthInput, platform: 'R' | 'M' | 'P', n: number): HealthInput {
+  h.coverage = h.coverage.filter((c) => c.platform !== platform);
+  for (let k = 1; k <= 8; k++) for (let i = 0; i < n; i++) {
+    h.coverage.push({ platform, accountId: `${platform}${i}`, accountName: `${platform}帳${i}`, dt: addDays(h.today, -k), rows: 5, imp: 5000 + i, spend: 500 + i }); // 各帳戶數字錯開，免得觸發 ④-2 重複帳戶
+  }
+  return h;
+}
+
+await ok('健檢：帳戶夠多的平台 T-1 量掉到中位數一半以下 → 紅燈；暴增 3 倍以上 → 黃燈', () => {
+  const a = withAccounts(healthBase(), 'R', 12);
+  for (const c of a.coverage) if (c.platform === 'R' && c.dt === '2026-09-23') c.imp = 2000;
   const ra = evaluateHealth(a);
   assert.equal(ra.level, 'alert');
-  assert.ok(ra.items.some((i) => /R（Rixbee）.*曝光 20,000.*40%/.test(i.text)));
-  const b = healthBase();
-  for (const c of b.coverage) if (c.platform === 'M' && c.dt === '2026-09-23') c.spend = 1200;
+  assert.ok(ra.items.some((i) => /R（Rixbee）.*曝光 24,000.*40%/.test(i.text)), JSON.stringify(ra.items));
+  assert.ok(!ra.items.some((i) => /重複/.test(i.text)));
+  const b = withAccounts(healthBase(), 'M', 12);
+  for (const c of b.coverage) if (c.platform === 'M' && c.dt === '2026-09-23') c.spend = 2000;
   const rb = evaluateHealth(b);
   assert.equal(rb.level, 'warn');
   assert.ok(rb.items.some((i) => /M（MGID）.*花費.*4\.0 倍/.test(i.text)));
 });
 
-await ok('健檢：帳戶前 3 天天天有花費、T-1 突然沒有 → 黃燈列帳戶；平台總量仍在就不紅', () => {
-  const a = healthBase();
-  a.coverage.push(...[2, 3, 4].map((k) => ({ platform: 'D' as const, accountId: 'B', accountName: '帳B', dt: addDays('2026-09-24', -k), rows: 1, imp: 10, spend: 1 })));
-  const r = evaluateHealth(a);
-  assert.equal(r.level, 'warn');
-  assert.match(r.items[0].text, /1 個帳戶.*D 帳B/);
+await ok('健檢：帳戶少的平台（P／D1 平常 1~8 帳）一個客戶停投就大跌 → 不看跌幅／暴增（2026-10-22 重播 26 天 20 天紅燈）', () => {
+  const a = withAccounts(healthBase(), 'P', 9);
+  for (const c of a.coverage) if (c.platform === 'P' && c.dt === '2026-09-23' && c.accountId !== 'P0') { c.imp = 0; c.spend = 0; }
+  const ra = evaluateHealth(a);
+  assert.equal(ra.level, 'ok', JSON.stringify(ra.items));
+  // 剛好到門檻（10 帳）就照看
+  const b = withAccounts(healthBase(), 'P', 10);
+  for (const c of b.coverage) if (c.platform === 'P' && c.dt === '2026-09-23' && c.accountId !== 'P0') { c.imp = 0; c.spend = 0; }
+  assert.ok(evaluateHealth(b).items.some((i) => /P（Prism）.*中位數/.test(i.text)));
+  // T-1 完全沒資料照樣紅燈（不受帳戶數影響）
+  const c = withAccounts(healthBase(), 'P', 3);
+  c.coverage = c.coverage.filter((x) => !(x.platform === 'P' && x.dt === '2026-09-23'));
+  assert.ok(evaluateHealth(c).items.some((i) => i.level === 'alert' && /P（Prism） 2026-09-23 沒有任何資料/.test(i.text)));
+});
+
+await ok('健檢：帳戶前 3 天天天有花費、T-1 沒有 → 今天批次有它的 job（客戶停投）不報；批次根本沒排它（token 被刪）才黃燈', () => {
+  const steady = (h: HealthInput, platform: 'D' | 'M' | 'R', id: string) =>
+    h.coverage.push(...[2, 3, 4].map((k) => ({ platform, accountId: id, accountName: `帳${id}`, dt: addDays('2026-09-24', -k), rows: 1, imp: 10, spend: 1 })));
+  // job 有跑、API 說沒投放＝客戶自己停了
+  const a = healthBase(); steady(a, 'D', 'B'); a.batchAccounts = ['D|A', 'D|B', 'M|m', 'R|*', 'P|*'];
+  assert.equal(evaluateHealth(a).level, 'ok');
+  // 批次沒有它的 job ⇒ token 表被刪或改了 ID
+  const b = healthBase(); steady(b, 'D', 'B'); steady(b, 'M', 'x'); steady(b, 'R', '77'); b.batchAccounts = ['D|A', 'M|m', 'R|*', 'P|*'];
+  const rb = evaluateHealth(b);
+  assert.equal(rb.level, 'warn');
+  assert.match(rb.items[0].text, /2 個帳戶.*批次卻沒有它的 job.*D 帳B、M 帳x/);
+  assert.doesNotMatch(rb.items[0].text, /帳77/); // R 是全平台一個 job，不逐帳戶看
+  // 不給批次帳戶（舊呼叫端）或今天批次沒入列（① 已紅燈）⇒ 不看 ④
+  const c = healthBase(); steady(c, 'D', 'B');
+  assert.equal(evaluateHealth(c).level, 'ok');
+  const d = healthBase(); steady(d, 'D', 'B'); d.batchAccounts = []; d.batch = { total: 0, queued: 0, running: 0, success: 0, failed: 0, lastFinished: null };
+  assert.ok(!evaluateHealth(d).items.some((i) => /沒有它的 job/.test(i.text)));
 });
 
 await ok('取代腳本：只寫事實表（M 帳戶）不碰裝置表；只寫裝置表（M Redash 全平台）不碰事實表', () => {
@@ -1249,6 +1340,17 @@ await ok('轉換層吻合：逐帳戶絕對差、取四項最差；沒 conv（�
   assert.equal(summarizeConvRecon([cvRow('1', [10, 0, 0, 0], [10, 0, 0, 0])]).byMetric.decision, null);
 });
 
+await ok('轉換層吻合：A 帳戶 goal1 多、B 帳戶 goal1 少，逐帳戶取絕對差，不會互相抵銷成 100%', () => {
+  const conv = (f: number, d: number) => ({ fact: { click: 10, interest: 0, decision: f, buy: 0 }, device: { click: 10, interest: 0, decision: d, buy: 0 } });
+  const rows: NexusReconRow[] = [
+    { platform: 'M', accountId: '1', accountName: 'A', fact: { imp: 0, click: 10, spend: 0 }, device: { imp: 0, click: 10, spend: 0 }, conv: conv(60, 40) },
+    { platform: 'M', accountId: '2', accountName: 'B', fact: { imp: 0, click: 10, spend: 0 }, device: { imp: 0, click: 10, spend: 0 }, conv: conv(40, 60) },
+  ];
+  const s = summarizeConvRecon(rows);
+  assert.ok(Math.abs(s.byMetric.decision! - (1 - 40 / 120)) < 1e-9, `goal1 吻合應為 66.7%，實際 ${s.byMetric.decision}`);
+  assert.equal(s.diffs.length, 2);
+});
+
 await ok('健檢：M 轉換層進結論；落差亮燈並點名帳戶；重新比對的較早日期也報', () => {
   const inp = healthBase();
   inp.recon = { checkedAt: '2026-09-24 04:40:00', rows: [cvRow('1', [100, 0, 10, 2], [100, 0, 10, 2])] };
@@ -1423,7 +1525,7 @@ await ok('比對 SQL：D1 事實投影＝mobile＋pc 收費曝光（不含 over�
   assert.match(seg, /nexus_d1_ad_daily/);
 });
 
-await ok('健檢 D1：量小、整天沒投放是常態 ⇒ T-1 沒資料且前 7 天也沒量不亮燈；前 7 天有量、T-1 掉到 0 才亮跌幅', () => {
+await ok('健檢 D1：量小、整天沒投放是常態 ⇒ T-1 沒資料不亮燈；帳戶少，跌到 0 也不看比例（2026-10-22 起）', () => {
   const quiet = evaluateHealth(healthBase());
   assert.equal(quiet.level, 'ok');
   assert.doesNotMatch([...quiet.items.map((i) => i.text), ...quiet.summary].join('|'), /D1/);
@@ -1431,8 +1533,7 @@ await ok('健檢 D1：量小、整天沒投放是常態 ⇒ T-1 沒資料且前 
   const drop = healthBase();
   for (let k = 2; k <= 8; k++) drop.coverage.push({ platform: 'D1', accountId: '4A_CPM_juliat', accountName: '4A_CPM_juliat', dt: addDays(drop.today, -k), rows: 2, imp: 5000, spend: 360 });
   const r = evaluateHealth(drop);
-  assert.ok(r.items.some((i) => i.level === 'alert' && /D1/.test(i.text) && /中位數/.test(i.text)), JSON.stringify(r.items));
-  assert.ok(!r.items.some((i) => /D1.*沒有任何資料/.test(i.text)));
+  assert.ok(!r.items.some((i) => /D1/.test(i.text)), JSON.stringify(r.items));
 });
 
 await ok('狀態頁：D1 第五張卡片（全平台一次抓）', () => {

@@ -4,7 +4,7 @@
 // 兩邊都是同一個 job、同一時間從平台 API 抓的，但走的是**不同的報表查法**：
 //   D：ad 層 bulk vs campaign 層 date_reporting（platform_cv）
 //   R：day×cr 維度 vs day×campaign×device_type 維度
-//   M：day×campaign×teaser（含零點擊補救）vs 帳戶層 day×deviceType
+//   M：day×campaign×teaser（API＋teaser-stat 校正）vs Redash 查詢 13252 day×campaign×device（2026-09-24 起）
 //   P：date×creative vs date×campaign×device
 // 所以能抓到：素材層漏列／截斷、寫進 BQ 不完整（兩張表各自 load）、轉換程式算錯；
 // 而且兩邊同一時間抓，不會因為平台數字事後微調（晚到的點擊、M 洛杉磯時區）產生假警報。
@@ -198,9 +198,9 @@ export function summarizeMediaRecon(platform: NexusPlatform, rows: NexusReconRow
   return { platform, match: vals.length ? Math.min(...vals) : null, graded: platform !== 'M' };
 }
 
-// ────────────────────────────── M 轉換層：事實表 vs 裝置轉換表（2026-10-15） ──────────────────────────────
+// ────────────────────────────── M 轉換層：事實表 vs 裝置表 events（2026-10-15；10-21 前是裝置轉換表） ──────────────────────────────
 
-/** 比點擊＋三段轉換。曝光不比：裝置轉換表的曝光是 statistics-reports，事實表是 teaser-stat 校正後的，天生差 0.01~0.1%。 */
+/** 比點擊＋三段轉換。曝光／花費不比：主比對已經比過同一組事實表 vs 裝置表。 */
 export const CONV_METRICS = ['click', 'interest', 'decision', 'buy'] as const;
 export type ConvMetric = (typeof CONV_METRICS)[number];
 export const CONV_LABEL: Record<ConvMetric, string> = { click: '點擊', interest: 'goal2', decision: 'goal1', buy: 'Main goal' };
@@ -214,8 +214,8 @@ export interface ConvRecon {
 }
 
 /**
- * M 事實表（素材層，三段轉換）vs M 裝置轉換表（statistics-reports day×deviceType）的吻合率，算法同 summarizeRecon。
- * 2026-10-15 實測 6/05~10/14：轉換逐帳戶逐月 100% 一致，點擊 9/15~10/14 只差 1 次 ⇒ 分級亮燈，門檻同 RECON。
+ * M 事實表（素材層 API，三段轉換）vs 裝置表 events（Redash）的吻合率，算法同 summarizeRecon。
+ * 2026-10-15 實測 6/05~10/14（當時對裝置轉換表）轉換 100% 一致；2026-10-21 改讀 Redash 後 6/01~10/20 逐日 141/142 天 100% ⇒ 分級亮燈，門檻同 RECON。
  */
 export function summarizeConvRecon(rows: NexusReconRow[]): ConvRecon {
   const mine = rows.filter((r) => r.platform === 'M' && r.conv);
