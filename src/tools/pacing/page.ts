@@ -4,7 +4,7 @@ import { sbPage } from '../../core/sbui.js';
 
 const STYLE = `
   :root{--red:#B91C1C;--amber:#B45309;--green:#15803D;--track:#E4E7EC}
-  .src-v{background:#0369A1}
+  .src-d1{background:#1178ff} /* 跟 nexus 狀態頁的 D1 平台色一致；共用 sbui.ts 只有 D/R/M/P */
   .verdict{font-family:var(--disp);font-size:22px;font-weight:600;letter-spacing:-.01em;margin:22px 0 4px}
   .verdict b{font-weight:700}
   .fresh{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--mut);margin-top:8px}
@@ -189,10 +189,11 @@ const SCRIPT = `
       if(isOpen){
         var nk=g.children.length, foot=g.mergeIds.length>0;
         g.children.forEach(function(k,i){
-          var c=k.cfg, kp=k.pace, f=c.platform==='V';
+          var c=k.cfg, kp=k.pace, f=c.platform==='D1', lag=kp.dataThrough<data.dataThrough[c.platform];
           var cls='kid'+(i===0?' first':'')+(i===nk-1?' tend':'')+(i===nk-1&&!foot?' last':'');
           h+='<tr class="'+cls+'">'+(mergeMode?'<td></td>':'')+'<td class="tree"></td><td class="nmcell">'+badge(c.platform)+' <span style="font-family:var(--mono);font-size:12px">'+esc(c.accountId)+'</span> '+esc(c.accountName)
-            +(f?'<div class="sub2">D1 影音：金額是客戶價 ×0.6，合計列已換回客戶價</div>':'')+issues(k)+'</td>';
+            +(f?'<div class="sub2">D1 影音：金額是客戶價 ×0.6，合計列已換回客戶價</div>':'')
+            +(lag?'<div class="sub2">這個帳戶倉庫只寫到 '+md(kp.dataThrough)+'（批次還沒輪到或抓取失敗），之後的日子算在剩餘天數</div>':'')+issues(k)+'</td>';
           h+='<td>'+chip(kp)+'</td><td>'+flight(kp,c.start,c.end)+'</td><td class="ar">'+fmt(kp.budget)+'<div class="sub2">'+fmt(kp.spent)+'</div></td>';
           h+='<td>'+bar(kp)+'</td><td class="ar">'+pct(kp.projectedPct)+'</td><td class="ar">'+need(kp)+'</td></tr>';
         });
@@ -248,7 +249,7 @@ const SCRIPT = `
     var L=[['all','全部'],['attn','要注意'],['live','進行中'],['issue','BH 設定有錯']];
     $('lvseg').innerHTML=L.map(function(x){ return '<button type="button" data-lv="'+x[0]+'" aria-pressed="'+(lvl===x[0])+'">'+x[1]+'</button>'; }).join('');
     var f='資料截至';
-    $('fresh').innerHTML='<span>'+f+'</span>'+['D','R','M','P','V'].map(function(p){ return '<span>'+badge(p)+' '+md(data.dataThrough[p])+'</span>'; }).join('')
+    $('fresh').innerHTML='<span>'+f+'</span>'+['D','R','M','P','D1'].map(function(p){ return '<span>'+badge(p)+' '+md(data.dataThrough[p])+'</span>'; }).join('')
       +(data.hiddenCount? '<span>另有 '+data.hiddenCount+' 筆 BH 設定早已結束（BH 裡仍是 active），沒有列出</span>' : '');
   }
 
@@ -298,7 +299,7 @@ export function pacingPage(): string {
   const body = `
     <div class="crumb"><a href="/">// tools</a> / pacing</div>
     <h1>走速</h1>
-    <p class="sub">BH 裡的每個預算一列，看所有平台加起來的走速；點一列看各平台。花費讀 nexus 倉庫（D1 影音讀 BH），資料到前一天。</p>
+    <p class="sub">BH 裡的每個預算一列，看所有平台加起來的走速；點一列看各平台。花費讀 nexus 倉庫，資料到前一天。</p>
     <div class="verdict" id="verdict">&nbsp;</div>
     <div class="fresh" id="fresh"></div>
 

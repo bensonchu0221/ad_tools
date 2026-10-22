@@ -1,10 +1,15 @@
-// tool#10 走速：純函式（分組、走速計算、V 換算、設定錯誤、整頁組裝）。不碰 DB，tests 直接餵假資料。
+// tool#10 走速：純函式（分組、走速計算、D1 換算、資料日、設定錯誤、整頁組裝）。不碰 DB，tests 直接餵假資料。
 //
 // 資料來源：BH（Budget Hunter，r_bulk_upload）的 bh_accounts＝AM 設定的「平台帳戶×預算×真實走期」，
-// 本工具只讀；花費 D/R/M/P 讀 nexus 倉庫、V（D1 影音）倉庫沒有，暫讀 BH 自己抓的 bh_daily_stats。
+// 本工具只讀；花費五個平台都讀 nexus 倉庫（D1 影音 2026-10-21 收進倉庫，之前暫讀 BH 的 bh_daily_stats）。
+import { D1_CLIENT_RATE } from '../nexus/schema.js';
 
-export type Platform = 'D' | 'R' | 'M' | 'P' | 'V';
-export const PLATFORMS: Platform[] = ['D', 'R', 'M', 'P', 'V'];
+// D1＝D1 影音（BH 裡記成 V，讀進來就換名，見 fromBhPlatform；使用者 2026-10-21：之後 V 一律叫 D1）
+export type Platform = 'D' | 'R' | 'M' | 'P' | 'D1';
+export const PLATFORMS: Platform[] = ['D', 'R', 'M', 'P', 'D1'];
+
+/** BH 的平台代號 → 本工具的平台代號（BH 把 D1 影音記成 V；BH 只讀不改，所以在讀進來時換）。 */
+export const fromBhPlatform = (p: string): string => (p === 'V' ? 'D1' : p);
 
 export interface BhConfig {
   id: number; // bh_accounts.id（BH 的主鍵，手動合併用它記）
@@ -18,13 +23,15 @@ export interface BhConfig {
 }
 
 export interface SpendRow { platform: Platform; accountId: string; dt: string; spend: number }
+/** nexus_jobs 成功 job 的最大迄日：D／M 一帳一 job（accountId＝帳戶），R／P／D1 整平台一個 job（accountId＝'*'）。 */
+export interface JobThrough { platform: Platform; accountId: string; ed: string }
 
 /**
- * D1 影音（V）的換算：D1 後台「金額」＝客戶價 × 0.6（實測 D1 金額 CPM 恆為 72，預算表客戶 CPM 120）。
- * BH 裡 AM 填的 V 預算也已經是乘過的數字 ⇒ 子列照原數字顯示；加進合計列前 ÷0.6 換回客戶價，
- * 才能跟其他平台（花費＝客戶預算消耗）加在一起。
+ * D1 影音的換算：D1 後台「金額」＝客戶價 × 0.6（實測 D1 金額 CPM 恆為 72，預算表客戶 CPM 120）。
+ * BH 裡 AM 填的 D1 預算也已經是乘過的數字、倉庫覆蓋紀錄的 D1 花費也是 D1 金額原值 ⇒ 子列照原數字顯示；
+ * 加進合計列前 ÷0.6 換回客戶價，才能跟其他平台（花費＝客戶預算消耗）加在一起。跟 nexus view 用同一個常數。
  */
-export const V_RATE = 0.6;
+export const D1_RATE = D1_CLIENT_RATE;
 
 /** 燈號門檻（寫成常數方便之後用回放結果調）。 */
 export const PACE = {
@@ -148,7 +155,7 @@ export interface Merge { bhId: number; groupId: string }
 export interface Group { key: string; mergeIds: string[]; configs: BhConfig[] }
 
 const autoKey = (c: BhConfig) => `${normName(c.accountName)}|${c.start}|${c.end}`;
-const PORDER: Record<Platform, number> = { D: 0, R: 1, M: 2, P: 3, V: 4 };
+const PORDER: Record<Platform, number> = { D: 0, R: 1, M: 2, P: 3, D1: 4 };
 
 /**
  * 預算列＝「名稱正規化後相同＋起訖日完全相同」的 BH 設定（AM 通常同一張 Excel 上傳各平台）；
@@ -190,8 +197,8 @@ export function groupConfigs(configs: BhConfig[], merges: Merge[]): Group[] {
 
 // ---------- 合計列 ----------
 
-/** 換成客戶價的倍數：V 是 D1 金額（已 ×0.6），其他平台花費就是客戶預算消耗。 */
-export const toClient = (p: Platform) => (p === 'V' ? 1 / V_RATE : 1);
+/** 換成客戶價的倍數：D1 是 D1 金額（已 ×0.6），其他平台花費就是客戶預算消耗。 */
+export const toClient = (p: Platform) => (p === 'D1' ? 1 / D1_RATE : 1);
 
 /** 合計列：看整個預算的總額（平台拆分只是參考，單一平台落後不會讓合計變紅）。 */
 export function groupPace(children: { cfg: BhConfig; pace: Pace }[]): Pace {
@@ -234,7 +241,7 @@ const ID_OK: Record<Platform, (id: string) => boolean> = {
   R: (id) => /^\d+$/.test(id),
   M: (id) => /^\d+$/.test(id),
   P: (id) => /^\d{3}-\d{3}-\d{4}$/.test(id),
-  V: (id) => id.trim() !== '' && !/^(nan|none|null)$/i.test(id.trim()),
+  D1: (id) => id.trim() !== '' && !/^(nan|none|null)$/i.test(id.trim()),
 };
 
 /**
@@ -243,7 +250,7 @@ const ID_OK: Record<Platform, (id: string) => boolean> = {
  * - mgidClientId：MGID 要填 API ID（86 開頭），97/98 開頭是 Client ID
  * - unknownAccount：token 表與倉庫都沒有（D/M 沒登 token、或 ID 打錯）——倉庫抓不到它的花費
  * - duplicate：同帳戶有另一筆走期重疊的設定，花費會被算兩次
- * `known`＝`平台|帳戶ID`（token 表＋倉庫出現過的帳戶）。V 走 Action4，不在 token 表，不檢查。
+ * `known`＝`平台|帳戶ID`（token 表＋倉庫出現過的帳戶）。D1 走 Action4，不在 token 表，不檢查。
  */
 export function configIssues(configs: BhConfig[], known: Set<string>): Map<number, Issue[]> {
   const out = new Map<number, Issue[]>();
@@ -253,7 +260,7 @@ export function configIssues(configs: BhConfig[], known: Set<string>): Map<numbe
     return true;
   });
   for (const c of valid) {
-    if (c.platform === 'V') continue;
+    if (c.platform === 'D1') continue;
     if (c.platform === 'M' && /^9[78]\d+$/.test(c.accountId)) add(c.id, { code: 'mgidClientId' });
     else if (!known.has(`${c.platform}|${c.accountId}`)) add(c.id, { code: 'unknownAccount' });
   }
@@ -285,6 +292,7 @@ export interface AssembleInput {
   spend: SpendRow[];
   merges: Merge[];
   known: Set<string>;
+  through: JobThrough[];
 }
 
 /**
@@ -311,19 +319,40 @@ export function defaultAm(me: string | null, amNames: string[], owners: string[]
   return owners.some((o) => amKey(o) === k) ? k : '';
 }
 
+/**
+ * 資料日＝倉庫寫到哪天：看 nexus_jobs 成功 job 的迄日，不看覆蓋紀錄（nexus_coverage）的最大日期。
+ * 覆蓋紀錄只在有數字的帳戶日才有列，量小的平台整天沒投放時，最大日期會停在好幾天前
+ * （2026-10-21 實測：D1 job 已跑到 10/20，覆蓋紀錄只到 10/16）。
+ * - 平台：成功 job 迄日的最大值；完全沒有成功 job 時退回昨天。
+ * - 帳戶（D／M 一帳一 job）：自己的迄日比平台早（批次還沒輪到、或 job 失敗）就用自己的，
+ *   還沒抓的日子才會算進「剩下的」，不會被當成 0 花費。R／P／D1 整平台一個 job，帳戶照平台。
+ * 都不超過昨天（今天的數字不完整）。
+ */
+export function dataDates(through: JobThrough[], yesterday: string): { platform: Record<Platform, string>; account: Map<string, string> } {
+  const platform = Object.fromEntries(PLATFORMS.map((p) => [p, ''])) as Record<Platform, string>;
+  const account = new Map<string, string>(); // 平台取的是最大值 ⇒ 帳戶的迄日不會晚於平台
+  for (const j of through) {
+    const ed = minStr(j.ed, yesterday);
+    if (ed > platform[j.platform]) platform[j.platform] = ed;
+    if (j.accountId === '*') continue;
+    const k = `${j.platform}|${j.accountId}`;
+    account.set(k, maxStr(account.get(k) ?? '', ed));
+  }
+  for (const p of PLATFORMS) if (!platform[p]) platform[p] = yesterday;
+  return { platform, account };
+}
+
 export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, string>; groups: GroupView[]; hiddenCount: number; owners: string[] } {
   const yesterday = addDays(inp.today, -1);
-  const dataThrough = Object.fromEntries(PLATFORMS.map((p) => [p, ''])) as Record<Platform, string>;
+  const { platform: dataThrough, account: accountThrough } = dataDates(inp.through, yesterday);
   const idx = new Map<string, Map<string, number>>();
   for (const r of inp.spend) {
     if (r.dt > yesterday) continue;
-    if (r.dt > dataThrough[r.platform]) dataThrough[r.platform] = r.dt;
     const k = `${r.platform}|${r.accountId}`;
     const m = idx.get(k) ?? new Map<string, number>();
     m.set(r.dt, (m.get(r.dt) ?? 0) + r.spend);
     idx.set(k, m);
   }
-  for (const p of PLATFORMS) if (!dataThrough[p]) dataThrough[p] = yesterday; // 沒有任何資料的平台退回昨天
 
   const issues = configIssues(inp.configs, inp.known);
   const keepFrom = addDays(inp.today, -PACE.keepEndedDays);
@@ -332,9 +361,10 @@ export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, st
   for (const g of groupConfigs(inp.configs, inp.merges)) {
     const end = g.configs.reduce((m, c) => maxStr(m, c.end), g.configs[0].end);
     if (end < keepFrom) { hiddenCount++; continue; }
-    const children = g.configs.map((c) => ({
-      cfg: c, pace: paceOf(c, idx.get(`${c.platform}|${c.accountId}`), dataThrough[c.platform]), issues: issues.get(c.id) ?? [],
-    }));
+    const children = g.configs.map((c) => {
+      const k = `${c.platform}|${c.accountId}`;
+      return { cfg: c, pace: paceOf(c, idx.get(k), accountThrough.get(k) ?? dataThrough[c.platform]), issues: issues.get(c.id) ?? [] };
+    });
     // 列名＝（換成客戶價後）預算最大的那筆設定的名字
     const lead = [...g.configs].sort((a, b) => b.budget * toClient(b.platform) - a.budget * toClient(a.platform) || a.id - b.id)[0];
     groups.push({

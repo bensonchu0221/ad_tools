@@ -2314,7 +2314,7 @@ async function nexusPool(): Promise<mysql.Pool> {
   if (!(((mcol as any[])[0]?.c ?? 0) > 0)) {
     await p.query(`ALTER TABLE nexus_recon ADD COLUMN m_imp BIGINT NULL, ADD COLUMN m_click BIGINT NULL, ADD COLUMN m_spend DECIMAL(18,4) NULL`);
   }
-  // 2026-10-15 M 轉換層比對：cf_*＝事實表、cd_*＝M 裝置轉換表；NULL＝那次比對沒有轉換層（非 M、舊結果、那天還沒回補）
+  // 2026-10-15 M 轉換層比對：cf_*＝事實表、cd_*＝裝置表 events（2026-10-21 起；之前是 M 裝置轉換表）；NULL＝那次比對沒有轉換層（非 M、舊結果、那天還沒回補）
   const [ccol] = await p.query(
     `SELECT COUNT(*) AS c FROM information_schema.columns
      WHERE table_schema = DATABASE() AND table_name = 'nexus_recon' AND column_name = 'cf_click'`
@@ -2750,7 +2750,7 @@ export interface NexusReconRow {
   device: NexusReconTotals;
   /** 媒體表加總（2026-10-08 起；更早的比對結果、或那天該平台媒體表整個沒資料＝undefined） */
   media?: NexusReconTotals;
-  /** M 轉換層（2026-10-15 起）：事實表 vs M 裝置轉換表的點擊與三段轉換；非 M、舊結果、那天還沒回補＝undefined */
+  /** M 轉換層（2026-10-15 起）：事實表 vs 裝置表 events（2026-10-21 前是 M 裝置轉換表）的點擊與三段轉換；非 M、舊結果、那天還沒回補＝undefined */
   conv?: { fact: NexusConvTotals; device: NexusConvTotals };
 }
 export interface NexusConvTotals { click: number; interest: number; decision: number; buy: number }
@@ -2846,7 +2846,7 @@ export async function pacingBhConfigs(): Promise<PacingBhRow[]> {
   }));
 }
 
-/** 倉庫的帳戶×日花費（D/R/M/P）：nexus 每日批次寫 BQ 時順手記在 nexus_coverage，不必查 BQ。 */
+/** 倉庫的帳戶×日花費（D/R/M/P/D1）：nexus 每日批次寫 BQ 時順手記在 nexus_coverage，不必查 BQ。D1 是 mobile 的 D1 金額原值。 */
 export async function pacingWarehouseSpend(sd: string, ed: string): Promise<{ platform: string; accountId: string; dt: string; spend: number }[]> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
@@ -2857,18 +2857,17 @@ export async function pacingWarehouseSpend(sd: string, ed: string): Promise<{ pl
 }
 
 /**
- * V（D1 影音）花費：倉庫還沒有 D1 影音，先讀 BH 自己用 Action4 抓好的 bh_daily_stats。
- * 那張表只用 account_id 當鍵（沒有平台欄）；V 的 account_id 是 D1 帳戶名字串，不會跟數字 ID 撞。
+ * 倉庫寫到哪天：nexus_jobs 成功 job 的最大迄日（平台×帳戶；R／P／D1 與 M 裝置 job 的帳戶是 '*'）。
+ * 走速的資料日看這個、不看覆蓋紀錄——沒投放的日子覆蓋紀錄沒有列（見 pacing/calc.ts dataDates）。
  */
-export async function pacingBhVSpend(accountIds: string[], sd: string, ed: string): Promise<{ accountId: string; dt: string; spend: number }[]> {
-  if (!accountIds.length) return [];
+export async function pacingJobThrough(sd: string): Promise<{ platform: string; accountId: string; ed: string }[]> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
   const [rows] = await p.query(
-    `SELECT account_id, DATE_FORMAT(date,'%Y-%m-%d') AS dt, spend FROM \`${BH_DB}\`.bh_daily_stats
-      WHERE account_id IN (?) AND date BETWEEN ? AND ?`, [accountIds, sd, ed]
+    `SELECT platform, account_id, DATE_FORMAT(MAX(ed),'%Y-%m-%d') AS ed FROM nexus_jobs
+      WHERE status = 'success' AND ed >= ? GROUP BY platform, account_id`, [sd]
   );
-  return (rows as any[]).map((r) => ({ accountId: String(r.account_id), dt: r.dt, spend: Number(r.spend) }));
+  return (rows as any[]).map((r) => ({ platform: r.platform, accountId: String(r.account_id), ed: r.ed }));
 }
 
 /** 系統認得的帳戶：D/M token 表＋倉庫出現過的帳戶（只取名稱，不取 token）。抓 BH 設定錯誤與預算表抓漏用。 */

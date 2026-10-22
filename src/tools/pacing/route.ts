@@ -2,15 +2,17 @@
  * tool#10 走速 路由。
  *
  * 一個預算一列（BH 設定自動併＋手動合併），合計列看總走速、點開看各平台。
- * BH 只讀；花費 D/R/M/P 讀 nexus 倉庫（nexus_coverage）、V 讀 BH 的 bh_daily_stats；
+ * BH 只讀；花費五個平台都讀 nexus 倉庫（nexus_coverage），資料日看 nexus_jobs 成功 job 的迄日；
  * 預算表只拿來抓漏（BH 沒設定、token 沒進系統、沒填帳戶名）。
  */
 import type { FastifyInstance } from 'fastify';
 import { currentUser } from '../../core/auth.js';
 import {
-  pacingBhConfigs, pacingWarehouseSpend, pacingBhVSpend, pacingKnownAccounts, pacingMerges, pacingMerge, pacingUnmerge,
+  pacingBhConfigs, pacingWarehouseSpend, pacingJobThrough, pacingKnownAccounts, pacingMerges, pacingMerge, pacingUnmerge,
 } from '../../core/store.js';
-import { assemble, defaultAm, addDays, twToday, PACE, PLATFORMS, type BhConfig, type Platform, type SpendRow } from './calc.js';
+import {
+  assemble, defaultAm, addDays, twToday, fromBhPlatform, PACE, PLATFORMS, type BhConfig, type Platform, type SpendRow, type JobThrough,
+} from './calc.js';
 import { parseSheet, sheetGaps, monthTab, type SheetRow, type KnownName } from './sheet.js';
 import { fetchSheetValues, fetchSheetGid, SHEET_URL } from './source.js';
 import { pacingPage } from './page.js';
@@ -45,20 +47,19 @@ async function sheetPart(today: string, configs: BhConfig[], knownNames: KnownNa
 export async function buildPacingData(me: string | null) {
   const today = twToday();
   const yesterday = addDays(today, -1);
-  const configs: BhConfig[] = (await pacingBhConfigs()).filter((c) => isPlatform(c.platform)) as BhConfig[];
+  const configs: BhConfig[] = (await pacingBhConfigs())
+    .map((c) => ({ ...c, platform: fromBhPlatform(c.platform) }))
+    .filter((c) => isPlatform(c.platform)) as BhConfig[];
   // 花費從最早一筆設定的起日讀到昨天（nexus_coverage 一天幾百列，幾個月也才一萬多列）
   const sd = configs.reduce((m, c) => (c.start < m ? c.start : m), yesterday);
-  const vIds = [...new Set(configs.filter((c) => c.platform === 'V').map((c) => c.accountId))];
-  const [wh, vs, merges, knownRaw] = await Promise.all([
-    pacingWarehouseSpend(sd, yesterday), pacingBhVSpend(vIds, sd, yesterday), pacingMerges(), pacingKnownAccounts(),
+  const [wh, jobs, merges, knownRaw] = await Promise.all([
+    pacingWarehouseSpend(sd, yesterday), pacingJobThrough(sd), pacingMerges(), pacingKnownAccounts(),
   ]);
-  const spend: SpendRow[] = [
-    ...wh.filter((r) => isPlatform(r.platform) && r.platform !== 'V').map((r) => ({ ...r, platform: r.platform as Platform })),
-    ...vs.map((r) => ({ platform: 'V' as const, ...r })),
-  ];
+  const spend = wh.filter((r) => isPlatform(r.platform)) as SpendRow[];
+  const through = jobs.filter((j) => isPlatform(j.platform)) as JobThrough[];
   const knownNames = knownRaw.filter((k) => isPlatform(k.platform)) as KnownName[];
   const known = new Set(knownNames.map((k) => `${k.platform}|${k.accountId}`));
-  const out = assemble({ today, configs, spend, merges, known });
+  const out = assemble({ today, configs, spend, merges, known, through });
   const sheet = await sheetPart(today, configs, knownNames);
   return {
     today, me, ...out, sheet, amNames: sheet.amNames, pace: PACE, sheetUrl: SHEET_URL, bhUrl: BH_URL,

@@ -1,9 +1,9 @@
-// 驗證 tool#10 走速：BH 設定分組、走速計算、V 換算、設定錯誤、預算表解析與抓漏。
+// 驗證 tool#10 走速：BH 設定分組、走速計算、D1 換算、資料日、設定錯誤、預算表解析與抓漏。
 // 全程假資料（手算期望值），不連 DB／Sheets。用法：npx tsx tests/verify_pacing.mts
 import assert from 'node:assert/strict';
 import {
-  normName, addDays, dayDiff, twToday, paceOf, groupConfigs, groupPace, configIssues, assemble, defaultAm, V_RATE,
-  type BhConfig, type SpendRow,
+  normName, addDays, dayDiff, twToday, paceOf, groupConfigs, groupPace, configIssues, assemble, defaultAm, dataDates, fromBhPlatform, D1_RATE,
+  type BhConfig, type SpendRow, type JobThrough,
 } from '../src/tools/pacing/calc.js';
 import { parseSheet, sheetGaps, monthTab, type SheetRow } from '../src/tools/pacing/sheet.js';
 
@@ -165,17 +165,17 @@ await ok('自動分組：名稱正規化後相同＋起訖日相同才同一列'
 
 // ---------- 合計列 ----------
 
-await ok('合計列：V 的預算與花費 ÷0.6 換成客戶價再加總', () => {
+await ok('合計列：D1 的預算與花費 ÷0.6 換成客戶價再加總', () => {
   const r = cfg({ platform: 'R', budget: 60000, start: '2026-09-01', end: '2026-09-30' });
-  const v = cfg({ platform: 'V', budget: 6000, start: '2026-09-01', end: '2026-09-30' });
+  const v = cfg({ platform: 'D1', budget: 6000, start: '2026-09-01', end: '2026-09-30' });
   const kids = [
     { cfg: r, pace: paceOf(r, days(['2026-09-01', 10, 2000]), '2026-09-10') },
     { cfg: v, pace: paceOf(v, days(['2026-09-01', 10, 200]), '2026-09-10') },
   ];
   const g = groupPace(kids);
-  near(g.budget, 60000 + 6000 / V_RATE);
-  near(g.spent, 20000 + 2000 / V_RATE);
-  near(g.projected, 60000 + 6000 / V_RATE);
+  near(g.budget, 60000 + 6000 / D1_RATE);
+  near(g.spent, 20000 + 2000 / D1_RATE);
+  near(g.projected, 60000 + 6000 / D1_RATE);
   assert.equal(g.level, 'green');
 });
 
@@ -203,7 +203,7 @@ await ok('設定錯誤：無效 ID、MGID 填成 Client ID、倉庫沒有的帳�
     cfg({ id: 14, platform: 'D', accountId: '29000', start: '2026-09-15', end: '2026-10-15' }),
     cfg({ id: 15, platform: 'D', accountId: '29001', start: '2026-09-01', end: '2026-09-30' }),
     cfg({ id: 16, platform: 'D', accountId: '29001', start: '2026-10-01', end: '2026-10-31' }),
-    cfg({ id: 17, platform: 'V', accountId: '4A_CPM_juliat', start: '2026-09-01', end: '2026-09-30' }),
+    cfg({ id: 17, platform: 'D1', accountId: '4A_CPM_juliat', start: '2026-09-01', end: '2026-09-30' }),
     cfg({ id: 18, platform: 'P', accountId: '702-407-2420', start: '2026-09-01', end: '2026-09-30' }),
     cfg({ id: 19, platform: 'P', accountId: '7024072420', start: '2026-09-01', end: '2026-09-30' }),
   ];
@@ -234,7 +234,7 @@ await ok('組裝：各平台資料日、只顯示進行中／未開始／7 天�
     cfg({ id: 25, platform: 'D', accountId: '205', accountName: 'F', budget: 27000, start: '2026-10-05', end: '2026-10-31' }),
     // G：已花 56,000（未超 60,000）、近 7 日每天 2,000、還剩 33 天 ⇒ 預估 122,000＝203% ⇒ 黃
     cfg({ id: 26, platform: 'R', accountId: '206', accountName: 'G', budget: 60000, start: '2026-09-01', end: '2026-10-31' }),
-    cfg({ id: 27, platform: 'V', accountId: 'v_acc', accountName: 'H', budget: 3000, start: '2026-09-01', end: '2026-09-30' }),
+    cfg({ id: 27, platform: 'D1', accountId: 'v_acc', accountName: 'H', budget: 3000, start: '2026-09-01', end: '2026-09-30' }),
     // I：9/28 結束只花一半（已結束的紅燈＝回顧，排在進行中與未開始之後）
     cfg({ id: 28, platform: 'D', accountId: '208', accountName: 'I', budget: 20000, start: '2026-09-19', end: '2026-09-28' }),
     // J：9/26 結束、之後還在花（可以馬上處理，排在進行中紅黃燈後面）
@@ -248,14 +248,19 @@ await ok('組裝：各平台資料日、只顯示進行中／未開始／7 天�
   put('D', '201', '2026-09-30', 1, 5000); // 今天的未完整數字：不能算、也不能把資料日推到今天
   put('D', '204', '2026-09-01', 25, 360);
   put('R', '206', '2026-09-01', 28, 2000); // R 只到 9/28
-  put('V', 'v_acc', '2026-09-01', 28, 100);
+  put('D1', 'v_acc', '2026-09-01', 28, 100);
   put('D', '208', '2026-09-19', 10, 1000);
   put('D', '209', '2026-09-18', 11, 1000); // 走期到 9/26，9/27、9/28 還在花
   const known = new Set(['D|201', 'D|202', 'D|203', 'D|204', 'D|205', 'R|206', 'D|208', 'D|209']);
-  const out = assemble({ today: '2026-09-30', configs: cs, spend, merges: [], known });
+  const through: JobThrough[] = [
+    { platform: 'D', accountId: '201', ed: '2026-09-30' }, // 迄日是今天也只算到昨天
+    { platform: 'R', accountId: '*', ed: '2026-09-28' }, // R 只跑到 9/28
+    { platform: 'D1', accountId: '*', ed: '2026-09-28' },
+  ];
+  const out = assemble({ today: '2026-09-30', configs: cs, spend, merges: [], known, through });
   assert.equal(out.dataThrough.D, '2026-09-29');
   assert.equal(out.dataThrough.R, '2026-09-28');
-  assert.equal(out.dataThrough.M, '2026-09-29'); // 沒有任何資料的平台退回昨天
+  assert.equal(out.dataThrough.M, '2026-09-29'); // 沒有任何成功 job 的平台退回昨天
   assert.deepEqual(out.groups.map((g) => g.name), ['B', 'G', 'J', 'A', 'H', 'F', 'I', 'E']);
   assert.equal(out.hiddenCount, 1);
   assert.deepEqual(out.owners, ['am@popin.cc']); // 篩選按鈕只放顯示中的列的負責人
@@ -264,12 +269,68 @@ await ok('組裝：各平台資料日、只顯示進行中／未開始／7 天�
   assert.equal(g.pace.remaining, 33); // R 資料只到 9/28 ⇒ 9/29~10/31 都還算剩餘
 });
 
+await ok('資料日看成功 job 迄日：平台取最大、不超過昨天；D／M 帳戶落後用自己的；沒 job 退回昨天', () => {
+  const r = dataDates([
+    { platform: 'D', accountId: '401', ed: '2026-09-27' },
+    { platform: 'D', accountId: '401', ed: '2026-09-25' }, // 同帳戶多筆取最大
+    { platform: 'D', accountId: '402', ed: '2026-09-30' },
+    { platform: 'M', accountId: '*', ed: '2026-09-28' }, // M 裝置 job：只影響平台、不當帳戶
+    { platform: 'M', accountId: '501', ed: '2026-09-29' },
+    { platform: 'D1', accountId: '*', ed: '2026-09-29' },
+  ], '2026-09-29');
+  assert.equal(r.platform.D, '2026-09-29');
+  assert.equal(r.platform.M, '2026-09-29');
+  assert.equal(r.platform.D1, '2026-09-29');
+  assert.equal(r.platform.R, '2026-09-29');
+  assert.equal(r.account.get('D|401'), '2026-09-27');
+  assert.equal(r.account.get('D|402'), '2026-09-29');
+  assert.equal(r.account.has('M|*'), false);
+});
+
+await ok('D1 沒投放的日子覆蓋紀錄沒有列：資料日照 job 迄日，近 7 天的 0 要算進平均', () => {
+  const c = cfg({ platform: 'D1', accountId: 'CPM_x', accountName: 'K', budget: 3000, start: '2026-09-01', end: '2026-09-30' });
+  const spend: SpendRow[] = [];
+  for (let i = 0; i < 20; i++) spend.push({ platform: 'D1', accountId: 'CPM_x', dt: addDays('2026-09-01', i), spend: 100 }); // 9/21 起停投
+  const out = assemble({
+    today: '2026-09-30', configs: [c], spend, merges: [], known: new Set(), through: [{ platform: 'D1', accountId: '*', ed: '2026-09-29' }],
+  });
+  assert.equal(out.dataThrough.D1, '2026-09-29');
+  const p = out.groups[0].children[0].pace;
+  assert.equal(p.dataThrough, '2026-09-29');
+  assert.equal(p.remaining, 1);
+  near(p.avgDaily, 0);
+  near(p.projected, 2000);
+  assert.equal(p.level, 'red'); // 停投 9 天：預估 67%
+});
+
+await ok('D 帳戶自己的 job 落後：那個帳戶的資料日用自己的，還沒抓的日子算剩餘、不當 0 花費', () => {
+  const a = cfg({ platform: 'D', accountId: '401', accountName: 'L', budget: 30000, start: '2026-09-01', end: '2026-09-30' });
+  const spend: SpendRow[] = [];
+  for (let i = 0; i < 27; i++) spend.push({ platform: 'D', accountId: '401', dt: addDays('2026-09-01', i), spend: 1000 });
+  const out = assemble({
+    today: '2026-09-30', configs: [a], spend, merges: [], known: new Set(['D|401']),
+    through: [{ platform: 'D', accountId: '401', ed: '2026-09-27' }, { platform: 'D', accountId: '402', ed: '2026-09-29' }],
+  });
+  assert.equal(out.dataThrough.D, '2026-09-29');
+  const g = out.groups[0];
+  assert.equal(g.children[0].pace.dataThrough, '2026-09-27');
+  assert.equal(g.children[0].pace.remaining, 3);
+  near(g.children[0].pace.projected, 30000);
+  assert.equal(g.pace.dataThrough, '2026-09-27');
+  assert.equal(g.pace.level, 'green');
+});
+
+await ok('BH 的 V 讀進來換成 D1，其他平台代號不變', () => {
+  assert.equal(fromBhPlatform('V'), 'D1');
+  for (const p of ['D', 'R', 'M', 'P']) assert.equal(fromBhPlatform(p), p);
+});
+
 await ok('篩選按鈕只列顯示中的負責人；早已結束的設定的負責人不出現', () => {
   const cs = [
     cfg({ platform: 'D', accountId: '301', accountName: 'X', budget: 1000, start: '2026-09-01', end: '2026-09-30', owner: 'lulu@popin.cc' }),
     cfg({ platform: 'R', accountId: '302', accountName: 'Qbi', budget: 1000, start: '2026-03-01', end: '2026-03-31', owner: 'benson@popin.cc' }),
   ];
-  const out = assemble({ today: '2026-09-30', configs: cs, spend: [], merges: [], known: new Set(['D|301', 'R|302']) });
+  const out = assemble({ today: '2026-09-30', configs: cs, spend: [], merges: [], known: new Set(['D|301', 'R|302']), through: [] });
   assert.deepEqual(out.owners, ['lulu@popin.cc']);
 });
 
