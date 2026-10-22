@@ -5,7 +5,7 @@ import {
   normName, coreName, matchAccounts, companyCore, brandFromLabel, validAccountId, mergeAccounts, type Account,
 } from '../src/tools/sales/names.js';
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
-import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
+import { buildSeed, pickClientName, type SeedIo, type Seed } from '../src/tools/sales/build.js';
 import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
 import { PLATFORMS, SALES_TABLES, SALES_SCHEMA, SALES_TABLE_DESC, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
 import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
@@ -71,8 +71,27 @@ await ok('第 3 級：互相包含且短的一方 ≥3 字', () => {
   assert.deepEqual(ids(matchAccounts('易得', ACC)), []); // 2 字不算
 });
 
-await ok('有高一級命中就不往下：易得雲端只對到同名那個，不含 EVOX_易得雲端', () => {
-  assert.deepEqual(ids(matchAccounts('易得雲端', ACC)), ['D999']);
+await ok('第 3 級按平台：D 有同名就不往下，R 沒命中照找（易得雲端 → D 同名＋R EVOX_易得雲端）', () => {
+  assert.deepEqual(ids(matchAccounts('易得雲端', ACC)), ['D999', 'R10053']);
+});
+
+await ok('第 3 級：被別的帳戶名完全對到、又比這個帳戶名短的帳戶不收（PCV 不吃 HPV 的 D 帳戶）', () => {
+  const owned = new Set(['D|34196', 'R|10003']); // 月表 `4A_艾比傑_美商默沙東` 完全對到的
+  assert.deepEqual(ids(matchAccounts('4A_艾比傑_美商默沙東_PCV', ACC, owned)), ['R10089']);
+  assert.deepEqual(ids(matchAccounts('4A_艾比傑_美商默沙東_PCV', ACC)), ['D34196', 'R10089']); // 沒給 owned 就會誤收
+});
+
+await ok('第 3 級：帳戶名第一段＝這個帳戶名（不限字數）；較長的子帳戶不受 owned 限制', () => {
+  const acc: Account[] = [
+    { platform: 'D', accountId: '32635', name: '上辰-子申0026-D' },
+    { platform: 'D', accountId: '1', name: '上辰國際' }, // 第一段不是「上辰」，2 字也搆不到互相包含
+    { platform: 'M', accountId: '860212', name: '新素簡' },
+    { platform: 'D', accountId: '32265', name: '新素簡_瘦身_72' },
+    { platform: 'R', accountId: '10061', name: 'nicky(共好_安達人壽)' },
+  ];
+  assert.deepEqual(ids(matchAccounts('上辰', acc)), ['D32635']);
+  assert.deepEqual(ids(matchAccounts('新素簡', acc, new Set(['M|860212', 'D|32265']))), ['D32265', 'M860212']);
+  assert.deepEqual(ids(matchAccounts('nicky', acc)), ['R10061']);
 });
 
 await ok('只有前綴或空字串不會命中', () => {
@@ -330,6 +349,71 @@ await ok('l. D1：月表沒有任何 Video 列的 IO 不掛 D1 帳戶；Video、
   assert.deepEqual(of('Mundo_影音'), ['D1CPM_MundoPixarExperience', 'D38663']);
   assert.deepEqual(of('Mundo_混合'), ['D1CPM_MundoPixarExperience', 'D38663']);
   assert.deepEqual(of('直客_MundoPixar Experience X1'), ['D1CPM_MundoPixarExperience', 'D38663']);
+});
+
+await ok('m. 沒填帳戶名的月表 IO 沿用同經銷商同廣告主的帳戶名（source=inferred）；固定對照（manual）；純 Video 列掛得到 D1 → 預算記 D1', () => {
+  const acc: Account[] = [
+    { platform: 'D', accountId: '29192', name: '4A_迪艾思_三得利_TADAS' },
+    { platform: 'D', accountId: '34196', name: '34196_4A_艾比傑_美商默沙東' },
+    { platform: 'D1', accountId: '4A_CPM_Cheesead_MSC', name: '4A_CPM_Cheesead_MSC' },
+    { platform: 'P', accountId: '464-144-2909', name: '安達人壽' },
+    { platform: 'R', accountId: '9714', name: '4A_一帆_漢堡王' },
+  ];
+  const s = buildSeed({
+    finance: [], customers: [], accounts: acc,
+    deliver: [
+      ...parseDeliverTab('202607', tab10(
+        { attr: '4A', agency: '啟示廣告.', adv: 'MSC郵輪榮耀號親子暑期', format: 'Video', start: '7/1', end: '7/21', budget: '37,500', d: '30,000', m: '2,500' },
+      )),
+      ...parseDeliverTab('202608', tab10(
+        { attr: '4A', agency: 'DAC', adv: '三得利TADAS正貨', start: '8/1', end: '8/31', budget: '1,000', d: '1,000' },
+        { attr: '4A', agency: '艾比傑', adv: '默沙東HPV', start: '8/1', end: '8/31', budget: '1,000', d: '1,000' },
+        { attr: '4A', agency: '別家', adv: '三得利TADAS正貨', start: '8/1', end: '8/31', budget: '1,000', d: '1,000' }, // 經銷商不同不沿用
+        { attr: '4A', agency: '一帆數位', adv: '漢堡王_芒果堡', start: '8/1', end: '8/16', budget: '1,000', r: '1,000' }, // MANUAL_LABELS
+      )),
+      ...parseDeliverTab('202609', tab10(
+        { attr: '4A', agency: 'DAC', adv: '三得利TADAS正貨', start: '9/1', end: '9/30', budget: '1,000', d: '1,000', label: '4A_迪艾思_三得利_TADAS' },
+        { attr: '4A', agency: '艾比傑', adv: '默沙東HPV人類乳突病毒疫苗宣導', start: '9/1', end: '9/30', budget: '1,000', d: '1,000', label: '4A_艾比傑_美商默沙東' },
+        { attr: '4A', agency: '台北數位創意', adv: '台北數位_安達人壽', format: 'Video', start: '9/1', end: '9/30', budget: '130,000', p: '130,000', label: '台北數位_安達人壽_早安健康 2606' },
+      )),
+    ],
+  });
+  const ioOf = (name: string, agency: string) => s.ios.find((i) => i.name === name && i.agencyName === agency)!;
+  const asg = (name: string, agency: string) => s.assignments.filter((a) => a.ioKey === ioOf(name, agency).key).map((a) => `${a.platform}${a.accountId}:${a.source}`).sort();
+  const alloc = (name: string, agency: string) => s.allocations.filter((a) => a.ioKey === ioOf(name, agency).key).map((a) => `${a.platform}${a.month}:${a.plannedBudget}`).sort();
+  // 08 沒帳戶名、09 有，是兩張 IO；ioOf 取到的是先出現的 08 那張
+  assert.equal(s.ios.filter((i) => i.name === '三得利TADAS正貨' && i.agencyName === 'DAC').length, 2);
+  assert.deepEqual(ioOf('三得利TADAS正貨', 'DAC').labels, []);
+  assert.deepEqual(asg('三得利TADAS正貨', 'DAC').filter((x) => x.endsWith('inferred')), ['D29192:inferred']);
+  assert.deepEqual(asg('默沙東HPV', '艾比傑'), ['D34196:inferred']); // 廣告主互相包含
+  assert.deepEqual(asg('三得利TADAS正貨', '別家'), []);
+  assert.deepEqual(asg('漢堡王_芒果堡', '一帆數位'), ['R9714:manual']);
+  assert.deepEqual(asg('MSC郵輪榮耀號親子暑期', '啟示廣告.'), ['D14A_CPM_Cheesead_MSC:manual']);
+  assert.deepEqual(alloc('MSC郵輪榮耀號親子暑期', '啟示廣告.'), ['D12026-07:35000', 'M2026-07:2500']); // D 欄不收，扣掉 M 欄
+  assert.deepEqual(asg('台北數位_安達人壽', '台北數位創意'), ['P464-144-2909:deliver']);
+  assert.deepEqual(alloc('台北數位_安達人壽', '台北數位創意'), ['P2026-09:130000']); // 掛不到 D1 照欄位
+});
+
+await ok('pickClientName：被包含的優先 → 共同前綴 → 最短；有 preferred 只在裡面挑', () => {
+  assert.equal(pickClientName(['三得利TADAS正貨', '三得利', '三得利青汁Aojiru正貨']), '三得利');
+  assert.equal(pickClientName(['哈根達斯72%黑巧克力_新聞稿專案', '哈根達斯_26家新聞稿+原生導流']), '哈根達斯');
+  assert.equal(pickClientName(['仁壽藥業', '仙桃牌', '仙桃牌']), '仙桃牌');
+  assert.equal(pickClientName(['美琪_彎彎 pH5.5 沐浴乳妞新聞導流', '美琪_彎彎 pH5.5 沐浴乳妞新聞導流_第二篇', '美琪生技'], ['美琪生技']), '美琪生技');
+  assert.equal(pickClientName(['貸霸資訊', '貸霸']), '貸霸');
+});
+
+await ok('n. client：共用平台帳戶的 IO 併成同一個 client，原本的名稱進別名', () => {
+  const s = buildSeed({
+    finance: parseFinance([FIN_HEADER, fin({ company: '仁壽藥業有限公司', account: '直客＿仙桃牌', start: '2026/07/28', end: '2026/08/28', code: 'A2', no: '1', amount: '30,000' })]),
+    customers: [], accounts: [{ platform: 'D', accountId: '37975', name: '直客_仙桃牌' }, { platform: 'D', accountId: '1', name: '別人' }],
+    deliver: parseDeliverTab('202610', tab10(
+      { attr: '直客', agency: '直客', adv: '仙桃牌_體健丸', start: '10/1', end: '10/14', budget: '1,000', d: '1,000', label: '直客_仙桃牌' },
+      { attr: '直客', agency: '直客', adv: '別人家', start: '10/1', end: '10/14', budget: '1,000', d: '1,000', label: '別人' },
+    )),
+  });
+  assert.deepEqual([...new Set(s.ios.map((x) => x.clientName))].sort(), ['仙桃牌', '別人家']); // 帳戶名拆不出品牌 → 廣告主
+  assert.deepEqual(s.clients.map((c) => c.name).sort(), ['仙桃牌', '別人家']);
+  assert.ok(s.aliases.some((a) => a.entityType === 'client' && a.aliasRaw === '仁壽藥業' && a.entityName === '仙桃牌'));
 });
 
 await ok('k. 參照完整：IO 的經銷商／client／付款方都存在、子表都指得到 IO、別名都指得到實體、source_ref 不重複', () => {

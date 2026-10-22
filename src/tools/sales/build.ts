@@ -1,6 +1,6 @@
 // 業績層級資料：兩份試算表＋帳戶清單 → 要寫進 nexus_sales_ 各表的資料（純函式，不碰 DB）。
 // 規則見 docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md §6；已知限制見 §9。
-import { normName, companyCore, brandFromLabel, matchAccounts, validAccountId, type Account } from './names.js';
+import { normName, companyCore, brandFromLabel, matchAccounts, exactMatches, accountKey, validAccountId, type Account } from './names.js';
 import type { FinanceRow, CustomerRow, DeliverRow } from './parse.js';
 import type { SalesPlatform } from './schema.js';
 
@@ -70,6 +70,81 @@ const overlapDays = (s1: string, e1: string, s2: string, e2: string) =>
   Math.max(0, Math.min(dayNo(e1), dayNo(e2)) - Math.max(dayNo(s1), dayNo(s2)) + 1);
 const ref = (s: string) => s.slice(0, 255);
 const pushTo = <K, V>(m: Map<K, V[]>, k: K, v: V) => { const xs = m.get(k); if (xs) xs.push(v); else m.set(k, [v]); };
+
+/**
+ * 名稱比對不到、但已逐筆查證的歸屬（2026-10-22：帳戶在倉庫的花費期間與 IO 走期吻合，或帳戶名一看就是同一案）。
+ * 鍵＝IO 用到的帳戶名（含沿用其他月份的）或 IO 名稱（月表廣告主），正規化後相同就掛；source 記 `manual`。管理介面上線前在這裡補。
+ */
+export const MANUAL_ASSIGNMENTS: readonly (readonly [key: string, platform: string, accountId: string])[] = [
+  // 月表帳戶名跟平台帳戶名寫法不同
+  ['4A_迪艾思_三得利_汎倫Varon', 'D', '29194'], ['4A_迪艾思_三得利_汎倫Varon', 'R', '9342'],
+  ['4A_迪艾思_三得利_芝麻明_大包裝', 'D', '35145'], ['4A_迪艾思_三得利_芝麻明_大包裝', 'R', '10032'],
+  ['和合佰納_Mundo Pixar 世界展台灣站_影音', 'D1', 'CPM_MundoPixarExperience'],
+  ['juliart_覺亞髮品', 'D1', '4A_CPM_juliat'], // BH 的 V 帳戶，9 月預算 5,400
+  ['易得雲端股份有限公司', 'R', '10053'],
+  ['直客_易得雲端', 'D1', 'EVOX_CPM'], // D1 花費 7/07～8/07 ＝ 財務 A3 走期 7/07～8/06
+  ['沃醫學(全品項)', 'D', '23505'], ['沃醫學(全品項)', 'D', '1349'], ['沃醫學(全品項)', 'D', '23883'],
+  ['沃醫學_Sylfirm矽谷電波', 'M', '869860'], ['沃醫學_Pico探索皮秒', 'M', '869849'],
+  ['國泰世華-Cube', 'D', '33653'], ['國泰世華-亞萬卡', 'D', '33919'],
+  ['康鮮Nisoro', 'D', '31745'], ['Realwoman美妍世家', 'D', '31205'], ['維納斯美顏生技', 'D', '32905'],
+  // 月表沒填帳戶名、其他月份也沒有可沿用的：以廣告主對
+  ['MSC郵輪榮耀號親子暑期', 'D1', '4A_CPM_Cheesead_MSC'], // D1 花費 6/24～7/22，預算 50,000
+  ['TOTO_06月SP促銷', 'R', '9331'],
+  ['三得利躍＋美膠原蛋白粉正貨', 'D', '35351'],
+  ['三得利御瑪卡正貨', 'D', '33395'],
+  ['白蘭氏保捷', 'D', '36073'], ['白蘭氏保捷三合一', 'D', '36073'],
+  ['耐斯萌髮科研_ETtoday廣編導流', 'R', '10213'],
+  ...['哈根達斯_26家新聞稿+原生導流', '哈根達斯72%黑巧克力_新聞稿專案', '哈根達斯經典4口味新聞稿']
+    .flatMap((k) => [[k, 'R', '10148'], [k, 'D', '39515'], [k, 'M', '879453']] as const),
+  ['雨揚老師實體活動廣宣＿大藏經文化會', 'R', '10150'], ['雨揚老師實體活動廣宣＿大藏經法會', 'R', '10150'],
+  ...['公標案_中油80週年行銷推廣案', '公標案_中油80週年_行動商城', '公標案_中油80週年_來速咖啡', '公標案_中油80週年_洗可麗洗沐']
+    .map((k) => [k, 'R', '10191'] as const),
+  ['MiaCbon米其林指定生鮮夥伴_新聞稿專案', 'R', '10210'],
+  ['桂格養氣人蔘導網路溫度計廣編', 'R', '9892'], ['桂格養氣人蔘導早安健康廣編', 'R', '9892'],
+  ...['中嘉-05月績效', '中嘉-05月~618績效'].flatMap((k) => [[k, 'R', '9330'], [k, 'D', '29026']] as const),
+  ['聯邦銀行newnewbank線上開戶', 'R', '9576'],
+  ['順天堂草本潤喉糖', 'R', '10178'],
+  ['伊甸基金會_兒童議題導流', 'R', '9471'],
+  ['中國信託銀行公益信託基金受益人遴選公告', 'R', '10164'],
+  ['綠色和平線上連署', 'D', '25419'],
+  ['Gogoro Last Call', 'D', '39406'],
+  ['維多利亞州旅遊局×澳遊客', 'R', '10095'],
+  ['黑松金高_粱芯金門高粱酒(舞)廣編導流', 'M', '878387'],
+  ['聯樂_鴻海科技日_12家新聞稿', 'D', '39377'], ['聯樂_鴻海科技日_12家新聞稿', 'M', '878497'],
+];
+/**
+ * 202605～08 沒填帳戶名、每檔廣告主名稱都不同的品牌：IO 名稱 → 9 月起同經銷商月表用的帳戶名，照一般規則比對；source 記 `manual`。
+ */
+export const MANUAL_LABELS: readonly (readonly [ioName: string, label: string])[] = [
+  ...['漢堡王蔬菜犇牛堡', '漢堡王母親節雙人套餐', '漢堡王報稅季福音', '漢堡王_濃郁黑胡椒醬漢堡新品', '漢堡王_無澱粉慶端午',
+    '漢堡王_世足派對', '漢堡王_暑遊餐', '漢堡王_芒果堡'].map((k) => [k, '4A_一帆_漢堡王'] as const),
+  ...['Disney+_雨霖鈴', 'Disney+_莫離', 'Disney+百花殺', 'Disney+御廷謠'].map((k) => [k, '4A_實力_Disney'] as const),
+  ...['國泰航空台北旅展SP', '國泰航空_香港日本地區夏日機票優惠', '國泰航空_J+W 混合艙'].map((k) => [k, '4A_實力_國泰航空'] as const),
+];
+const MANUAL_LABEL_BY_NAME = new Map<string, string[]>();
+for (const [k, label] of MANUAL_LABELS) pushTo(MANUAL_LABEL_BY_NAME, normName(k), label);
+const MANUAL_BY_KEY = new Map<string, { platform: string; accountId: string }[]>();
+for (const [k, platform, accountId] of MANUAL_ASSIGNMENTS) pushTo(MANUAL_BY_KEY, normName(k), { platform, accountId });
+
+/**
+ * 同一客戶的多個 client 名稱挑一個（有 `preferred` 就只在裡面挑）：①被最多其他名稱包含的（`三得利` ⊂ `三得利TADAS正貨`）②都沒有就取共同前綴（≥2 字，
+ * `哈根達斯72%…`／`哈根達斯_26家…` → `哈根達斯`）③最短的，同長取出現最多次的。
+ */
+export function pickClientName(names: string[], preferred: string[] = []): string {
+  if (preferred.length) names = preferred;
+  const uniq = [...new Set(names)];
+  if (uniq.length === 1) return uniq[0];
+  const count = (n: string) => names.filter((x) => x === n).length;
+  const contained = (n: string) => uniq.filter((m) => m !== n && normName(m).includes(normName(n))).length;
+  const best = Math.max(...uniq.map(contained));
+  if (best > 0) return uniq.filter((n) => contained(n) === best).sort((a, b) => a.length - b.length || count(b) - count(a))[0];
+  const nf = uniq.map((n) => n.normalize('NFKC'));
+  let pre = nf[0];
+  for (const n of nf) while (!n.startsWith(pre)) pre = pre.slice(0, -1);
+  pre = pre.replace(/[\s_＿\-]+$/, '');
+  if (normName(pre).length >= 2) return pre;
+  return uniq.sort((a, b) => a.length - b.length || count(b) - count(a))[0];
+}
 
 export function buildSeed(input: SeedInput): Seed {
   const accounts = input.accounts.filter((a) => validAccountId(a.accountId));
@@ -171,15 +246,21 @@ export function buildSeed(input: SeedInput): Seed {
     if (cur) cur.plannedBudget += amount;
     else allocMap.set(k, { ioKey, platform, month, plannedBudget: amount, source, note });
   };
+  const columnAllocs = (ioKey: string, r: DeliverRow) => {
+    for (const p of ['D', 'R', 'M', 'P'] as const) {
+      const v = r.plat[p];
+      // P 欄是剩餘公式（總預算−D−R−M），可能是負數：只收 >0
+      if (v !== undefined && v > 0) addAlloc(ioKey, p, tabMonth(r.tab), v, 'deliver', p === 'P' ? 'P 為月表剩餘公式' : '');
+    }
+  };
+  // 純 Video 列等歸屬算完再拆：IO 掛得到 D1 帳戶才記 D1（見下方「D1 預算」）
+  const videoRows: { ioKey: string; r: DeliverRow }[] = [];
   const deliverAllocs = (ioKey: string, r: DeliverRow) => {
     const m = tabMonth(r.tab), b = r.budget ?? 0;
     if (/meta/i.test(r.format)) { if (b > 0) addAlloc(ioKey, 'META', m, b, 'deliver'); return; }
     if (r.format.includes('新聞稿')) { if (b > 0) addAlloc(ioKey, 'PR', m, b, 'deliver'); return; }
-    for (const p of ['D', 'R', 'M', 'P'] as const) {
-      const v = r.plat[p];
-      // P 欄是剩餘公式（總預算−D−R−M），可能是負數：只收 >0
-      if (v !== undefined && v > 0) addAlloc(ioKey, p, m, v, 'deliver', p === 'P' ? 'P 為月表剩餘公式' : '');
-    }
+    if (/^video$/i.test(r.format.trim())) { videoRows.push({ ioKey, r }); return; }
+    columnAllocs(ioKey, r);
   };
 
   // 每張 IO 用到的月表廣告形式（Native／Video／Native+Video／Meta／新聞稿…；空白不記），歸屬規則要用
@@ -252,6 +333,86 @@ export function buildSeed(input: SeedInput): Seed {
     if (month) addAlloc(p.ioKey, platform, month, p.adAmount, 'finance');
   }
 
+  // ---------- 月表沒填帳戶名的 IO：沿用同經銷商、同廣告主其他月份的帳戶名（202605～08 多半沒填）----------
+  // 廣告主正規化後相同優先；沒有才用互相包含（短的一方 ≥4 字，例：`默沙東HPV` ↔ `默沙東HPV人類乳突病毒疫苗宣導`）。
+  const inherited = new Map<string, string[]>();
+  const labelled = [...ios.values()].filter((y) => y.source === 'deliver' && y.labels.length);
+  for (const x of ios.values()) {
+    if (x.source !== 'deliver' || x.labels.length) continue;
+    const n = normName(x.name);
+    const peers = labelled.filter((y) => y.agencyName === x.agencyName);
+    let donors = peers.filter((y) => normName(y.name) === n);
+    if (!donors.length) {
+      donors = peers.filter((y) => {
+        const m = normName(y.name);
+        const [short, long] = m.length <= n.length ? [m, n] : [n, m];
+        return short.length >= 4 && long.includes(short);
+      });
+    }
+    const labels = [...new Set(donors.flatMap((y) => y.labels))];
+    if (labels.length) inherited.set(x.key, labels);
+  }
+
+  // ---------- 歸屬規則：每個帳戶名三級比對，命中的帳戶各寫一條帳戶層規則 ----------
+  const assignments: SeedAssignment[] = [];
+  const seenA = new Set<string>();
+  const unmatched = new Set<string>();
+  const owned = new Set([...ios.values()].flatMap((x) => x.labels.flatMap((l) => exactMatches(l, accounts).map(accountKey))));
+  const assign = (x: SeedIo, a: { platform: string; accountId: string }, source: string) => {
+    const k = `${x.key}|${a.platform}|${a.accountId}`;
+    if (seenA.has(k)) return;
+    seenA.add(k);
+    assignments.push({ ioKey: x.key, platform: a.platform, accountId: a.accountId, source });
+  };
+  for (const x of ios.values()) {
+    // D1 在倉庫裡只有影音：月表有寫廣告形式、卻沒有任何一列含 Video 的 IO 不掛 D1 帳戶
+    //（例：`直客_MundoPixar Experience` 圖文 IO 去前綴後跟影音帳戶 `CPM_MundoPixarExperience` 同名）。
+    // 反過來不成立——月表 Video 列有的根本不在 D1 跑（台北數位_安達人壽 9～10 月倉庫沒有對得上的 D1 帳戶），所以影音 IO 不限平台。
+    const fmts = formats.get(x.key);
+    const noVideo = !!fmts && ![...fmts].some((f) => /video/i.test(f));
+    const match = (l: string) => matchAccounts(l, accounts, owned).filter((a) => !(noVideo && a.platform === 'D1'));
+    for (const l of x.labels) {
+      const hits = match(l);
+      if (!hits.length) { unmatched.add(l); continue; }
+      for (const a of hits) assign(x, a, x.source);
+    }
+    for (const l of inherited.get(x.key) ?? []) for (const a of match(l)) assign(x, a, 'inferred');
+    for (const l of MANUAL_LABEL_BY_NAME.get(normName(x.name)) ?? []) for (const a of match(l)) assign(x, a, 'manual');
+    const keys = new Set([x.name, ...x.labels, ...(inherited.get(x.key) ?? [])].map(normName));
+    for (const k of keys) for (const a of MANUAL_BY_KEY.get(k) ?? []) assign(x, a, 'manual');
+  }
+
+  // ---------- client：共用平台帳戶的 IO 是同一個客戶（月表沒填帳戶名的 IO 拿廣告主當 client、公司名與品牌名並存）----------
+  // 例：`漢堡王_芒果堡`／`漢堡王_暑遊餐`…→ `漢堡王`；`仁壽藥業`（財務公司名）＋`仙桃牌`（月表品牌）→ `仙桃牌`。名稱挑法見 pickClientName。
+  const root = new Map<string, string>(); // ioKey → 代表 ioKey（union-find）
+  const find = (k: string): string => {
+    const p = root.get(k) ?? k;
+    if (p === k) return k;
+    const r = find(p);
+    root.set(k, r);
+    return r;
+  };
+  const firstIoOfAccount = new Map<string, string>();
+  for (const a of assignments) {
+    const k = `${a.platform}|${a.accountId}`, prev = firstIoOfAccount.get(k);
+    if (!prev) firstIoOfAccount.set(k, a.ioKey);
+    else if (find(prev) !== find(a.ioKey)) root.set(find(a.ioKey), find(prev));
+  }
+  // 優先挑帳戶名拆得出品牌的（`4A_博崍_美琪生技` → 美琪生技，不挑廣告主 `美琪_彎彎 pH5.5…`）；
+  // 財務的公司名不優先，跟其他名稱一起比（`貸霸` ⊂ `貸霸資訊` → 貸霸）
+  const namesByRoot = new Map<string, string[]>(), preferredByRoot = new Map<string, string[]>();
+  for (const x of ios.values()) {
+    if (!x.clientName) continue;
+    pushTo(namesByRoot, find(x.key), x.clientName);
+    if (x.labels.some((l) => brandFromLabel(l))) pushTo(preferredByRoot, find(x.key), x.clientName);
+  }
+  const originalClient = new Map<string, string>();
+  for (const x of ios.values()) {
+    if (!x.clientName) continue;
+    originalClient.set(x.key, x.clientName);
+    x.clientName = pickClientName(namesByRoot.get(find(x.key))!, preferredByRoot.get(find(x.key)));
+  }
+
   // ---------- client：同品牌不同寫法（正規化後相同）併成一個，原始寫法都進別名 ----------
   const clients = new Map<string, SeedClient>();
   for (const x of ios.values()) {
@@ -260,6 +421,7 @@ export function buildSeed(input: SeedInput): Seed {
     if (!clients.has(k)) clients.set(k, { name: x.clientName, source: x.source, sourceRef: x.sourceRef });
     x.clientName = clients.get(k)!.name;
     addAlias('client', x.clientName, x.clientName);
+    addAlias('client', originalClient.get(x.key)!, x.clientName); // 併進來之前的名稱
     for (const l of x.labels) addAlias('client', l, x.clientName);
     if (x.source === 'deliver') addAlias('client', x.name, x.clientName); // 月表廣告主
     if (x.source === 'finance' && x.billingPartyName && !FINANCE_AGENCY[normName(x.billingPartyName)]) {
@@ -267,26 +429,18 @@ export function buildSeed(input: SeedInput): Seed {
     }
   }
 
-  // ---------- 歸屬規則：每個帳戶名三級比對，命中的帳戶各寫一條帳戶層規則 ----------
-  const assignments: SeedAssignment[] = [];
-  const seenA = new Set<string>();
-  const unmatched = new Set<string>();
-  for (const x of ios.values()) {
-    // D1 在倉庫裡只有影音：月表有寫廣告形式、卻沒有任何一列含 Video 的 IO 不掛 D1 帳戶
-    //（例：`直客_MundoPixar Experience` 圖文 IO 去前綴後跟影音帳戶 `CPM_MundoPixarExperience` 同名）。
-    // 反過來不成立——月表 Video 列有的根本不在 D1 跑（台北數位_安達人壽 9～10 月倉庫沒有對得上的 D1 帳戶），所以影音 IO 不限平台。
-    const fmts = formats.get(x.key);
-    const noVideo = !!fmts && ![...fmts].some((f) => /video/i.test(f));
-    for (const l of x.labels) {
-      const hits = matchAccounts(l, accounts).filter((a) => !(noVideo && a.platform === 'D1'));
-      if (!hits.length) { unmatched.add(l); continue; }
-      for (const a of hits) {
-        const k = `${x.key}|${a.platform}|${a.accountId}`;
-        if (seenA.has(k)) continue;
-        seenA.add(k);
-        assignments.push({ ioKey: x.key, platform: a.platform, accountId: a.accountId, source: x.source });
-      }
+  // ---------- D1 預算：月表沒有 D1 欄，AM 把影音預算填在 D 欄或落進 P 剩餘公式 ----------
+  // 純 Video 列＋IO 掛得到 D1 帳戶 ⇒ 該列預算扣掉 R、M 欄記 D1（D、P 欄不收）；掛不到 D1（台北數位_安達人壽 只投 P）照欄位記。
+  // Native+Video 列看不出影音占多少，照欄位記。
+  const d1Ios = new Set(assignments.filter((a) => a.platform === 'D1').map((a) => a.ioKey));
+  for (const { ioKey, r } of videoRows) {
+    if (!d1Ios.has(ioKey)) { columnAllocs(ioKey, r); continue; }
+    let rest = r.budget ?? 0;
+    for (const p of ['R', 'M'] as const) {
+      const v = r.plat[p];
+      if (v !== undefined && v > 0) { addAlloc(ioKey, p, tabMonth(r.tab), v, 'deliver'); rest -= v; }
     }
+    if (rest > 0) addAlloc(ioKey, 'D1', tabMonth(r.tab), rest, 'deliver', 'D1 由月表 Video 列推定（月表沒有 D1 欄）');
   }
 
   return {

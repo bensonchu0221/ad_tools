@@ -18,33 +18,59 @@ export function validAccountId(id: string): boolean {
 const LEAD_ID = /^\d+_/;
 const PREFIX = /^(?:直客|台客|4A|經銷商|CPM|D1)_/i;
 
-/** 去掉前綴（可能疊好幾層，例：`4A_直客_富蘭克林`）再正規化；只剩前綴時回空字串。 */
-export function coreName(s: string): string {
+/** 去掉 id 前綴與命名前綴（可能疊好幾層，例：`4A_直客_富蘭克林`），回未正規化的字串。 */
+function stripPrefix(s: string): string {
   let t = String(s ?? '').normalize('NFKC').trim().replace(LEAD_ID, '');
   for (let prev = ''; prev !== t; ) {
     prev = t;
     t = t.replace(PREFIX, '');
   }
-  return normName(t);
+  return t;
 }
 
-/**
- * 帳戶名三級比對：①正規化後完全相同 ②去前綴後相同 ③互相包含（短的一方 ≥3 字）。
- * ①②命中的一起收（月表 `4A_艾比傑_美商默沙東` 要同時對到 R 同名帳戶與 D `34196_4A_…`）；
- * ③只在①②都沒有時才用，免得 `…美商默沙東` 也吃到 `…美商默沙東_PCV`。
- */
-export function matchAccounts(label: string, accounts: Account[]): Account[] {
+/** 去掉前綴再正規化；只剩前綴時回空字串。 */
+export function coreName(s: string): string {
+  return normName(stripPrefix(s));
+}
+
+/** 去前綴後的第一段（以底線、連字號、括號、空白切開）：`上辰-子申0026-D` → `上辰`、`nicky(共好_安達人壽)` → `nicky`。 */
+function headSegment(s: string): string {
+  return normName(stripPrefix(s).split(/[_＿\-()（）\s]+/).find(Boolean) ?? '');
+}
+
+/** 第 1、2 級：正規化後完全相同，或去前綴後相同。 */
+export function exactMatches(label: string, accounts: Account[]): Account[] {
   const n = normName(label), c = coreName(label);
   if (!n) return [];
-  const same = accounts.filter((a) => normName(a.name) === n || (c !== '' && coreName(a.name) === c));
-  if (same.length) return same;
-  if (!c) return [];
-  return accounts.filter((a) => {
+  return accounts.filter((a) => normName(a.name) === n || (c !== '' && coreName(a.name) === c));
+}
+
+export const accountKey = (a: Account) => `${a.platform}|${a.accountId}`;
+
+/**
+ * 帳戶名三級比對：①正規化後完全相同 ②去前綴後相同 ③互相包含（短的一方 ≥3 字），或帳戶名第一段＝這個帳戶名。
+ * ①②命中的一起收（月表 `4A_艾比傑_美商默沙東` 要同時對到 R 同名帳戶與 D `34196_4A_…`）；
+ * ③只用在①②沒命中的平台，免得 `…美商默沙東` 也吃到同平台的 `…美商默沙東_PCV`；
+ * 但別的平台照樣找（`新素簡` 在 M 有同名帳戶，D 的 `新素簡_瘦身_72` 也要收）。
+ * 第一段相等不設字數下限：陸客帳戶 `上辰-子申0026-D` 對月表 `上辰`（2 字，互相包含的門檻搆不到）。
+ * `owned`＝被某個帳戶名①②對到的帳戶：這個帳戶名自己在別的平台有①②命中時，比它短（被包含）的 owned 帳戶不收，
+ * 免得 `4A_艾比傑_美商默沙東_PCV`（R 有同名）吃到 HPV 的 D `34196_4A_艾比傑_美商默沙東`；帳戶名較長（更細的子帳戶）照收。
+ * 完全沒有①②命中的帳戶名維持原本的③（`長庚大學_EMBA招生` 照樣對到 `長庚大學`）。
+ */
+export function matchAccounts(label: string, accounts: Account[], owned?: Set<string>): Account[] {
+  const same = exactMatches(label, accounts);
+  const c = coreName(label);
+  if (!c) return same;
+  const hitPlatforms = new Set(same.map((a) => a.platform));
+  const loose = accounts.filter((a) => {
+    if (hitPlatforms.has(a.platform)) return false;
     const b = coreName(a.name);
     if (!b) return false;
-    const [short, long] = b.length <= c.length ? [b, c] : [c, b];
-    return short.length >= 3 && long.includes(short);
+    if (c.length >= 2 && headSegment(a.name) === c) return true;
+    if (b.length > c.length) return c.length >= 3 && b.includes(c);
+    return b.length >= 3 && c.includes(b) && !(same.length && owned?.has(accountKey(a)));
   });
+  return [...same, ...loose];
 }
 
 /** 公司名 → 品牌核心：去括號註記、「股份有限公司／有限公司／商行／商號」及其後的分公司字樣、結尾的診所。 */
