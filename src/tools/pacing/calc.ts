@@ -22,7 +22,7 @@ export interface BhConfig {
   owner: string; // owner_email＝負責 AM
 }
 
-export interface SpendRow { platform: Platform; accountId: string; dt: string; spend: number }
+export interface SpendRow { platform: Platform; accountId: string; dt: string; spend: number; click: number }
 /** nexus_jobs 成功 job 的最大迄日：D／M 一帳一 job（accountId＝帳戶），R／P／D1 整平台一個 job（accountId＝'*'）。 */
 export interface JobThrough { platform: Platform; accountId: string; ed: string }
 
@@ -87,6 +87,8 @@ export interface Pace {
   projectedPct: number | null;
   needDaily: number | null; // 每日應花＝(預算−已花)÷剩餘天數；超支時為負
   postEndSpend: number; // 走期結束後還花掉的錢
+  clicks: number; // 走期內、到資料日為止（跟 spent 同一段）
+  cpc: number | null; // spent ÷ clicks；合計列的 spent 是客戶價（D1 已 ÷0.6）。沒點擊為 null
   dataThrough: string;
 }
 
@@ -116,11 +118,16 @@ function judge(x: LevelInput): { level: Level; reasons: Reason[] } {
   return { level, reasons };
 }
 
+const cpcOf = (spent: number, clicks: number) => (clicks > 0 ? spent / clicks : null);
+
 /**
  * 單一 BH 設定的走速。`dataThrough`＝這個平台倉庫資料的最後一天（通常是昨天；批次還沒跑完時是前天），
  * 剩餘天數從它的隔天起算——還沒有數字的日子都算「剩下的」，不會被當成 0 花費。
+ * `dailyClicks`＝逐日點擊，只拿來算 CPC（跟已花同一段日期），不影響燈號。
  */
-export function paceOf(c: BhConfig, daily: Map<string, number> | undefined, dataThrough: string): Pace {
+export function paceOf(
+  c: BhConfig, daily: Map<string, number> | undefined, dataThrough: string, dailyClicks?: Map<string, number>
+): Pace {
   const d = daily ?? new Map<string, number>();
   const total = dayDiff(c.start, c.end) + 1;
   const phase: Phase = dataThrough < c.start ? 'upcoming' : dataThrough >= c.end ? 'ended' : 'live';
@@ -133,6 +140,8 @@ export function paceOf(c: BhConfig, daily: Map<string, number> | undefined, data
     if (dt >= c.start && dt <= last) spent += v;
     else if (dt > c.end && dt <= dataThrough) postEndSpend += v;
   }
+  let clicks = 0;
+  for (const [dt, v] of dailyClicks ?? []) if (dt >= c.start && dt <= last) clicks += v;
   const remaining = Math.max(0, dayDiff(maxStr(dataThrough, addDays(c.start, -1)), c.end));
 
   let avgDaily: number | null = null;
@@ -146,7 +155,10 @@ export function paceOf(c: BhConfig, daily: Map<string, number> | undefined, data
   const projectedPct = projected !== null && c.budget > 0 ? projected / c.budget : null;
   const needDaily = remaining > 0 ? (c.budget - spent) / remaining : null;
   const { level, reasons } = judge({ phase, elapsed, budget: c.budget, spent, projectedPct, postEndSpend });
-  return { phase, level, reasons, budget: c.budget, spent, elapsed, total, remaining, avgDaily, projected, projectedPct, needDaily, postEndSpend, dataThrough };
+  return {
+    phase, level, reasons, budget: c.budget, spent, elapsed, total, remaining, avgDaily, projected, projectedPct, needDaily, postEndSpend,
+    clicks, cpc: cpcOf(spent, clicks), dataThrough,
+  };
 }
 
 // ---------- 分組 ----------
@@ -202,12 +214,13 @@ export const toClient = (p: Platform) => (p === 'D1' ? 1 / D1_RATE : 1);
 
 /** 合計列：看整個預算的總額（平台拆分只是參考，單一平台落後不會讓合計變紅）。 */
 export function groupPace(children: { cfg: BhConfig; pace: Pace }[]): Pace {
-  let budget = 0, spent = 0, projected = 0, postEndSpend = 0, avg = 0, hasAvg = false, remaining = 0;
+  let budget = 0, spent = 0, projected = 0, postEndSpend = 0, avg = 0, hasAvg = false, remaining = 0, clicks = 0;
   let start = children[0].cfg.start, end = children[0].cfg.end, dataThrough = children[0].pace.dataThrough;
   for (const { cfg, pace } of children) {
     const f = toClient(cfg.platform);
     budget += pace.budget * f;
     spent += pace.spent * f;
+    clicks += pace.clicks; // 點擊不用換算：總 CPC＝客戶價總花費 ÷ 總點擊
     postEndSpend += pace.postEndSpend * f;
     // 還沒開始的平台先假設會照預算花完（只有手動合併、走期不同時才會出現）
     projected += (pace.phase === 'upcoming' ? pace.budget : pace.projected ?? pace.spent) * f;
@@ -227,7 +240,7 @@ export function groupPace(children: { cfg: BhConfig; pace: Pace }[]): Pace {
   return {
     phase, level, reasons, budget, spent, elapsed, total, remaining, avgDaily: hasAvg ? avg : null,
     projected: phase === 'upcoming' ? null : projected, projectedPct: phase === 'upcoming' ? null : projectedPct,
-    needDaily, postEndSpend, dataThrough,
+    needDaily, postEndSpend, clicks, cpc: cpcOf(spent, clicks), dataThrough,
   };
 }
 
@@ -346,12 +359,17 @@ export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, st
   const yesterday = addDays(inp.today, -1);
   const { platform: dataThrough, account: accountThrough } = dataDates(inp.through, yesterday);
   const idx = new Map<string, Map<string, number>>();
+  const clickIdx = new Map<string, Map<string, number>>();
+  const add = (into: Map<string, Map<string, number>>, k: string, dt: string, v: number) => {
+    const m = into.get(k) ?? new Map<string, number>();
+    m.set(dt, (m.get(dt) ?? 0) + v);
+    into.set(k, m);
+  };
   for (const r of inp.spend) {
     if (r.dt > yesterday) continue;
     const k = `${r.platform}|${r.accountId}`;
-    const m = idx.get(k) ?? new Map<string, number>();
-    m.set(r.dt, (m.get(r.dt) ?? 0) + r.spend);
-    idx.set(k, m);
+    add(idx, k, r.dt, r.spend);
+    add(clickIdx, k, r.dt, r.click || 0);
   }
 
   const issues = configIssues(inp.configs, inp.known);
@@ -363,7 +381,7 @@ export function assemble(inp: AssembleInput): { dataThrough: Record<Platform, st
     if (end < keepFrom) { hiddenCount++; continue; }
     const children = g.configs.map((c) => {
       const k = `${c.platform}|${c.accountId}`;
-      return { cfg: c, pace: paceOf(c, idx.get(k), accountThrough.get(k) ?? dataThrough[c.platform]), issues: issues.get(c.id) ?? [] };
+      return { cfg: c, pace: paceOf(c, idx.get(k), accountThrough.get(k) ?? dataThrough[c.platform], clickIdx.get(k)), issues: issues.get(c.id) ?? [] };
     });
     // 列名＝（換成客戶價後）預算最大的那筆設定的名字
     const lead = [...g.configs].sort((a, b) => b.budget * toClient(b.platform) - a.budget * toClient(a.platform) || a.id - b.id)[0];

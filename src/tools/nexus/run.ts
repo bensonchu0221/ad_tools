@@ -341,6 +341,8 @@ const SPEND_OF: Record<NexusPlatform, (r: Row) => number> = { D: col('charge'), 
 const CLICK_OF: Record<NexusPlatform, (r: Row) => number> = {
   D: col('click'), R: col('click'), M: col('click'), P: col('clicks'), D1: (r) => col('mobile_video_link')(r) + col('pc_video_link')(r),
 };
+/** 覆蓋紀錄的點擊（走速算 CPC）：D1 只算 mobile，跟覆蓋紀錄的 D1 曝光／花費同口徑。 */
+const COV_CLICK_OF: Record<NexusPlatform, (r: Row) => number> = { ...CLICK_OF, D1: col('mobile_video_link') };
 
 /** 事實列 → 每帳戶每天一筆覆蓋紀錄。純函式。 */
 export function coverageEntries(platform: NexusPlatform, facts: Row[]): NexusCoverageEntry[] {
@@ -349,11 +351,12 @@ export function coverageEntries(platform: NexusPlatform, facts: Row[]): NexusCov
     const key = `${r.account_id}|${r.date}`;
     let e = acc.get(key);
     if (!e) {
-      e = { accountId: String(r.account_id), accountName: String(r.account_name ?? ''), dt: String(r.date), factRows: 0, imp: 0, spend: 0 };
+      e = { accountId: String(r.account_id), accountName: String(r.account_name ?? ''), dt: String(r.date), factRows: 0, imp: 0, spend: 0, click: 0 };
       acc.set(key, e);
     }
     e.factRows += 1;
     e.imp += IMP_OF[platform](r);
+    e.click += COV_CLICK_OF[platform](r);
     e.spend = Math.round((e.spend + SPEND_OF[platform](r)) * 10000) / 10000;
   }
   return [...acc.values()];

@@ -356,10 +356,10 @@ await ok('帳戶 ID 格式：D/R 純數字、M 可帶 client:、P 為 xxx-xxx-xx
   assertRowsInSlice([{ date: '2026-10-04', account_id: '9' }], '2026-10-04', '2026-10-05', null, 'R 事實表', 'R');
 });
 
-await ok('覆蓋紀錄：每帳戶每天一筆、曝光與花費依平台欄名加總', () => {
+await ok('覆蓋紀錄：每帳戶每天一筆、曝光、花費與點擊依平台欄名加總', () => {
   const e = coverageEntries('R', [
-    { account_id: '1', account_name: 'a', date: '2026-09-22', impression: 10, payment_revenue: 0.1 },
-    { account_id: '1', account_name: 'a', date: '2026-09-22', impression: 5, payment_revenue: 0.2 },
+    { account_id: '1', account_name: 'a', date: '2026-09-22', impression: 10, payment_revenue: 0.1, click: 3 },
+    { account_id: '1', account_name: 'a', date: '2026-09-22', impression: 5, payment_revenue: 0.2, click: 4 },
     { account_id: '2', account_name: 'b', date: '2026-09-22', impression: 1, payment_revenue: 1 },
   ]);
   assert.equal(e.length, 2);
@@ -367,6 +367,10 @@ await ok('覆蓋紀錄：每帳戶每天一筆、曝光與花費依平台欄名�
   assert.equal(a.factRows, 2);
   assert.equal(a.imp, 15);
   assert.equal(a.spend, 0.3);
+  assert.equal(a.click, 7);
+  assert.equal(e.find((x) => x.accountId === '2')!.click, 0); // 沒有點擊欄＝0，不是 NaN
+  // P 的點擊欄叫 clicks
+  assert.equal(coverageEntries('P', [{ account_id: '1', date: '2026-09-22', clicks: 9 }])[0].click, 9);
 });
 
 function fakeDeps(o: { facts?: any[]; device?: any[]; prev?: number }) {
@@ -1399,7 +1403,9 @@ await ok('D1 job：起日過舊 → 不打 API、直接 NexusNoRetryError', asyn
 await ok('D1 job：整平台寫入（accountId null）、覆蓋紀錄只算 mobile 收費曝光與 D1 金額', async () => {
   const { rows } = toD1Rows(d1Camp, d1Ad, { '20260921': d1Day() }, T);
   const cov = coverageEntries('D1', rows);
-  assert.deepEqual(cov, [{ accountId: '4A_CPM_juliat', accountName: '4A_CPM_juliat', dt: '2026-09-21', factRows: 1, imp: 1449, spend: 104.328 }]);
+  assert.deepEqual(cov, [{ accountId: '4A_CPM_juliat', accountName: '4A_CPM_juliat', dt: '2026-09-21', factRows: 1, imp: 1449, spend: 104.328, click: 1 }]);
+  // 點擊只算 mobile（pc 的點擊不算，跟曝光／花費同口徑）
+  assert.equal(coverageEntries('D1', rows.map((r) => ({ ...r, pc_video_link: 5 })))[0].click, 1);
   const { deps, calls } = fakeDeps({ facts: rows });
   deps.today = '2026-10-21';
   await runNexusJob({ platform: 'D1', accountId: '*', accountName: 'D1 影音全平台', sd: '2026-09-21', ed: '2026-09-22' }, () => {}, deps);

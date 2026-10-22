@@ -242,7 +242,7 @@ await ok('組裝：各平台資料日、只顯示進行中／未開始／7 天�
   ];
   const spend: SpendRow[] = [];
   const put = (platform: SpendRow['platform'], accountId: string, sd: string, cnt: number, v: number) => {
-    for (let i = 0; i < cnt; i++) spend.push({ platform, accountId, dt: addDays(sd, i), spend: v });
+    for (let i = 0; i < cnt; i++) spend.push({ platform, accountId, dt: addDays(sd, i), spend: v, click: 0 });
   };
   put('D', '201', '2026-09-01', 29, 1000);
   put('D', '201', '2026-09-30', 1, 5000); // 今天的未完整數字：不能算、也不能把資料日推到今天
@@ -290,7 +290,7 @@ await ok('資料日看成功 job 迄日：平台取最大、不超過昨天；D�
 await ok('D1 沒投放的日子覆蓋紀錄沒有列：資料日照 job 迄日，近 7 天的 0 要算進平均', () => {
   const c = cfg({ platform: 'D1', accountId: 'CPM_x', accountName: 'K', budget: 3000, start: '2026-09-01', end: '2026-09-30' });
   const spend: SpendRow[] = [];
-  for (let i = 0; i < 20; i++) spend.push({ platform: 'D1', accountId: 'CPM_x', dt: addDays('2026-09-01', i), spend: 100 }); // 9/21 起停投
+  for (let i = 0; i < 20; i++) spend.push({ platform: 'D1', accountId: 'CPM_x', dt: addDays('2026-09-01', i), spend: 100, click: 0 }); // 9/21 起停投
   const out = assemble({
     today: '2026-09-30', configs: [c], spend, merges: [], known: new Set(), through: [{ platform: 'D1', accountId: '*', ed: '2026-09-29' }],
   });
@@ -306,7 +306,7 @@ await ok('D1 沒投放的日子覆蓋紀錄沒有列：資料日照 job 迄日�
 await ok('D 帳戶自己的 job 落後：那個帳戶的資料日用自己的，還沒抓的日子算剩餘、不當 0 花費', () => {
   const a = cfg({ platform: 'D', accountId: '401', accountName: 'L', budget: 30000, start: '2026-09-01', end: '2026-09-30' });
   const spend: SpendRow[] = [];
-  for (let i = 0; i < 27; i++) spend.push({ platform: 'D', accountId: '401', dt: addDays('2026-09-01', i), spend: 1000 });
+  for (let i = 0; i < 27; i++) spend.push({ platform: 'D', accountId: '401', dt: addDays('2026-09-01', i), spend: 1000, click: 0 });
   const out = assemble({
     today: '2026-09-30', configs: [a], spend, merges: [], known: new Set(['D|401']),
     through: [{ platform: 'D', accountId: '401', ed: '2026-09-27' }, { platform: 'D', accountId: '402', ed: '2026-09-29' }],
@@ -318,6 +318,39 @@ await ok('D 帳戶自己的 job 落後：那個帳戶的資料日用自己的，
   near(g.children[0].pace.projected, 30000);
   assert.equal(g.pace.dataThrough, '2026-09-27');
   assert.equal(g.pace.level, 'green');
+});
+
+await ok('CPC：只算走期內到資料日的花費與點擊；合計列＝客戶價總花費 ÷ 總點擊（D1 先 ÷0.6）；沒點擊為 null', () => {
+  const d = cfg({ platform: 'D', accountId: '601', accountName: 'Q', budget: 30000, start: '2026-09-10', end: '2026-10-09' });
+  const v = cfg({ platform: 'D1', accountId: 'CPM_q', accountName: 'Q', budget: 6000, start: '2026-09-10', end: '2026-10-09' });
+  const r = cfg({ platform: 'R', accountId: '602', accountName: 'Q', budget: 9000, start: '2026-09-10', end: '2026-10-09' });
+  const spend: SpendRow[] = [];
+  // D：走期前 9/9 的花費與點擊不算；9/10~9/19 每天 1,000 元 100 點擊；今天 9/30 的不算
+  spend.push({ platform: 'D', accountId: '601', dt: '2026-09-09', spend: 5000, click: 999 });
+  for (let i = 0; i < 10; i++) spend.push({ platform: 'D', accountId: '601', dt: addDays('2026-09-10', i), spend: 1000, click: 100 });
+  spend.push({ platform: 'D', accountId: '601', dt: '2026-09-30', spend: 7000, click: 777 });
+  // D1：D1 金額 600、點擊 10（子列 CPC 60＝D1 金額口徑；合計換客戶價 1,000）
+  spend.push({ platform: 'D1', accountId: 'CPM_q', dt: '2026-09-15', spend: 600, click: 10 });
+  // R：有花費、沒點擊
+  spend.push({ platform: 'R', accountId: '602', dt: '2026-09-15', spend: 500, click: 0 });
+  const out = assemble({
+    today: '2026-09-30', configs: [d, v, r], spend, merges: [], known: new Set(['D|601', 'R|602']),
+    through: [{ platform: 'D', accountId: '601', ed: '2026-09-29' }, { platform: 'D1', accountId: '*', ed: '2026-09-29' }, { platform: 'R', accountId: '*', ed: '2026-09-29' }],
+  });
+  const g = out.groups[0];
+  const kid = (p: string) => g.children.find((k) => k.cfg.platform === p)!.pace;
+  assert.equal(kid('D').clicks, 1000);
+  near(kid('D').cpc, 10);
+  assert.equal(kid('D1').clicks, 10);
+  near(kid('D1').cpc, 60);
+  assert.equal(kid('R').clicks, 0);
+  assert.equal(kid('R').cpc, null);
+  assert.equal(g.pace.clicks, 1010);
+  near(g.pace.cpc, (10000 + 600 / D1_RATE + 500) / 1010);
+  // 未開始：沒有點擊、CPC null
+  const up = paceOf(cfg({ platform: 'D', budget: 1000, start: '2026-10-05', end: '2026-10-10' }), new Map(), '2026-09-29', new Map([['2026-09-20', 50]]));
+  assert.equal(up.clicks, 0);
+  assert.equal(up.cpc, null);
 });
 
 await ok('BH 的 V 讀進來換成 D1，其他平台代號不變', () => {

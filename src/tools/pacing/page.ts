@@ -22,7 +22,7 @@ const STYLE = `
     border-left:3px solid var(--accent);border-radius:5px;padding:8px 12px;margin-bottom:10px}
   .mergebar.hidden{display:none}
   .scroll{overflow-x:auto;background:var(--slot);border:1px solid var(--line);border-radius:6px}
-  table.pt{width:100%;border-collapse:collapse;font-size:13.5px;min-width:980px}
+  table.pt{width:100%;border-collapse:collapse;font-size:13.5px;min-width:1060px}
   .pt th{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--mut);text-align:left;padding:10px;
     border-bottom:1px solid var(--line);white-space:nowrap}
   .pt td{padding:11px 10px;border-bottom:1px solid var(--line2);vertical-align:middle}
@@ -149,6 +149,12 @@ const SCRIPT = `
     var sub=p.phase==='upcoming'? md(s)+' 開始' : p.phase==='ended'? '已結束' : '剩 '+p.remaining+' 天';
     return t+'<div class="sub2">'+sub+'</div>';
   }
+  // CPC＝已花 ÷ 點擊（走期內到資料日）；合計列是客戶價（D1 ÷0.6）÷ 各平台點擊加總
+  function cpc(p){
+    if(p.phase==='upcoming') return '—';
+    var c=p.cpc==null?'—':p.cpc.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    return c+'<div class="sub2">點擊 '+fmt(p.clicks)+'</div>';
+  }
   function need(p){
     if(p.needDaily==null) return '—';
     if(p.needDaily<0) return '<span style="color:var(--red)">已超支 '+fmt(-p.needDaily*p.remaining)+'</span>';
@@ -177,7 +183,7 @@ const SCRIPT = `
   }
 
   function renderTable(gs){
-    var h='<div class="scroll"><table class="pt"><thead><tr>'+(mergeMode?'<th></th>':'')+'<th></th><th>預算</th><th>狀態</th><th>走期</th><th class="ar">預算／已花</th><th title="灰軌＝預算、黑＝已花、直線＝時間進度、菱形＝預估結案">走速</th><th class="ar">預估結案</th><th class="ar">每日應花</th></tr></thead><tbody>';
+    var h='<div class="scroll"><table class="pt"><thead><tr>'+(mergeMode?'<th></th>':'')+'<th></th><th>預算</th><th>狀態</th><th>走期</th><th class="ar">預算／已花</th><th title="灰軌＝預算、黑＝已花、直線＝時間進度、菱形＝預估結案">走速</th><th class="ar">預估結案</th><th class="ar">每日應花</th><th class="ar" title="已花 ÷ 點擊（走期內、到資料日）。合計列用客戶價：D1 金額先 ÷0.6 再跟各平台加總">CPC</th></tr></thead><tbody>';
     gs.forEach(function(g){
       var p=g.pace, isOpen=!!open[g.key];
       h+='<tr class="grp'+(isOpen?' open':'')+'" data-k="'+esc(g.key)+'">';
@@ -185,7 +191,7 @@ const SCRIPT = `
       h+='<td style="width:26px"><button class="xbtn" aria-expanded="'+isOpen+'" aria-label="展開各平台"><span class="ch">▸</span></button></td>';
       h+='<td>'+headName(g)+'</td><td>'+chip(p)+'</td><td>'+flight(p,g.start,g.end)+'</td>';
       h+='<td class="ar">'+fmt(p.budget)+'<div class="sub2">'+fmt(p.spent)+'</div></td>';
-      h+='<td>'+bar(p)+'</td><td class="ar">'+pct(p.projectedPct)+'</td><td class="ar">'+need(p)+'</td></tr>';
+      h+='<td>'+bar(p)+'</td><td class="ar">'+pct(p.projectedPct)+'</td><td class="ar">'+need(p)+'</td><td class="ar">'+cpc(p)+'</td></tr>';
       if(isOpen){
         var nk=g.children.length, foot=g.mergeIds.length>0;
         g.children.forEach(function(k,i){
@@ -195,9 +201,9 @@ const SCRIPT = `
             +(f?'<div class="sub2">D1 影音：金額是客戶價 ×0.6，合計列已換回客戶價</div>':'')
             +(lag?'<div class="sub2">這個帳戶倉庫只寫到 '+md(kp.dataThrough)+'（批次還沒輪到或抓取失敗），之後的日子算在剩餘天數</div>':'')+issues(k)+'</td>';
           h+='<td>'+chip(kp)+'</td><td>'+flight(kp,c.start,c.end)+'</td><td class="ar">'+fmt(kp.budget)+'<div class="sub2">'+fmt(kp.spent)+'</div></td>';
-          h+='<td>'+bar(kp)+'</td><td class="ar">'+pct(kp.projectedPct)+'</td><td class="ar">'+need(kp)+'</td></tr>';
+          h+='<td>'+bar(kp)+'</td><td class="ar">'+pct(kp.projectedPct)+'</td><td class="ar">'+need(kp)+'</td><td class="ar">'+cpc(kp)+'</td></tr>';
         });
-        if(foot) h+='<tr class="kidfoot last"><td colspan="'+(mergeMode?9:8)+'">這列是手動合併的。<button class="btn-line" data-unmerge="'+esc(g.mergeIds.join(','))+'">拆開</button></td></tr>';
+        if(foot) h+='<tr class="kidfoot last"><td colspan="'+(mergeMode?10:9)+'">這列是手動合併的。<button class="btn-line" data-unmerge="'+esc(g.mergeIds.join(','))+'">拆開</button></td></tr>';
       }
     });
     return h+'</tbody></table></div>';

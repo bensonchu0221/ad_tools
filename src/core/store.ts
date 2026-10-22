@@ -2288,6 +2288,7 @@ async function nexusPool(): Promise<mysql.Pool> {
       fact_rows INT NOT NULL DEFAULT 0,
       imp BIGINT NOT NULL DEFAULT 0,
       spend DECIMAL(18,4) NOT NULL DEFAULT 0,
+      click BIGINT NOT NULL DEFAULT 0,
       synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (platform, account_id, dt),
       INDEX idx_dt (platform, dt)
@@ -2323,6 +2324,14 @@ async function nexusPool(): Promise<mysql.Pool> {
     await p.query(`ALTER TABLE nexus_recon
       ADD COLUMN cf_click BIGINT NULL, ADD COLUMN cf_interest BIGINT NULL, ADD COLUMN cf_decision BIGINT NULL, ADD COLUMN cf_buy BIGINT NULL,
       ADD COLUMN cd_click BIGINT NULL, ADD COLUMN cd_interest BIGINT NULL, ADD COLUMN cd_decision BIGINT NULL, ADD COLUMN cd_buy BIGINT NULL`);
+  }
+  // 2026-10-22 覆蓋紀錄加點擊（走速算 CPC 用）；之前寫的列由 poc/backfill_coverage_click.mts 從 BQ 事實表回填
+  const [kcol] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = 'nexus_coverage' AND column_name = 'click'`
+  );
+  if (!(((kcol as any[])[0]?.c ?? 0) > 0)) {
+    await p.query(`ALTER TABLE nexus_coverage ADD COLUMN click BIGINT NOT NULL DEFAULT 0 AFTER spend`);
   }
   // 2026-10-21 平台代號多了 D1（兩個字元）：CHAR(1) 在非嚴格模式會把 'D1' 靜默截成 'D'，混進 D 平台的 job／覆蓋紀錄，
   // 所以三張表都先放寬再說（MODIFY 會重建表，只在欄寬還不夠時才做）
@@ -2576,7 +2585,7 @@ export async function nexusSuccessRanges(
   return (rows as any[]).map((r) => ({ accountId: String(r.account_id), sd: String(r.sd), ed: String(r.ed) }));
 }
 
-export interface NexusCoverageEntry { accountId: string; accountName: string; dt: string; factRows: number; imp: number; spend: number }
+export interface NexusCoverageEntry { accountId: string; accountName: string; dt: string; factRows: number; imp: number; spend: number; click: number }
 
 /**
  * BQ 寫入成功後同步覆蓋紀錄：先清掉這段區間（該帳戶，或 accountId=null＝整個平台）再寫入這次的結果。
@@ -2596,8 +2605,8 @@ export async function replaceNexusCoverage(
     for (let i = 0; i < entries.length; i += 500) {
       const chunk = entries.slice(i, i + 500);
       await conn.query(
-        `INSERT INTO nexus_coverage (platform, account_id, dt, account_name, fact_rows, imp, spend) VALUES ${chunk.map(() => '(?,?,?,?,?,?,?)').join(',')}`,
-        chunk.flatMap((e) => [platform, e.accountId, e.dt, e.accountName.slice(0, 255), e.factRows, e.imp, e.spend])
+        `INSERT INTO nexus_coverage (platform, account_id, dt, account_name, fact_rows, imp, spend, click) VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?)').join(',')}`,
+        chunk.flatMap((e) => [platform, e.accountId, e.dt, e.accountName.slice(0, 255), e.factRows, e.imp, e.spend, e.click])
       );
     }
     await conn.commit();
@@ -2846,14 +2855,14 @@ export async function pacingBhConfigs(): Promise<PacingBhRow[]> {
   }));
 }
 
-/** 倉庫的帳戶×日花費（D/R/M/P/D1）：nexus 每日批次寫 BQ 時順手記在 nexus_coverage，不必查 BQ。D1 是 mobile 的 D1 金額原值。 */
-export async function pacingWarehouseSpend(sd: string, ed: string): Promise<{ platform: string; accountId: string; dt: string; spend: number }[]> {
-  const p = getPool();
-  if (!p) throw new Error('DB 未設定');
+/** 倉庫的帳戶×日花費與點擊（D/R/M/P/D1）：nexus 每日批次寫 BQ 時順手記在 nexus_coverage，不必查 BQ。D1 是 mobile 的 D1 金額原值與 mobile 點擊。 */
+export async function pacingWarehouseSpend(sd: string, ed: string): Promise<{ platform: string; accountId: string; dt: string; spend: number; click: number }[]> {
+  // 走 nexusPool：第一次讀時確保 click 欄已加上（還沒跑過 nexus 的新環境也不會查到不存在的欄位）
+  const p = await nexusPool();
   const [rows] = await p.query(
-    `SELECT platform, account_id, DATE_FORMAT(dt,'%Y-%m-%d') AS dt, spend FROM nexus_coverage WHERE dt BETWEEN ? AND ?`, [sd, ed]
+    `SELECT platform, account_id, DATE_FORMAT(dt,'%Y-%m-%d') AS dt, spend, click FROM nexus_coverage WHERE dt BETWEEN ? AND ?`, [sd, ed]
   );
-  return (rows as any[]).map((r) => ({ platform: r.platform, accountId: String(r.account_id), dt: r.dt, spend: Number(r.spend) }));
+  return (rows as any[]).map((r) => ({ platform: r.platform, accountId: String(r.account_id), dt: r.dt, spend: Number(r.spend), click: Number(r.click) }));
 }
 
 /**
