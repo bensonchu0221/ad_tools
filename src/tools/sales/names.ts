@@ -12,10 +12,11 @@ export function validAccountId(id: string): boolean {
   return s !== '' && !/^(nan|none|null|undefined)$/i.test(s);
 }
 
-// 帳戶命名慣例的前綴：`直客_`、`台客_`、`4A_`、`經銷商_`、`CPM_`（必須帶底線，免得吃到品牌名開頭）；
+// 帳戶命名慣例的前綴：`直客_`、`台客_`、`4A_`、`經銷商_`、`CPM_`、`D1_`（必須帶底線，免得吃到品牌名開頭）；
+// `D1_` 是 BH 給 D1 影音帳戶取的顯示名（`D1_仙桃牌`），去掉才對得到月表的 `直客_仙桃牌`。
 // D 帳戶名前面可能還有帳戶 id（`34196_`）。
 const LEAD_ID = /^\d+_/;
-const PREFIX = /^(?:直客|台客|4A|經銷商|CPM)_/i;
+const PREFIX = /^(?:直客|台客|4A|經銷商|CPM|D1)_/i;
 
 /** 去掉前綴（可能疊好幾層，例：`4A_直客_富蘭克林`）再正規化；只剩前綴時回空字串。 */
 export function coreName(s: string): string {

@@ -182,6 +182,14 @@ export function buildSeed(input: SeedInput): Seed {
     }
   };
 
+  // 每張 IO 用到的月表廣告形式（Native／Video／Native+Video／Meta／新聞稿…；空白不記），歸屬規則要用
+  const formats = new Map<string, Set<string>>();
+  const noteFormat = (ioKey: string, r: DeliverRow) => {
+    if (!r.format) return;
+    const s = formats.get(ioKey);
+    if (s) s.add(r.format); else formats.set(ioKey, new Set([r.format]));
+  };
+
   // ---------- 月表來源：先試著併進財務 IO，併不進去的同名相連月份併成一張 ----------
   type Pending = { r: DeliverRow; agencyName: string; clientName: string };
   const finIos = [...ios.values()];
@@ -201,6 +209,7 @@ export function buildSeed(input: SeedInput): Seed {
     if (hit) {
       mergedFinance.add(hit.key);
       if (r.label && !hit.labels.includes(r.label)) hit.labels.push(r.label);
+      noteFormat(hit.key, r);
       deliverAllocs(hit.key, r);
       continue;
     }
@@ -218,7 +227,7 @@ export function buildSeed(input: SeedInput): Seed {
       kpi: last.r.kpi, note: '', source: 'deliver', sourceRef,
       labels: [...new Set(chain.map((c) => c.r.label).filter(Boolean))],
     });
-    for (const c of chain) deliverAllocs(key, c.r);
+    for (const c of chain) { noteFormat(key, c.r); deliverAllocs(key, c.r); }
   };
   const byKey = new Map<string, Pending[]>();
   for (const p of pending) pushTo(byKey, `${normName(p.agencyName)}|${normName(p.r.label)}|${normName(p.r.advertiser)}`, p);
@@ -263,8 +272,13 @@ export function buildSeed(input: SeedInput): Seed {
   const seenA = new Set<string>();
   const unmatched = new Set<string>();
   for (const x of ios.values()) {
+    // D1 在倉庫裡只有影音：月表有寫廣告形式、卻沒有任何一列含 Video 的 IO 不掛 D1 帳戶
+    //（例：`直客_MundoPixar Experience` 圖文 IO 去前綴後跟影音帳戶 `CPM_MundoPixarExperience` 同名）。
+    // 反過來不成立——月表 Video 列有的根本不在 D1 跑（台北數位_安達人壽 9～10 月倉庫沒有對得上的 D1 帳戶），所以影音 IO 不限平台。
+    const fmts = formats.get(x.key);
+    const noVideo = !!fmts && ![...fmts].some((f) => /video/i.test(f));
     for (const l of x.labels) {
-      const hits = matchAccounts(l, accounts);
+      const hits = matchAccounts(l, accounts).filter((a) => !(noVideo && a.platform === 'D1'));
       if (!hits.length) { unmatched.add(l); continue; }
       for (const a of hits) {
         const k = `${x.key}|${a.platform}|${a.accountId}`;

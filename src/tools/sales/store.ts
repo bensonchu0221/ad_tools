@@ -4,6 +4,7 @@
 import { bqDeleteTable, bqDryRun, bqEnsureTable, bqListTableRows, bqLoadRows, bqQuery } from '../../core/bigquery.js';
 import type { BqField, BqTableSpec } from '../../core/bigquery.js';
 import { pacingBhConfigs, pacingKnownAccounts, pacingWarehouseSpend } from '../../core/store.js';
+import { fromBhPlatform } from '../pacing/calc.js';
 import { fromBq, type BqRaw } from './merge.js';
 import { mergeAccounts, validAccountId, type Account } from './names.js';
 import type { CoverageRow } from './report.js';
@@ -14,10 +15,10 @@ import { SALES_SCHEMA, SALES_TABLES, SALES_TABLE_DESC, fullTable, stageTable, ty
 const MAX_SWAP_BYTES = 2 ** 30;
 const DAY_MS = 24 * 3600 * 1000;
 
-/** 倉庫出現過的帳戶＋D／M token 表＋BH active 設定。 */
+/** 倉庫出現過的帳戶＋D／M token 表＋BH active 設定。BH 的影音記成 V，換成倉庫的 D1 才會跟倉庫帳戶併成同一個。 */
 export async function loadAccounts(): Promise<Account[]> {
   const [known, bh] = await Promise.all([pacingKnownAccounts(), pacingBhConfigs()]);
-  return mergeAccounts([known, bh.map((b) => ({ platform: b.platform, accountId: b.accountId, name: b.accountName }))]);
+  return mergeAccounts([known, bh.map((b) => ({ platform: fromBhPlatform(b.platform), accountId: b.accountId, name: b.accountName }))]);
 }
 
 /** 帳戶×日花費（台幣，nexus_coverage），給報告算歸屬覆蓋率。 */

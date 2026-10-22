@@ -7,7 +7,7 @@ import {
 import { parseFinance, parseCustomers, parseDeliverTab, toPct } from '../src/tools/sales/parse.js';
 import { buildSeed, type SeedIo, type Seed } from '../src/tools/sales/build.js';
 import { attributeAccountDays, renderReport } from '../src/tools/sales/report.js';
-import { SALES_TABLES, SALES_SCHEMA, SALES_TABLE_DESC, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
+import { PLATFORMS, SALES_TABLES, SALES_SCHEMA, SALES_TABLE_DESC, UNIQUE_KEYS, fullTable, stageTable, type SalesTable } from '../src/tools/sales/schema.js';
 import { money, seedToRows, checkKeys, swapStatements, swapSql, type Row, type SalesRows } from '../src/tools/sales/rows.js';
 import { writeRowsToBq, type BqOps } from '../src/tools/sales/store.js';
 import { fromBq, mergeRows } from '../src/tools/sales/merge.js';
@@ -37,6 +37,8 @@ await ok('coreName：去掉 id 前綴與多層命名前綴、全形底線也認'
   assert.equal(coreName('直客＿仙桃牌'), '仙桃牌');
   assert.equal(coreName('直客_'), '');
   assert.equal(coreName('CPM_MundoPixarExperience'), coreName('直客_MundoPixar Experience'));
+  assert.equal(coreName('D1_仙桃牌'), '仙桃牌'); // BH 的 D1 影音帳戶顯示名
+  assert.equal(coreName('D1仙桃牌'), 'd1仙桃牌'); // 沒底線不算前綴
 });
 
 const ACC: Account[] = [
@@ -303,6 +305,31 @@ await ok('j. TBC 保留 null；對不到帳戶的帳戶名列出（不寫規則�
   const x = io((i) => i.name === '南灣文教');
   assert.deepEqual([x.start, x.end, x.budgetNet], [null, null, null]);
   assert.deepEqual(SEED.unmatchedLabels, ['4A_efunad_黑松生技_UC-II', '4A_電通國華_三得利_固力伸', '南灣文教有限公司', '鮮味帖商行_popIn', '鮮味帖商行_關鍵字']);
+});
+
+await ok('l. D1：月表沒有任何 Video 列的 IO 不掛 D1 帳戶；Video、Native+Video、沒有月表形式的財務 IO 照常', () => {
+  assert.ok((PLATFORMS as readonly string[]).includes('D1') && !(PLATFORMS as readonly string[]).includes('V'));
+  const acc: Account[] = [
+    { platform: 'D', accountId: '38663', name: '直客_MundoPixar Experience' },
+    { platform: 'D1', accountId: 'CPM_MundoPixarExperience', name: 'CPM_MundoPixarExperience' }, // 去前綴後跟上面同名
+  ];
+  const s = buildSeed({
+    finance: parseFinance([FIN_HEADER, fin({ company: '和合佰納有限公司', account: '直客_MundoPixar Experience', start: '2026/05/01', end: '2026/05/31', code: 'X1', no: '1', amount: '10,000' })]),
+    customers: [], accounts: acc,
+    deliver: parseDeliverTab('202610', tab10(
+      { attr: '直客', agency: '直客', adv: 'Mundo_圖文', start: '10/1', end: '10/10', budget: '80,000', d: '40,000', label: '直客_MundoPixar Experience' },
+      { attr: '直客', agency: '直客', adv: 'Mundo_影音', format: 'Video', start: '10/1', end: '10/10', budget: '20,000', d: '20,000', label: 'CPM_MundoPixarExperience' },
+      { attr: '直客', agency: '直客', adv: 'Mundo_混合', format: 'Native+Video', start: '10/11', end: '10/20', budget: '30,000', d: '30,000', label: '直客_MundoPixar Experience' },
+    )),
+  });
+  const of = (name: string) => {
+    const x = s.ios.find((i) => i.name === name)!;
+    return s.assignments.filter((a) => a.ioKey === x.key).map((a) => `${a.platform}${a.accountId}`).sort();
+  };
+  assert.deepEqual(of('Mundo_圖文'), ['D38663']);
+  assert.deepEqual(of('Mundo_影音'), ['D1CPM_MundoPixarExperience', 'D38663']);
+  assert.deepEqual(of('Mundo_混合'), ['D1CPM_MundoPixarExperience', 'D38663']);
+  assert.deepEqual(of('直客_MundoPixar Experience X1'), ['D1CPM_MundoPixarExperience', 'D38663']);
 });
 
 await ok('k. 參照完整：IO 的經銷商／client／付款方都存在、子表都指得到 IO、別名都指得到實體、source_ref 不重複', () => {
