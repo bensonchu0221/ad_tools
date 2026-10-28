@@ -115,15 +115,16 @@ await ok('沒設帳密直接丟錯', async () => {
   process.env.D2_PASSWORD = e;
 });
 
-await ok('Chat：沒事不發；有事列出三類', () => {
+await ok('Chat：沒事發一行同步數 0；有事列出三類', () => {
   const base = { dry: false, today: '2026-10-28', d2WithToken: 1, d2TwLive: 1, added: [], rejected: [], pending: [] };
-  assert.equal(formatD2SyncChat(base, 'u'), null);
+  assert.equal(formatD2SyncChat(base, 'u'), '🔑 *D token 同步*（2026-10-28）：同步數 0');
   const t = formatD2SyncChat({
     ...base,
     added: [{ accountId: '11', accountName: 'TW_New', createDate: '2026-10-01', backfill: '2026-10-01~2026-10-25' }],
     rejected: [{ accountId: '12', accountName: 'TW_M', reason: 'x' }],
     pending: [{ accountId: '20', accountName: 'TW_P', createDate: '2026-10-26' }],
-  }, 'u')!;
+  }, 'u');
+  assert.match(t, /^🔑 \*D token 同步\*（2026-10-28）：同步數 1\n/);
   assert.match(t, /新增 1 個帳戶/);
   assert.match(t, /11 TW_New（已排倉庫回補 2026-10-01~2026-10-25）/);
   assert.match(t, /驗證沒過、沒寫入 1 個/);

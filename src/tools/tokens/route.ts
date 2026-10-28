@@ -381,7 +381,7 @@ mFilter.addEventListener('input', function () {
       const r = await runD2Sync({ dry });
       const text = formatD2SyncChat(r, PAGE_URL);
       app.log.info({ marker: 'd2sync', dry, added: r.added.length, rejected: r.rejected.length, pending: r.pending.length, d2WithToken: r.d2WithToken }, 'd2sync');
-      if (text && !dry) await notify(text);
+      if (!dry) await notify(text);
       return reply.send({ ...r, text });
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);

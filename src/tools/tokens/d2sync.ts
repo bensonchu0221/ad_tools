@@ -260,10 +260,14 @@ export async function runD2Sync(opts: { dry: boolean; today?: string; deps?: Par
   return result;
 }
 
-/** Google Chat 訊息；沒事（沒新增、沒驗證失敗、沒待產 token）回 null＝不發。 */
-export function formatD2SyncChat(r: D2SyncResult, pageUrl: string): string | null {
-  if (!r.added.length && !r.rejected.length && !r.pending.length) return null;
-  const lines = [`🔑 *D 新帳戶 token 自動匯入*（${r.today}）`];
+/**
+ * Google Chat 訊息：每次執行都發（2026-10-28 使用者要求；沒事也發一行，才分得出「沒新帳戶」跟「排程沒跑」）。
+ * 沒事＝一行「同步數 0」；有新增／驗證沒過／待產 token 才展開明細。
+ */
+export function formatD2SyncChat(r: D2SyncResult, pageUrl: string): string {
+  const head = `🔑 *D token 同步*（${r.today}）：同步數 ${r.added.length}`;
+  if (!r.added.length && !r.rejected.length && !r.pending.length) return head;
+  const lines = [head];
   if (r.added.length) {
     lines.push(`✅ 新增 ${r.added.length} 個帳戶：`);
     for (const a of r.added) lines.push(`　• ${a.accountId} ${a.accountName}${a.backfill ? `（已排倉庫回補 ${a.backfill}）` : ''}`);
@@ -281,5 +285,5 @@ export function formatD2SyncChat(r: D2SyncResult, pageUrl: string): string | nul
 }
 
 export function formatD2SyncFailure(e: unknown, today: string): string {
-  return `🔴 *D 新帳戶 token 自動匯入失敗*（${today}）\n${String((e as Error)?.message ?? e).slice(0, 300)}`;
+  return `🔴 *D token 同步失敗*（${today}）\n${String((e as Error)?.message ?? e).slice(0, 300)}`;
 }
