@@ -3,3 +3,9 @@
 - **D 分頁**：沿用原語意——鏡像列（`source='dctool'`）唯讀、自建列（`adtools`）受保護可編輯／刪除；KPI 3 磚（總／自建／鏡像）＋來源篩選 chip。走 `store.ts addToken/updateToken/deleteToken`
 - **MGID 分頁**：全手動維護、皆可編輯／刪除（無鏡像/守衛）；KPI 1 磚、無來源 chip；靛紫 `#5B54D6` accent＋`M` 徽章（`sbui.ts .src-m`）作平台辨識。**表單只收串接必要三欄**：`client_name`（寫 Sheet 的 account_name）、`api_client_id`（86xxxx，URL/查詢鍵）、`token`（Bearer）；**無 `client_id`(98xxxx)——API 用不到**（skill mgid-api：URL 用 98xxxx 會 403），2026-07-11 已從 `nexus.mgid_tokens` DROP 該欄（rollback SQL 快照留存）。走 `store.ts addMgidToken/updateMgidToken/deleteMgidToken`（token 留空＝不變更）
 - R token 走全域 env 自動選取（台客/4A/Super），**刻意無管理頁**
+- **D 新帳戶 token 自動匯入**（`d2sync.ts`，2026-10-28）：s2s 沒有列帳戶 API，新帳戶以前全靠手動貼。Cloud Scheduler `tokens-d2sync` 每天 **03:30 台北** POST `/tools/tokens/d2sync/cron?key=DIAG_KEY`（`&dry=1` 只列不寫、不發 Chat）→ 登入 D2 後台撈 accountList（每列直接帶 `apiToken`）→ 篩台灣合約或國家、`accountStatus=1`、名稱不含 测试／測試／test、不在表裡 → s2s 認證＋campaign 清單驗證（擋 MediaGo 帳戶）→ `store.ts insertDTokenIfAbsent`（INSERT IGNORE、`source='adtools'`，**既有列一律不動**）→ 自動排 nexus 回補（帳戶建立日～T-3，batch `d2sync:<id>:<區間>`；T-2~T-1 交給 04:00 每日批次）→ Google Chat（`NEXUS_CHAT_WEBHOOK`）只在有新增／驗證沒過／**最近 14 天新建但還沒產 token 的台灣帳戶**（提醒 AE 產）／執行失敗時發。Cloud Logging `jsonPayload.marker="d2sync"`
+  - **D2 帳密**＝Secret Manager `ad-tools-tokens-d2-email`／`-password` → env `D2_EMAIL`／`D2_PASSWORD`（存明文密碼，程式算 MD5 大寫）。目前用使用者本人帳號（benson@popin.cc），之後拿到專用帳號只換 secret 值
+  - **登入是 OAuth2，只打 login API 不會有 session**：①GET `/platform/main/login?type=m` → `/oauth/2.0/authorize` → 轉去 mediago 登入頁，網址帶 state／client_id／redirect_uri ②POST login 要帶這三個參數，回 `data.redirect`（帶 code 的回呼）③GET 回呼才發 `mgruli`／`mgrudata` cookie。只打 login 會回 `code 0` 但 accountList 回空 body
+  - accountList 照 `createTime`（字串 `YYYY-MM-DD HH:mm:ss`）新到舊排 ⇒「沒 token」那份（2.3 萬筆）翻到整頁早於 14 天就停，實測 2 頁 2.6 秒；整趟 dry 16.6 秒
+  - 🔴 **絕不呼叫 D2 `generateAccountApiToken`**（對已有 token 的帳戶＝更新，舊 token 可能失效）
+  - 2026-10-28 首次 dry：D2 有 token 1106、台灣正式 280 個全在表（表 289 列）⇒ 新增 0；最近 14 天沒 token 39 個全是 JP／KR ⇒ 提醒 0。測試 `tests/verify_d2sync.mts`

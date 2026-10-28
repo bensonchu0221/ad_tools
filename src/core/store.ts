@@ -288,6 +288,28 @@ export async function addToken(input: { accountName: string; token: string; acco
   );
 }
 
+/** 表裡已有的全部 account_id（不分 source），D2 自動匯入用來判斷「新帳戶」。 */
+export async function listDTokenAccountIds(): Promise<Set<string>> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [rows] = await p.query(`SELECT account_id FROM ${TOKENS_DB}.d_tokens`);
+  return new Set((rows as any[]).map((r) => String(r.account_id)));
+}
+
+/**
+ * D2 自動匯入的寫入：只新增、絕不覆蓋（INSERT IGNORE 靠 account_id 唯一鍵）。
+ * 回傳是否真的新增（同時被手動加過就是 false）。source 比照手動新增標 adtools。
+ */
+export async function insertDTokenIfAbsent(input: { accountId: string; accountName: string; token: string }): Promise<boolean> {
+  const p = getPool();
+  if (!p) throw new Error('DB 未設定');
+  const [res] = await p.query(
+    `INSERT IGNORE INTO ${TOKENS_DB}.d_tokens (account_id, account_name, token, source) VALUES (?, ?, ?, 'adtools')`,
+    [input.accountId, input.accountName.trim(), input.token.trim()]
+  );
+  return (res as any).affectedRows > 0;
+}
+
 export async function updateToken(id: number, input: { accountName: string; token?: string; accountId?: string }): Promise<boolean> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');

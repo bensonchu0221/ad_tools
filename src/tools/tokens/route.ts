@@ -13,8 +13,12 @@ import {
   updateMgidToken,
   deleteMgidToken,
 } from '../../core/store.js';
+import { postChat } from '../nexus/health.js';
+import { twToday } from '../nexus/run.js';
+import { runD2Sync, formatD2SyncChat, formatD2SyncFailure } from './d2sync.js';
 
 export const BASE_PATH = '/tools/tokens';
+const PAGE_URL = 'https://ad-tools-439393162392.asia-east1.run.app/tools/tokens#d';
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -362,6 +366,29 @@ mFilter.addEventListener('input', function () {
 });`;
 
     reply.type('text/html').send(sbPage({ title: 'Token 管理 · Slot Board', body, style, script }));
+  });
+
+  // ---------- D 新帳戶 token 自動匯入（Cloud Scheduler `tokens-d2sync`，需 DIAG_KEY；/cron 結尾走 auth.ts 白名單） ----------
+  // ?dry=1 只列不寫、不發 Chat，結果與通知文字放在回應裡
+  app.post(`${BASE_PATH}/d2sync/cron`, async (req, reply) => {
+    const q = req.query as { key?: string; dry?: string };
+    if (!process.env.DIAG_KEY || q.key !== process.env.DIAG_KEY) return reply.code(404).send('not found');
+    const dry = q.dry === '1';
+    const notify = async (text: string) => {
+      try { await postChat(text); } catch (e) { app.log.error({ marker: 'd2sync', error: String(e) }, 'd2sync chat failed'); }
+    };
+    try {
+      const r = await runD2Sync({ dry });
+      const text = formatD2SyncChat(r, PAGE_URL);
+      app.log.info({ marker: 'd2sync', dry, added: r.added.length, rejected: r.rejected.length, pending: r.pending.length, d2WithToken: r.d2WithToken }, 'd2sync');
+      if (text && !dry) await notify(text);
+      return reply.send({ ...r, text });
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      app.log.error({ marker: 'd2sync', error, dry }, 'd2sync failed');
+      if (!dry) await notify(formatD2SyncFailure(e, twToday()));
+      return reply.code(500).send({ error });
+    }
   });
 
   // ---------- D token CRUD ----------
