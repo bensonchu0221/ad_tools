@@ -7,5 +7,6 @@
   - **D2 帳密**＝Secret Manager `ad-tools-tokens-d2-email`／`-password` → env `D2_EMAIL`／`D2_PASSWORD`（存明文密碼，程式算 MD5 大寫）。目前用使用者本人帳號（benson@popin.cc），之後拿到專用帳號只換 secret 值
   - **登入是 OAuth2，只打 login API 不會有 session**：①GET `/platform/main/login?type=m` → `/oauth/2.0/authorize` → 轉去 mediago 登入頁，網址帶 state／client_id／redirect_uri ②POST login 要帶這三個參數，回 `data.redirect`（帶 code 的回呼）③GET 回呼才發 `mgruli`／`mgrudata` cookie。只打 login 會回 `code 0` 但 accountList 回空 body
   - accountList 照 `createTime`（字串 `YYYY-MM-DD HH:mm:ss`）新到舊排 ⇒「沒 token」那份（2.3 萬筆）翻到整頁早於 14 天就停，實測 2 頁 2.6 秒；整趟 dry 16.6 秒
+  - **偶發錯誤會重試**（`withRetry`，等 10 秒、30 秒，共 3 次）：2026-10-28 第一次排程觸發就在 OAuth 回呼拿到 HTTP 502（12 分鐘前、隨後連跑 3 次都正常）。**帳密被拒（`D2CredentialError`，login 回 code≠0，含要驗證碼）不重試**，免得連續失敗鎖帳號
   - 🔴 **絕不呼叫 D2 `generateAccountApiToken`**（對已有 token 的帳戶＝更新，舊 token 可能失效）
   - 2026-10-28 首次 dry：D2 有 token 1106、台灣正式 280 個全在表（表 289 列）⇒ 新增 0；最近 14 天沒 token 39 個全是 JP／KR ⇒ 提醒 0。測試 `tests/verify_d2sync.mts`

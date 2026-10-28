@@ -2,7 +2,7 @@
 // 全程假資料，不連 D2／s2s／DB。用法：npx tsx tests/verify_d2sync.mts
 import assert from 'node:assert/strict';
 import {
-  d2PasswordHash, toTwDate, toD2Account, isTwLive, pickNew, pickPending, backfillWindow, runD2Sync, formatD2SyncChat,
+  d2PasswordHash, toTwDate, withRetry, D2CredentialError, toD2Account, isTwLive, pickNew, pickPending, backfillWindow, runD2Sync, formatD2SyncChat,
   type D2Account,
 } from '../src/tools/tokens/d2sync.js';
 
@@ -128,6 +128,19 @@ await ok('Chat：沒事不發；有事列出三類', () => {
   assert.match(t, /11 TW_New（已排倉庫回補 2026-10-01~2026-10-25）/);
   assert.match(t, /驗證沒過、沒寫入 1 個/);
   assert.match(t, /20 TW_P（2026-10-26 建立）/);
+});
+
+await ok('重試：偶發錯誤重試到成功；帳密錯誤不重試；用完次數丟最後一個錯', async () => {
+  const waits: number[] = [];
+  const sleep = async (ms: number) => { waits.push(ms); };
+  let calls = 0;
+  assert.equal(await withRetry(async () => { if (++calls < 3) throw new Error('HTTP 502'); return 'ok'; }, [1, 2], sleep), 'ok');
+  assert.deepEqual([calls, waits], [3, [1, 2]]);
+  calls = 0;
+  await assert.rejects(withRetry(async () => { calls++; throw new D2CredentialError('D2 登入失敗：loginError'); }, [1, 2], sleep), /loginError/);
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(withRetry(async () => { calls++; throw new Error(`第 ${calls} 次`); }, [1, 2], sleep), /第 3 次/);
 });
 
 console.log(`\n${n} 項全過`);

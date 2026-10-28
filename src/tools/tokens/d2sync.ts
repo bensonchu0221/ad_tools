@@ -14,6 +14,8 @@ import { addDays, backfillStart, planBackfill, twToday } from '../nexus/run.js';
 
 const D2_API = 'https://ads.popin.cc/platform/api/campaignManager';
 const PAGE_SIZE = 1000;
+/** 偶發錯誤（D2 回呼 502、逾時…）的重試間隔；2026-10-28 第一次排程就在回呼拿到 502，隨後連跑 3 次都正常。 */
+const RETRY_WAITS_MS = [10_000, 30_000];
 /** 「新建但還沒產 token」只提醒最近這幾天建立的帳戶；更舊的沒 token 多半是沒在用，天天報會變噪音。 */
 export const PENDING_DAYS = 14;
 
@@ -32,6 +34,21 @@ export interface D2Account {
 
 /** D2 前端送的密碼＝MD5(明文) 轉大寫（npm md5，bundle 確認過）。 */
 export const d2PasswordHash = (plain: string) => createHash('md5').update(plain).digest('hex').toUpperCase();
+
+/** 帳密被拒（loginError、要驗證碼…）：不重試，連續失敗可能鎖帳號。 */
+export class D2CredentialError extends Error {}
+
+/** 偶發錯誤重試；帳密錯誤直接丟。 */
+export async function withRetry<T>(fn: () => Promise<T>, waits = RETRY_WAITS_MS, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (e instanceof D2CredentialError || i >= waits.length) throw e;
+      await sleep(waits[i]);
+    }
+  }
+}
 
 /** ads.popin.cc 的 cookie（只收這個網域，name→value）。 */
 class Jar {
@@ -81,7 +98,7 @@ export async function d2Login(email: string, password: string): Promise<string> 
   const text = await res.text();
   let json: any;
   try { json = JSON.parse(text); } catch { throw new Error(`D2 登入回非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`); }
-  if (String(json.code) !== '0') throw new Error(`D2 登入失敗：${json.msg ?? text.slice(0, 120)}`);
+  if (String(json.code) !== '0') throw new D2CredentialError(`D2 登入失敗：${json.msg ?? text.slice(0, 120)}`);
   const callback = json.data?.redirect;
   if (!callback || !String(callback).startsWith(D2_ORIGIN)) throw new Error(`D2 登入沒有回呼網址：${String(callback).slice(0, 120)}`);
 
@@ -196,8 +213,8 @@ async function s2sVerify(token: string): Promise<void> {
 }
 
 const realDeps: D2SyncDeps = {
-  login: d2Login,
-  fetchAccounts: fetchD2Accounts,
+  login: (email, password) => withRetry(() => d2Login(email, password)),
+  fetchAccounts: (cookie, has, since) => withRetry(() => fetchD2Accounts(cookie, has, since)),
   existingIds: listDTokenAccountIds,
   verify: s2sVerify,
   insert: insertDTokenIfAbsent,
