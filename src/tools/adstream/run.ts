@@ -6,7 +6,7 @@
 // （該平台這次不寫、游標不推），其餘平台照常；平台內維持原子性（任一帳號失敗＝整個平台失敗）。
 import { getAccessToken, getCampaigns, getAdLists, getAdReportBulk, getDateReports, getCampaignDeviceReports } from '../../core/popin.js';
 import { fetchReport, type UserType } from '../../core/rixbee.js';
-import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidReportRow } from '../../core/mgid.js';
+import { fetchMgidReportCorrected, fetchMgidDeviceReport, type MgidClient, type MgidReportRow } from '../../core/mgid.js';
 import { fetchPrismReport, normalizePrismDate } from '../../core/prism.js';
 import { getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts, EMPTY_CV_BUCKETS, type BucketEvent, type CvBuckets } from '../../core/store.js';
 import { appendRows, deleteRowsByDate, deleteRowsByDateRange } from '../../core/gsheets.js';
@@ -444,7 +444,9 @@ async function fetchMgidRows(
   const clients = await resolveMgidClients(config.mgidClientIds);
   for (const client of clients) {
     onPhase(`抓取 MGID 帳號 ${client.clientName}（${startDate}~${endDate}）…`);
-    const rows = await fetchMgidReport(client, startDate, endDate);
+    // teaser-stat 校正曝光／點擊／轉換（＝MGID 後台），花費保留 statistics-reports（＝後台）；見 core/mgid.ts mergeTeaserStat
+    const rows = await fetchMgidReportCorrected(client, startDate, endDate,
+      (i, n) => onPhase(`MGID 帳號 ${client.clientName}：teaser-stat 校正 ${i}/${n}…`));
     for (const r of rows) {
       mRows.push([client.clientName, syncedAt, ...M_COLS.map((c) => r[M_ROW_KEY[c]] ?? '')]);
       // integrated 投影用：teaser 層對映 D 的 ad 層（無 group 層，同 D 留空）

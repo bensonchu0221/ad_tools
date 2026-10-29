@@ -2,10 +2,11 @@
 // 全程假資料，不連 API／BQ／DB。用法：npx tsx tests/verify_nexus.mts
 import assert from 'node:assert/strict';
 import {
-  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS, M_UNMAPPED_PREFIX, mergeTeaserStat, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
+  pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, M_UNMAPPED_PREFIX, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
   toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, mEvents,
   toD1Rows, toD1DeviceRows, d1MobileImp, d1MobileSpend, fetchRAll, mDoubleCountRisk,
 } from '../src/tools/nexus/fetch.js';
+import { mergeTeaserStat, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS } from '../src/core/mgid.js';
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
@@ -155,19 +156,22 @@ await ok('M 事實／裝置列：欄位＝schema、幣別帶上、全 0 裝置�
   assert.equal(rows[0].currency, 'twd');
 });
 
-await ok('M teaser-stat 校正：曝光／點擊／花費／轉換以 teaser-stat 為準（＝MGID 後台），ad_requests 保留；多出的日子補列', () => {
+await ok('M teaser-stat 校正：曝光／點擊／轉換以 teaser-stat 為準（＝MGID 後台），花費與 ad_requests 保留 statistics-reports；多出的日子補列', () => {
   const base = { date: '2026-09-23', campaignId: 'c1', campaignName: 'C', teaserId: 't1', teaserTitle: 'T', teaserUrl: '', teaserImage: '',
     adRequests: 202757, imp: 9952, click: 12, spend: 84, cpc: 7, cpm: 0, ctr: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0,
     conv_rate_interest: 0, conv_rate_decision: 0, conv_rate_buy: 0, conv_cost_interest: 0, conv_cost_decision: 0, conv_cost_buy: 0 };
   const blank = { ...base, teaserId: '', imp: 5 }; // campaign 級補列（沒有 teaser）不動
   const stats = new Map([['t1', {
-    '2026-09-23': { shows: 9961, clicks: 12, spent: 84, interest: 1, decision: 0, buy: 2 },
+    // 花費故意給低：teaser-stat 花費會偏低（2026-10-29 福穀樂 All_3rd 後台 1,350.20＝statistics-reports、teaser-stat 1,031），不可蓋掉
+    '2026-09-23': { shows: 9961, clicks: 13, spent: 70, interest: 1, decision: 0, buy: 2 },
     '2026-09-22': { shows: 19388, clicks: 31, spent: 217, interest: 0, decision: 0, buy: 0 },
   }]]);
   const r = mergeTeaserStat([base, blank], stats);
   assert.equal(r.patched, 1);
   assert.equal(r.added, 1);
-  assert.deepEqual([r.rows[0].imp, r.rows[0].adRequests, r.rows[0].conv_interest, r.rows[0].conv_buy], [9961, 202757, 1, 2]);
+  assert.deepEqual([r.rows[0].imp, r.rows[0].click, r.rows[0].adRequests, r.rows[0].conv_interest, r.rows[0].conv_buy], [9961, 13, 202757, 1, 2]);
+  assert.equal(r.rows[0].spend, 84); // 花費保留 statistics-reports
+  assert.equal(r.rows[2].spend, 217); // 補列只有 teaser-stat 這個來源，照用
   assert.equal(r.rows[1].imp, 5);
   assert.deepEqual([r.rows[2].date, r.rows[2].imp, r.rows[2].campaignId, r.rows[2].adRequests], ['2026-09-22', 19388, 'c1', 0]);
   // statistics-reports 整支沒回傳的零點擊 teaser：用 meta 補列（9/23 沃醫學_喬雅露 teaser 27736324 實例）

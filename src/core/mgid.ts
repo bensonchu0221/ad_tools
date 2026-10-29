@@ -496,6 +496,109 @@ export async function fetchMgidReport(
 }
 
 /**
+ * MGID 有兩套數字，各對一半（2026-09-24 實測＋2026-10-29 福穀樂後台截圖定案）：
+ *  - statistics-reports（fetchMgidReport）：**曝光／點擊比後台少**——每支有量的 teaser 少幾次曝光（0.05~0.13%），
+ *    而且整支不回傳生涯零點擊 teaser；**花費＝後台**（＝campaigns-stat）。
+ *  - teaser-stat：**曝光／點擊／轉換＝後台**；**花費有時偏低**——福穀樂 875796 10/01~10/28 後台 26,656.25＝
+ *    statistics-reports＝campaigns-stat，teaser-stat 只有 26,337.05，落差全在 campaign 12506636 福穀樂_All_3rd
+ *    （後台 1,350.20、teaser-stat 1,031.00；原因未查，名稱看起來是第三方受眾，猜是 data fee 沒分到 teaser）。
+ * ⇒ 以 teaser-stat 蓋掉曝光／點擊／三段轉換，**花費保留 statistics-reports**；ad_requests、cpc／cpm／ctr 與 teaser 資訊
+ *    teaser-stat 沒有，沿用 statistics-reports（MGID 的 cpm／ctr 分母是 ad_requests，不受影響）。
+ *    teaser-stat 有量、statistics-reports 卻沒那天的列 ⇒ 補一列，不丟（花費只有 teaser-stat 這個來源，照用）。這包含
+ *    statistics-reports 整支不回傳的生涯零點擊 teaser（所屬 campaign 有點擊，campaign 級零點擊補救也沒涵蓋；
+ *    實測 9/23 沃醫學_喬雅露 teaser 27736324 只有 teaser-stat／Redash 看得到 1 次曝光）。
+ * 純函式。stats：teaserId → 日期 → teaser-stat 當日物件；meta：沒有任何原始列的 teaser 補列時用的 campaign／素材資訊。
+ */
+export interface MTeaserMeta { campaignId: string; campaignName: string; title: string; url: string; image: string }
+export function mergeTeaserStat(
+  rows: MgidReportRow[], stats: Map<string, Record<string, any>>, meta: Map<string, MTeaserMeta> = new Map()
+): { rows: MgidReportRow[]; patched: number; added: number } {
+  let patched = 0, added = 0;
+  const seen = new Set<string>();
+  const out = rows.map((r) => {
+    const d = r.teaserId ? stats.get(r.teaserId)?.[r.date] : undefined;
+    seen.add(`${r.teaserId}|${r.date}`);
+    if (!d) return r;
+    patched++;
+    return {
+      ...r, imp: Number(d.shows) || 0, click: Number(d.clicks) || 0,
+      conv_interest: Number(d.interest) || 0, conv_decision: Number(d.decision) || 0, conv_buy: Number(d.buy) || 0,
+    };
+  });
+  for (const [tid, days] of stats) {
+    const m = meta.get(tid);
+    const tmpl: MgidReportRow | undefined = rows.find((r) => r.teaserId === tid) ?? (m && {
+      date: '', campaignId: m.campaignId, campaignName: m.campaignName, teaserId: tid, teaserTitle: m.title, teaserUrl: m.url, teaserImage: m.image,
+      adRequests: 0, imp: 0, click: 0, spend: 0, cpc: 0, cpm: 0, ctr: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0,
+      conv_rate_interest: 0, conv_rate_decision: 0, conv_rate_buy: 0, conv_cost_interest: 0, conv_cost_decision: 0, conv_cost_buy: 0,
+    });
+    if (!tmpl) continue;
+    for (const [date, d] of Object.entries(days)) {
+      if (seen.has(`${tid}|${date}`) || !((Number(d?.shows) || 0) || (Number(d?.clicks) || 0) || (Number(d?.spent) || 0))) continue;
+      added++;
+      out.push({
+        ...tmpl, date, adRequests: 0, imp: Number(d.shows) || 0, click: Number(d.clicks) || 0, spend: Number(d.spent) || 0,
+        cpc: 0, cpm: 0, ctr: 0, conv_interest: Number(d.interest) || 0, conv_decision: Number(d.decision) || 0, conv_buy: Number(d.buy) || 0,
+        conv_rate_interest: 0, conv_rate_decision: 0, conv_rate_buy: 0, conv_cost_interest: 0, conv_cost_decision: 0, conv_cost_buy: 0,
+      });
+    }
+  }
+  return { rows: out, patched, added };
+}
+
+/**
+ * teaser-stat 只信近這麼多天（2026-10-06 實測）：越舊越不穩——7/08 以前曝光會被分到別的日子（7/04~7/08 加總跟
+ * Redash 一樣 587,964、逐日卻差到 14 萬，點擊不受影響）、7/09~7/14 同一天每次查數字都在變、約 95 天後整個回空；
+ * 9/24 寫入時 7/15 以後（≤71 天）與 8 月（30~55 天）都跟 Redash／statistics-reports 逐日一致。
+ * 更舊的日子保留 statistics-reports（跟 Redash 只差 0.05~0.13%）。
+ */
+export const TEASER_STAT_MAX_AGE_DAYS = 60;
+
+/** teaser-stat 校正的最早日期（台北日 − TEASER_STAT_MAX_AGE_DAYS）。純函式。 */
+export function teaserStatCutoff(now = new Date()): string {
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  return addDays(today, -TEASER_STAT_MAX_AGE_DAYS);
+}
+
+/** 把 teaser-stat 結果裡早於 cutoff 的日子拿掉（那些日子沿用 statistics-reports）。純函式。 */
+export function dropStaleTeaserStat(stats: Record<string, any>, cutoff: string): Record<string, any> {
+  return Object.fromEntries(Object.entries(stats).filter(([d]) => d >= cutoff));
+}
+
+/**
+ * fetchMgidReport（statistics-reports）＋teaser-stat 校正：曝光／點擊／轉換＝MGID 後台、花費＝後台（見 mergeTeaserStat）。
+ * 倉庫、AdStream、週報都走這支，三邊同一套口徑。
+ * 要查的 teaser＝原始列出現過的＋「有數字的 campaign」底下全部 teaser（statistics-reports 不回傳生涯零點擊 teaser）；
+ * 逐支序列打 teaser-stat（一支一次涵蓋整段日期；廣告主 API 併發 6+ 會 429，150ms 節流）。整段都早於 60 天就不打。
+ */
+export async function fetchMgidReportCorrected(
+  client: MgidClient, sd: string, ed: string,
+  onProgress: (done: number, total: number) => void = () => {}, now = new Date()
+): Promise<MgidReportRow[]> {
+  const raw = await fetchMgidReport(client, sd, ed);
+  const cutoff = teaserStatCutoff(now);
+  if (!raw.length || ed < cutoff) return raw;
+  const meta = new Map<string, MTeaserMeta>();
+  const idx = await fetchTeaserIndex(client);
+  const campName = new Map(raw.map((r) => [r.campaignId, r.campaignName]));
+  for (const cid of campName.keys()) {
+    for (const tid of idx.byCampaign[cid] ?? []) {
+      const t = idx.meta[tid];
+      meta.set(tid, { campaignId: cid, campaignName: campName.get(cid) ?? '', title: t?.title ?? '', url: t?.url ?? '', image: t?.image ?? '' });
+    }
+  }
+  const tids = [...new Set([...raw.map((r) => r.teaserId).filter(Boolean), ...meta.keys()])];
+  const statSd = sd >= cutoff ? sd : cutoff;
+  const stats = new Map<string, Record<string, any>>();
+  for (const [i, tid] of tids.entries()) {
+    onProgress(i + 1, tids.length);
+    stats.set(tid, dropStaleTeaserStat(await fetchTeaserStat(client, tid, statSd, ed), cutoff));
+    await sleep(150);
+  }
+  return mergeTeaserStat(raw, stats, meta).rows;
+}
+
+/**
  * 抓一個 MGID 帳號的 day×deviceType 裝置報表（供 device_summary 聚合），
  * 已把 deviceType 正規化成 PC/Mobile/Tablet/Others、金額攤平。切 90 天一段。
  */

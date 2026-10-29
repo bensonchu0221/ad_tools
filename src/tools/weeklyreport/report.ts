@@ -15,7 +15,7 @@ import {
   planWeeklySources, readNexusD, readNexusR, readNexusM, readNexusP, daysBetween, API_MAX_DAYS, type Segment,
 } from './nexussource.js';
 import type { UserType } from '../../core/rixbee.js';
-import { fetchMgidReport, fetchMgidDeviceReport, type MgidClient, type MgidDeviceRow } from '../../core/mgid.js';
+import { fetchMgidReportCorrected, fetchMgidDeviceReport, type MgidClient, type MgidDeviceRow } from '../../core/mgid.js';
 import { fetchPrismReport, normalizePrismDate, type PrismReportRow } from '../../core/prism.js';
 import {
   R_BEHAVIOR_MAP,
@@ -651,7 +651,7 @@ async function fetchMData(
       continue;
     }
     const client: MgidClient = { apiClientId, token, clientName };
-    const report = await fetchMgidReport(client, input.startDate, input.endDate);
+    const report = await fetchMgidReportCorrected(client, input.startDate, input.endDate); // 曝光／點擊／轉換校正成後台口徑，花費不動
     const devRows = await fetchMgidDeviceReport(client, input.startDate, input.endDate);
     for (const r of report) {
       rows.push({
