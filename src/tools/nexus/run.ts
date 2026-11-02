@@ -98,6 +98,7 @@ export const SKIP_ACCOUNTS: Record<string, string> = {
   'D:24492': 'TW_affluentbyte_Eric_NEW（MediaGo 帳戶，最後異動 2023-12）',
   'M:860502': 'Serene House（MGID API 一直回 WAS_SOME_ERROR_TRY_AGAIN_LATER，最後有數字 2026-07-07）',
   'M:872749': 'MundoPixar 舊帳戶（倉庫 5/21 起從無數字、10/04 起天天 WAS_SOME_ERROR；新 campaign 開在 Client ID 991479，走 Redash 墊底）',
+  'M:859153': 'XMEI02（2026-11-02 起 token 401 無效；最後有數字 2026-07-27，AM 確認帳戶不再跑）',
 };
 export const isSkipped = (t: { platform: NexusPlatform; accountId: string }) => `${t.platform}:${t.accountId}` in SKIP_ACCOUNTS;
 
