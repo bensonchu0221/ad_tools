@@ -32,8 +32,8 @@ export interface HealthInput {
 
 /** 門檻（寫成常數方便之後調）。 */
 export const HEALTH = {
-  /** 每日批次要在這之前跑完，否則會跟 Report Hub（05:00 開跑）搶 D token */
-  finishBy: '04:50',
+  /** 每日批次要在這之前跑完（04:00 開跑；2026-11-03 由 04:50 放寬：D 帳戶 10/29 增到 286 個後常跑到 04:40~04:52） */
+  finishBy: '05:50',
   /** T-1 曝光或花費低於前 7 天中位數的這個比例 ⇒ 紅燈 */
   dropRatio: 0.5,
   /** 高於中位數這個倍數 ⇒ 黃燈（可能重複寫入或真的暴量） */
@@ -77,7 +77,7 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
     }
     const hhmm = b.lastFinished?.slice(11, 16) ?? '';
     if (hhmm && b.lastFinished!.slice(0, 10) === inp.today && hhmm > HEALTH.finishBy) {
-      items.push({ level: 'warn', text: `每日批次 ${hhmm} 才跑完，超過 ${HEALTH.finishBy}（可能跟 Report Hub 互踢 D token）` });
+      items.push({ level: 'warn', text: `每日批次 ${hhmm} 才跑完，超過 ${HEALTH.finishBy}` });
     }
     summary.push(`每日批次 ${b.success}/${b.total} 成功${hhmm ? `，${hhmm} 跑完` : ''}`);
   }

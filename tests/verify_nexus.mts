@@ -674,10 +674,12 @@ await ok('健檢：批次沒入列／沒跑完 → 紅燈；跑太晚 → 黃燈
   assert.equal(evaluateHealth(a).level, 'alert');
   const b = healthBase(); b.batch = { ...b.batch, queued: 3, success: 287 };
   assert.match(evaluateHealth(b).items[0].text, /還有 3／290/);
-  const c = healthBase(); c.batch = { ...c.batch, lastFinished: '2026-09-24 05:12:00' };
+  const c = healthBase(); c.batch = { ...c.batch, lastFinished: '2026-09-24 06:12:00' };
   const rc = evaluateHealth(c);
   assert.equal(rc.level, 'warn');
-  assert.match(rc.items[0].text, /05:12 才跑完/);
+  assert.match(rc.items[0].text, /06:12 才跑完/);
+  const d = healthBase(); d.batch = { ...d.batch, lastFinished: '2026-09-24 05:12:00' }; // 05:50 以前跑完不亮燈
+  assert.ok(!evaluateHealth(d).items.some((i) => /才跑完/.test(i.text)));
 });
 
 await ok('健檢：有 job 放棄重試 → 紅燈、同帳戶合併成一行', () => {
