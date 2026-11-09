@@ -2,6 +2,7 @@
 // 四平台（D/R/M/P）全帳戶「素材 × 日」每日寫進 BQ `popinpoc1.reporting.nexus_*`，給 Looker 與各報表工具共用。
 //   POST /cron?key=           每日入列（Cloud Scheduler，台北 05:00）：T-2~T-1
 //   POST /backfill/cron?key=&sd=&ed=&platforms=  回補入列（手動打一次；預設 DRMP 2026-05-21 ~ T-3；D1 要 platforms=D1，預設 2026-05-01 起）
+//        &mdim=only  只排 M 維度表＋切片表（一天一個 job；一次最多 7 天、台北 07:00~23:00 才收，避開每日批次）。不給＝不排這兩種
 //   POST /worker/cron?key=    worker（Cloud Scheduler 每分鐘）：D/R/M/P/D1 五條線同時跑，各自在時間預算內連續認領該平台的 job
 //   POST /setup/cron?key=     建表＋view（冪等；worker 第一次寫入也會自動做）
 //   POST /health/cron?key=[&dry=1]  每日健檢（Cloud Scheduler，台北 07:00）→ Google Chat；dry=1 只算不發
@@ -16,7 +17,7 @@ import {
 } from '../../core/store.js';
 import {
   addDays, ensureNexusBq, listTargets, planBackfill, planDaily, runNexusJob, twToday, NexusNoRetryError, NexusDeferError,
-  NexusQuotaError, rBackfillBlock, twHhmm, parsePlatforms, backfillStart,
+  NexusQuotaError, rBackfillBlock, twHhmm, parsePlatforms, backfillStart, isMExtraJob, mdimBackfillBlock,
 } from './run.js';
 import { evaluateHealth, gatherHealth, formatChat, postChat } from './health.js';
 import { runRecon, reconSql, reconDueDates } from './recon.js';
@@ -66,10 +67,17 @@ export function registerNexus(app: FastifyInstance): void {
     if (!platforms.length) return reply.code(400).send({ error: 'platforms 無效（D／R／M／P／D1）' });
     const starts = platforms.map((p) => String(q.sd ?? backfillStart(p)));
     if (!ymdOk(ed) || starts.some((sd) => !ymdOk(sd) || sd > ed)) return reply.code(400).send({ error: '日期無效' });
-    const targets = (await listTargets()).filter((t) => platforms.includes(t.platform));
+    // M 維度表／切片表只在明講 mdim=only 時排（Redash 的 key 屬於 AM 主管，一次對它送大量查詢不行；使用者 2026-11-09 定每批 7 天）
+    const mdimOnly = String(q.mdim ?? '') === 'only';
+    if (mdimOnly) {
+      const why = mdimBackfillBlock({ sd: starts[0], ed, hhmm: twHhmm() });
+      if (why) return reply.code(400).send({ error: why });
+    }
+    const targets = (await listTargets()).filter((t) => platforms.includes(t.platform) && (mdimOnly ? isMExtraJob(t) : !isMExtraJob(t)));
+    if (mdimOnly && !targets.length) return reply.code(400).send({ error: 'mdim=only 要配 platforms=M' });
     const jobs = platforms.flatMap((p, i) => planBackfill(targets.filter((t) => t.platform === p), starts[i], ed));
     const sd = [...starts].sort()[0];
-    const batch = `backfill:${sd}~${ed}`;
+    const batch = `backfill${mdimOnly ? '-mdim' : ''}:${sd}~${ed}`;
     const r = await enqueueNexusJobs(batch, 'backfill', jobs);
     app.log.info({ batch, ...r }, 'nexus backfill enqueued');
     reply.code(202).send({ ok: true, batch, ...r });

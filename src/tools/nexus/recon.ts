@@ -14,8 +14,9 @@
 // 不會每次開頁面就查 BQ。
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { replaceNexusRecon, type NexusPlatform, type NexusReconRow } from '../../core/store.js';
-import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE } from './schema.js';
+import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE, M_DIM_TABLE, M_SLICE_TABLE } from './schema.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
+import { ensureNexusBqOnce } from './run.js';
 
 /** 吻合率門檻：≥ ok 綠、≥ warn 黃、其餘紅。先抓寬一點，跑幾天看實際誤差再調。 */
 export const RECON = {
@@ -61,6 +62,15 @@ export function reconSql(dt: string): string {
   const convDevice = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name,
     SUM(click) AS click, ${ev('conv_interest')} AS interest, ${ev('conv_decision')} AS decision, ${ev('conv_buy')} AS buy
   FROM ${q(DEVICE_TABLE)} WHERE date = ${d} AND platform = 'M' AND ${notOrphan} GROUP BY account_id`;
+  // M 維度表／切片表（2026-11-09）：台北日，只比台北時區帳戶（非台北帳戶的單日數字本來就跟事實表切法不同）。
+  // tw＝這個帳戶在表裡全部是台北時區；切片只看 hour_device 那一份（三種切片是同一份 API 流量，Others 佔比一樣）。
+  const tw = `account_tz = 'Asia/Taipei'`;
+  const dimSums = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name, LOGICAL_AND(${tw}) AS tw,
+    SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
+  FROM ${q(M_DIM_TABLE)} WHERE date = ${d} GROUP BY account_id`;
+  const sliceSums = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name, LOGICAL_AND(${tw}) AS tw,
+    SUM(imp) AS imp, SUM(IF(teaser_id IS NULL, imp, 0)) AS other
+  FROM ${q(M_SLICE_TABLE)} WHERE date = ${d} AND slice = 'hour_device' GROUP BY account_id`;
   return `
 WITH f AS (
     ${facts}
@@ -72,17 +82,24 @@ WITH f AS (
   ${convFact}
 ), cd AS (
   ${convDevice}
+), x AS (
+  ${dimSums}
+), s AS (
+  ${sliceSums}
 )
-SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name, cf.account_name, cd.account_name) AS account_name,
+SELECT platform, account_id, COALESCE(f.account_name, v.account_name, m.account_name, cf.account_name, cd.account_name, x.account_name, s.account_name) AS account_name,
   IFNULL(f.imp, 0) AS f_imp, IFNULL(f.click, 0) AS f_click, IFNULL(f.spend, 0) AS f_spend,
   IFNULL(v.imp, 0) AS v_imp, IFNULL(v.click, 0) AS v_click, IFNULL(v.spend, 0) AS v_spend,
   IFNULL(m.imp, 0) AS m_imp, IFNULL(m.click, 0) AS m_click, IFNULL(m.spend, 0) AS m_spend,
   m.account_id IS NOT NULL AS m_has,
   IFNULL(cf.click, 0) AS cf_click, IFNULL(cf.interest, 0) AS cf_interest, IFNULL(cf.decision, 0) AS cf_decision, IFNULL(cf.buy, 0) AS cf_buy,
   IFNULL(cd.click, 0) AS cd_click, IFNULL(cd.interest, 0) AS cd_interest, IFNULL(cd.decision, 0) AS cd_decision, IFNULL(cd.buy, 0) AS cd_buy,
-  cd.account_id IS NOT NULL AS c_has
+  cd.account_id IS NOT NULL AS c_has,
+  IFNULL(x.imp, 0) AS x_imp, IFNULL(x.click, 0) AS x_click, IFNULL(x.spend, 0) AS x_spend, x.account_id IS NOT NULL AS x_has, x.tw AS x_tw,
+  IFNULL(s.imp, 0) AS s_imp, IFNULL(s.other, 0) AS s_other, s.account_id IS NOT NULL AS s_has, s.tw AS s_tw
 FROM f FULL OUTER JOIN v USING (platform, account_id) FULL OUTER JOIN m USING (platform, account_id)
-  FULL OUTER JOIN cf USING (platform, account_id) FULL OUTER JOIN cd USING (platform, account_id)`;
+  FULL OUTER JOIN cf USING (platform, account_id) FULL OUTER JOIN cd USING (platform, account_id)
+  FULL OUTER JOIN x USING (platform, account_id) FULL OUTER JOIN s USING (platform, account_id)`;
 }
 
 /**
@@ -95,6 +112,11 @@ export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow
   const money = (v: string | null | undefined) => Math.round(n(v) * 10000) / 10000;
   const has = (v: unknown) => v === true || v === 'true' || v === '1' || v === 1;
   const withMedia = new Set(raw.filter((r) => has(r.m_has)).map((r) => r.platform));
+  // M 維度表／切片表：那天表裡有任何列才比（還沒回補的日子不當 0%）；帳戶不是台北時區（tw=false）不比。
+  // 帳戶整個不在表裡（tw=NULL）照樣比、當 0——那才是真的漏。
+  const withDim = raw.some((r) => has(r.x_has));
+  const withSlice = raw.some((r) => has(r.s_has));
+  const notTw = (v: unknown) => v === false || v === 'false' || v === 0 || v === '0';
   // M 轉換層逐帳戶判斷：該帳戶那天在裝置表有 M 列才比（沒有裝置列的帳戶，主比對的曝光／點擊／花費已經會亮）。
   // client: 墊底帳戶兩邊都是 Redash（SQL 已排除）。
   return raw.map((r) => ({
@@ -108,6 +130,9 @@ export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow
         device: { click: n(r.cd_click), interest: n(r.cd_interest), decision: n(r.cd_decision), buy: n(r.cd_buy) },
       },
     } : {}),
+    ...(r.platform === 'M' && withDim && !notTw(r.x_tw) ? { mdim: { imp: n(r.x_imp), click: n(r.x_click), spend: money(r.x_spend) } } : {}),
+    ...(r.platform === 'M' && withSlice && !notTw(r.s_tw) && !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX)
+      ? { mslice: { imp: n(r.s_imp), others: n(r.s_other) } } : {}),
   }));
 }
 
@@ -116,6 +141,7 @@ export const RECON_PER_TICK = 5;
 
 /** 跑一次比對並存進 Cloud SQL。回傳比對了幾個帳戶。 */
 export async function runRecon(dt: string): Promise<number> {
+  await ensureNexusBqOnce();
   const rows = toReconRows(await bqQuery(reconSql(dt)));
   await replaceNexusRecon(dt, rows);
   return rows.length;
@@ -238,6 +264,38 @@ export function summarizeConvRecon(rows: NexusReconRow[]): ConvRecon {
     .sort((a, b) => b.weight - a.weight)
     .map(({ row, diff }) => ({ row, diff }));
   return { match: vals.length ? Math.min(...vals) : null, byMetric, diffs };
+}
+
+// ────────────────────────────── M 維度表／切片表（2026-11-09） ──────────────────────────────
+
+/**
+ * M 維度表 vs 事實表（曝光、點擊；花費在帳戶層分配成計費金額，非台北帳戶用 Redash 換算值，不比）。
+ * 台北時區帳戶有 Others 補差額，應該 100%；落差＝Others 沒補到或維度表漏寫。算法同 summarizeRecon，分級亮燈。
+ */
+export function summarizeDimRecon(rows: NexusReconRow[]): { match: number | null; diffs: NexusReconRow[] } {
+  const mine = rows.filter((r) => r.platform === 'M' && r.mdim);
+  const vals: number[] = [];
+  for (const m of ['imp', 'click'] as const) {
+    let diff = 0, base = 0;
+    for (const r of mine) { diff += Math.abs(r.fact[m] - r.mdim![m]); base += Math.max(r.fact[m], r.mdim![m]); }
+    if (base > 0) vals.push(1 - diff / base);
+  }
+  const diffs = mine.filter((r) => rel(r.fact.imp, r.mdim!.imp) > RECON.accountDiff || rel(r.fact.click, r.mdim!.click) > RECON.accountDiff)
+    .sort((a, b) => Math.abs(b.fact.imp - b.mdim!.imp) - Math.abs(a.fact.imp - a.mdim!.imp));
+  return { match: vals.length ? Math.min(...vals) : null, diffs };
+}
+
+/** 切片表 Others 佔曝光的比例超過這個 ⇒ 黃燈（使用者 2026-11-09 定 2%）。 */
+export const SLICE_OTHERS_WARN = 0.02;
+
+/** 切片表 hour_device 的 Others 佔比（台北時區帳戶加總）；那天沒有切片資料為 null。 */
+export function summarizeSliceOthers(rows: NexusReconRow[]): { share: number | null; top: NexusReconRow[] } {
+  const mine = rows.filter((r) => r.platform === 'M' && r.mslice);
+  const imp = mine.reduce((a, r) => a + r.mslice!.imp, 0);
+  const other = mine.reduce((a, r) => a + r.mslice!.others, 0);
+  const top = mine.filter((r) => r.mslice!.imp > 0 && r.mslice!.others / r.mslice!.imp > SLICE_OTHERS_WARN)
+    .sort((a, b) => b.mslice!.others - a.mslice!.others);
+  return { share: imp > 0 ? other / imp : null, top };
 }
 
 export const reconLevel = (match: number | null): 'ok' | 'warn' | 'alert' | 'none' =>

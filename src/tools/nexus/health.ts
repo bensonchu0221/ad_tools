@@ -9,7 +9,7 @@ import {
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
-import { summarizeRecon, summarizeMediaRecon, summarizeConvRecon, fmtMatch, RECON } from './recon.js';
+import { summarizeRecon, summarizeMediaRecon, summarizeConvRecon, summarizeDimRecon, summarizeSliceOthers, fmtMatch, RECON, SLICE_OTHERS_WARN } from './recon.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
@@ -238,6 +238,30 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
         });
       }
     }
+    // M 維度表（Redash 五維）vs 事實表：台北時區帳戶有 Others 補差額，應該 100%。分級亮燈
+    const dim = summarizeDimRecon(inp.recon.rows);
+    if (dim.match !== null) {
+      summary.push(`M 維度層吻合 ${fmtMatch(dim.match)}`);
+      if (dim.match < RECON.ok) {
+        const top = dim.diffs.slice(0, 3).map((r) => r.accountName || r.accountId).join('、');
+        items.push({
+          level: dim.match < RECON.warn ? 'alert' : 'warn',
+          text: `${PNAME.M} ${t1} 維度表與素材層的曝光／點擊只吻合 ${fmtMatch(dim.match)}（${dim.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}；PAC 的 MGID 細分維度會不準）`,
+        });
+      }
+    }
+    // M 切片表：Others（事實表有、API 切片沒有）佔比。生涯零點擊 teaser、API 曝光比後台少，平常 < 0.2%
+    const sl = summarizeSliceOthers(inp.recon.rows);
+    if (sl.share !== null) {
+      summary.push(`M 切片 Others ${(sl.share * 100).toFixed(2)}%`);
+      if (sl.share > SLICE_OTHERS_WARN) {
+        const top = sl.top.slice(0, 3).map((r) => r.accountName || r.accountId).join('、');
+        items.push({
+          level: 'warn',
+          text: `${PNAME.M} ${t1} 切片表（小時／地區／國家）有 ${(sl.share * 100).toFixed(1)}% 曝光落在 Others，超過 ${SLICE_OTHERS_WARN * 100}%${top ? `（最多：${top}）` : ''}`,
+        });
+      }
+    }
     // M：Redash（MGID 內部全帳戶）有投放、token 表卻沒有的帳戶。素材層會用 Redash 墊底（2026-10-05 起）。
     // AM 主管給 Redash 就是為了「沒填 token 也不漏」⇒ 墊底是正規路徑，綠燈只在結論區列名單（2026-10-06 使用者拍板）；
     // 墊底沒寫進去（素材層仍是 0）才是真的缺數字 ⇒ 紅燈。
@@ -266,6 +290,10 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       }
       const c = summarizeConvRecon(rows);
       if (c.match !== null && c.match < RECON.ok) bad.push({ text: `M ${dt.slice(5)} 轉換層 ${fmtMatch(c.match)}`, alert: c.match < RECON.warn });
+      const x = summarizeDimRecon(rows);
+      if (x.match !== null && x.match < RECON.ok) bad.push({ text: `M ${dt.slice(5)} 維度層 ${fmtMatch(x.match)}`, alert: x.match < RECON.warn });
+      const sl = summarizeSliceOthers(rows);
+      if (sl.share !== null && sl.share > SLICE_OTHERS_WARN) bad.push({ text: `M ${dt.slice(5)} 切片 Others ${(sl.share * 100).toFixed(1)}%`, alert: false });
     }
     const days = inp.rechecked.length;
     if (bad.length) {

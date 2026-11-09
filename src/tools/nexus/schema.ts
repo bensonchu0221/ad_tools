@@ -177,6 +177,45 @@ export const D1_SCHEMA: BqField[] = [
   SYNCED_AT,
 ];
 
+// M 維度表（2026-11-09，設計 docs/superpowers/specs/2026-11-09-nexus-m-dimension-tables-design.md）：
+// MGID Redash 13252「日 × 帳戶 × campaign × teaser × 裝置 × 來源網站 × 作業系統 × 瀏覽器 × widget」，一次查詢拆完。
+// **日期一律台北日**（使用者 2026-11-09 定；M 事實表／裝置表仍是帳戶本地日），account_tz 記帳戶自己的時區：
+// 不是台北的帳戶單日數字會跟事實表差半天，比對與 PAC 都靠這欄分辨。
+// Others 列（source='Others'、teaser 與維度欄 NULL）＝事實表有、Redash 細分沒有的差額，補了加總才等於事實表（只補台北時區帳戶）。
+const CONV3 = [I('conv_buy', 'Main goal'), I('conv_decision', 'goal1'), I('conv_interest', 'goal2')];
+export const M_DIM_SCHEMA: BqField[] = [
+  { ...DATE, description: '數據日（台北日）' }, ACCOUNT_ID, S('account_name'),
+  S('client_id', 'Redash Client ID（97／98 開頭；不是 token 表的 api_client_id）'),
+  S('account_tz', '帳戶時區（不是 Asia/Taipei 的帳戶單日數字與事實表切法不同）'), S('currency', '帳戶幣別（twd／usd）'),
+  S('campaign_id'), S('campaign_name'), S('teaser_id', 'Others 列為 NULL'),
+  S('device', 'Redash 原始值：desktop／mobile／tablet／smarttv'),
+  S('source', 'sources_name：網域或具名庫存（MSN Homepage Infopane）；差額列為 Others'),
+  S('widget_uid', 'uid（媒體端 widget）'),
+  S('os', 'os_name（已整理字元）'), S('os_family', 'iOS／Android／Windows／Mac／Other'),
+  S('browser', 'browser_name（已整理字元；Redash 會截斷長名稱）'), S('browser_family'),
+  I('ad_requests', 'Impressions (Total)'), I('imp', 'Impressions (Viewable)＝API impressions'), I('click'),
+  F('spend', '帳戶幣別：台北時區帳戶＝API 計費依美金比例分配；其餘＝Redash 換算值'),
+  F('spend_usd', 'Redash Spent, USD 原值（含 data fee）'),
+  ...CONV3, SYNCED_AT,
+];
+
+// M 切片表（2026-11-09）：statistics-reports 一次最多 3 個維度、Redash 沒有小時與地區 ⇒ 三種切片各查一次：
+// hour_device（teaser×hour×deviceType）、region_device（teaser×region×deviceType）、country_region（teaser×country×region）。
+// **同一個 slice 內才能加總**（不同 slice 是同一份流量的不同拆法）。日期與小時都是台北時間。
+// Others 列（teaser 與維度欄 NULL）＝事實表減切片的差額（生涯零點擊 teaser、API 曝光比後台少的部分），只補台北時區帳戶。
+export const M_SLICES = ['hour_device', 'region_device', 'country_region'] as const;
+export type MSlice = (typeof M_SLICES)[number];
+export const M_SLICE_SCHEMA: BqField[] = [
+  { ...DATE, description: '數據日（台北日）' }, S('slice', 'hour_device／region_device／country_region', 'REQUIRED'),
+  ACCOUNT_ID, S('account_name'), S('account_tz'), S('currency'),
+  S('campaign_id', '依 teaser 對回'), S('teaser_id', 'Others 列為 NULL'),
+  S('device', 'deviceType 原始值；country_region 為 NULL'),
+  I('hour', '0~23 台北時間；只有 hour_device'),
+  S('region', 'API 原始值（舊式拼音：T\'ai-pei、Other regions…）'), S('country', '只有 country_region'),
+  I('imp'), I('click'), F('spend', 'API spent（帳戶幣別）'),
+  ...CONV3, SYNCED_AT,
+];
+
 // customer 對照表：目前由 AE/AM 在系統外維護，這張先建空表當「介面」。之後不論改成 Sheet 外部表
 // 或從 Cloud SQL 同步，只要表名與欄位不變，view 與 Looker 都不用改。
 export const CUSTOMER_MAP_SCHEMA: BqField[] = [
@@ -194,6 +233,8 @@ export const FACT_TABLE: Record<Platform, string> = {
 export const FACT_SCHEMA: Record<Platform, BqField[]> = { D: D_SCHEMA, R: R_SCHEMA, M: M_SCHEMA, P: P_SCHEMA, D1: D1_SCHEMA };
 export const DEVICE_TABLE = nexusTable('device_daily');
 export const MEDIA_TABLE = nexusTable('media_daily');
+export const M_DIM_TABLE = nexusTable('m_dim_daily');
+export const M_SLICE_TABLE = nexusTable('m_slice_daily');
 export const CUSTOMER_MAP_TABLE = nexusTable('customer_account_map');
 export const INTEGRATED_VIEW = nexusTable('integrated_daily');
 
@@ -206,6 +247,8 @@ export const TABLE_SPECS: BqTableSpec[] = [
   { table: DEVICE_TABLE, schema: DEVICE_SCHEMA, partitionField: 'date', clustering: ['platform', 'account_id'], description: 'nexus：四平台 裝置×日' },
   // 叢集照 dashboard 主查詢：某天某媒體 → 各帳戶
   { table: MEDIA_TABLE, schema: MEDIA_SCHEMA, partitionField: 'date', clustering: ['platform', 'media', 'account_id'], description: 'nexus：四平台 媒體×帳戶×日' },
+  { table: M_DIM_TABLE, schema: M_DIM_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id', 'source'], description: 'nexus：M 平台 teaser×裝置×來源網站×OS×瀏覽器×widget×台北日（Redash）' },
+  { table: M_SLICE_TABLE, schema: M_SLICE_SCHEMA, partitionField: 'date', clustering: ['slice', 'account_id'], description: 'nexus：M 平台 teaser×小時／地區／國家切片×台北日（statistics-reports）' },
   { table: CUSTOMER_MAP_TABLE, schema: CUSTOMER_MAP_SCHEMA, description: 'nexus：平台帳戶 → 客戶 對照（人工維護）' },
 ];
 

@@ -487,6 +487,8 @@ export async function fetchMAccount(
 export const M_UNMAPPED_PREFIX = 'client:';
 /** 沒有對照到帳戶時用的時區（Broadciel 帳戶大多是台北）。 */
 export const M_DEFAULT_TZ = 'Asia/Taipei';
+/** 時區查不到的帳戶（只有維度 job 會出現：排除清單裡 token 失效、靠事實表對回的帳戶）。 */
+export const M_UNKNOWN_TZ = 'unknown';
 
 export interface MOwner { accountId: string; accountName: string; tz: string; currency: string }
 
@@ -650,16 +652,22 @@ export function mDoubleCountRisk(
  * M 全平台裝置表：對照帳戶（各帳戶 campaign 清單、時區、幣別）→ 每個時區查一次 Redash → 轉列。
  * 某個帳戶 token 壞掉只記 warning：它的 campaign 對不上，照樣以 client:<Client ID> 寫入，不丟數字。
  */
-export async function fetchMRedashDevice(
-  sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void, isSkippedAccount: (accountId: string) => boolean = () => false
-): Promise<FetchResult> {
+/**
+ * M 帳戶對照（裝置 job、維度 job 共用）：各帳戶 campaign 清單＋時區＋幣別 → campaign→owner；
+ * 再用事實表補上清單裡已刪掉的 campaign、放掉排除帳戶沒寫過的 campaign。apiSpend＝nexus_coverage 的「帳戶|日」計費金額。
+ * 清單抓不到、但這段已有事實列的帳戶 ⇒ 墊底會重複計算，直接丟錯（呼叫端的 job 失敗重試）。
+ */
+export async function buildMOwners(
+  sd: string, ed: string, onPhase: (p: string) => void, isSkippedAccount: (accountId: string) => boolean = () => false, label = 'M 裝置',
+  opts: { recoverSkipped?: boolean } = {},
+): Promise<{ owners: Map<string, MOwner>; accountOwners: Map<string, MOwner>; apiSpend: Map<string, number>; warnings: string[] }> {
   const warnings: string[] = [];
   const owners = new Map<string, MOwner>();
   const accountOwners = new Map<string, MOwner>();
   const listFailed: { id: string; name: string }[] = [];
   const accounts = (await listMgidAccounts()).filter((a) => !/^98/.test(a.apiClientId));
   for (const [i, a] of accounts.entries()) {
-    onPhase(`M 裝置：對照帳戶 ${i + 1}/${accounts.length}（${a.clientName}）`);
+    onPhase(`${label}：對照帳戶 ${i + 1}/${accounts.length}（${a.clientName}）`);
     try {
       const token = await getMgidTokenById(a.apiClientId);
       if (!token) throw new Error('找不到 token');
@@ -670,22 +678,48 @@ export async function fetchMRedashDevice(
       for (const cid of campaigns) if (!owners.has(cid)) owners.set(cid, owner);
     } catch (e: any) {
       listFailed.push({ id: a.apiClientId, name: a.clientName });
-      warnings.push(`M ${a.clientName}（${a.apiClientId}）campaign 清單抓不到，它的裝置數字會記在 client:<Client ID>：${String(e?.message ?? e).slice(0, 120)}`);
+      warnings.push(`M ${a.clientName}（${a.apiClientId}）campaign 清單抓不到，它的數字會記在 client:<Client ID>：${String(e?.message ?? e).slice(0, 120)}`);
     }
   }
   const apiSpend = new Map<string, number>();
   const coverage = await nexusCoverageRows(sd, ed);
   for (const c of coverage) if (c.platform === 'M') apiSpend.set(`${c.accountId}|${c.dt}`, c.spend);
-  const risky = mDoubleCountRisk(listFailed, coverage);
-  if (risky.length) {
-    throw new Error(`M ${risky.map((a) => `${a.name}（${a.id}）`).join('、')} campaign 清單抓不到、但這段已有事實列，墊底會重複計算，稍後重試`);
-  }
   // 事實表裡正式帳戶寫過的 campaign（含已從清單刪掉的）也算它的。單一 M 事實表、只選兩欄、日期分區，掃描量很小
   const factPairs = await bqQuery(`SELECT DISTINCT account_id, campaign_id FROM \`${FACT_TABLE.M}\`
     WHERE date BETWEEN DATE ${sqlString(sd)} AND DATE ${sqlString(ed)} AND NOT STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)}) AND campaign_id IS NOT NULL`);
   const pairs = factPairs.map((r) => ({ accountId: String(r.account_id), campaignId: String(r.campaign_id) }));
+  // 維度 job（recoverSkipped）：排除清單裡 token 已失效的帳戶（例 XMEI02 11/02 起 401），回補它還有投放的舊日子時，
+  // campaign 清單抓不到 ⇒ 用事實表把它的 campaign 對回它自己，時區不明記 'unknown'（不補差額、花費用 Redash 值），
+  // 不當成沒 token 的帳戶再墊一份。裝置 job 不走這條（它照時區查 Redash，'unknown' 不是時區）。
+  if (opts.recoverSkipped) {
+    for (const a of [...listFailed]) {
+      if (!isSkippedAccount(a.id)) continue;
+      const mine = pairs.filter((p) => p.accountId === a.id);
+      if (!mine.length) continue;
+      const owner: MOwner = { accountId: a.id, accountName: a.name, tz: M_UNKNOWN_TZ, currency: '' };
+      accountOwners.set(a.id, owner);
+      for (const p of mine) if (!owners.has(p.campaignId)) owners.set(p.campaignId, owner);
+      listFailed.splice(listFailed.indexOf(a), 1);
+      warnings.push(`M ${a.name}（${a.id}）在排除清單、token 失效：依事實表對回 ${mine.length} 支 campaign，時區不明、不補差額`);
+    }
+  }
+  const risky = mDoubleCountRisk(listFailed, coverage);
+  if (risky.length) {
+    throw new Error(`M ${risky.map((a) => `${a.name}（${a.id}）`).join('、')} campaign 清單抓不到、但這段已有事實列，墊底會重複計算，稍後重試`);
+  }
   addFactCampaignOwners(owners, accountOwners, pairs);
   releaseSkippedOwners(owners, isSkippedAccount, pairs);
+  return { owners, accountOwners, apiSpend, warnings };
+}
+
+/**
+ * M 全平台裝置表：對照帳戶（buildMOwners）→ 每個時區查一次 Redash → 轉列。
+ * 某個帳戶 token 壞掉只記 warning：它的 campaign 對不上，照樣以 client:<Client ID> 寫入，不丟數字。
+ */
+export async function fetchMRedashDevice(
+  sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void, isSkippedAccount: (accountId: string) => boolean = () => false
+): Promise<FetchResult> {
+  const { owners, apiSpend, warnings } = await buildMOwners(sd, ed, onPhase, isSkippedAccount);
   const tzs = [...new Set([M_DEFAULT_TZ, ...[...owners.values()].map((o) => o.tz)])];
   const byTz: Record<string, RedashRow[]> = {};
   for (const tz of tzs) {
