@@ -14,7 +14,7 @@
 // 不會每次開頁面就查 BQ。
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import { replaceNexusRecon, type NexusPlatform, type NexusReconRow } from '../../core/store.js';
-import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE, M_DIM_TABLE, M_SLICE_TABLE } from './schema.js';
+import { FACT_TABLE, DEVICE_TABLE, MEDIA_TABLE, M_DIM_TABLE, M_SLICE_TABLE, R_DIM_TABLE, P_DIM_TABLE } from './schema.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 import { ensureNexusBqOnce } from './run.js';
 
@@ -67,7 +67,13 @@ export function reconSql(dt: string): string {
   const tw = `account_tz = 'Asia/Taipei'`;
   const dimSums = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name, LOGICAL_AND(${tw}) AS tw,
     SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
-  FROM ${q(M_DIM_TABLE)} WHERE date = ${d} GROUP BY account_id`;
+  FROM ${q(M_DIM_TABLE)} WHERE date = ${d} GROUP BY account_id
+  UNION ALL SELECT 'R' AS platform, account_id, ANY_VALUE(account_name) AS account_name, TRUE AS tw,
+    SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
+  FROM ${q(R_DIM_TABLE)} WHERE date = ${d} GROUP BY account_id
+  UNION ALL SELECT 'P' AS platform, account_id, ANY_VALUE(account_name) AS account_name, TRUE AS tw,
+    SUM(imp) AS imp, SUM(click) AS click, SUM(spend) AS spend
+  FROM ${q(P_DIM_TABLE)} WHERE date = ${d} GROUP BY account_id`;
   const sliceSums = `SELECT 'M' AS platform, account_id, ANY_VALUE(account_name) AS account_name, LOGICAL_AND(${tw}) AS tw,
     SUM(imp) AS imp, SUM(IF(teaser_id IS NULL, imp, 0)) AS other
   FROM ${q(M_SLICE_TABLE)} WHERE date = ${d} AND slice = 'hour_device' GROUP BY account_id`;
@@ -114,7 +120,8 @@ export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow
   const withMedia = new Set(raw.filter((r) => has(r.m_has)).map((r) => r.platform));
   // M 維度表／切片表：那天表裡有任何列才比（還沒回補的日子不當 0%）；帳戶不是台北時區（tw=false）不比。
   // 帳戶整個不在表裡（tw=NULL）照樣比、當 0——那才是真的漏。
-  const withDim = raw.some((r) => has(r.x_has));
+  // R／P 維度表（2026-11-10）同樣存在 mdim（x_* 欄），依平台各自判斷那天有沒有資料；兩平台都是台北日（tw 恆真）
+  const withDim = new Set(raw.filter((r) => has(r.x_has)).map((r) => r.platform));
   const withSlice = raw.some((r) => has(r.s_has));
   const notTw = (v: unknown) => v === false || v === 'false' || v === 0 || v === '0';
   // M 轉換層逐帳戶判斷：該帳戶那天在裝置表有 M 列才比（沒有裝置列的帳戶，主比對的曝光／點擊／花費已經會亮）。
@@ -130,7 +137,7 @@ export function toReconRows(raw: Record<string, string | null>[]): NexusReconRow
         device: { click: n(r.cd_click), interest: n(r.cd_interest), decision: n(r.cd_decision), buy: n(r.cd_buy) },
       },
     } : {}),
-    ...(r.platform === 'M' && withDim && !notTw(r.x_tw) ? { mdim: { imp: n(r.x_imp), click: n(r.x_click), spend: money(r.x_spend) } } : {}),
+    ...(DIM_PLATFORMS.includes(r.platform as NexusPlatform) && withDim.has(r.platform) && !notTw(r.x_tw) ? { mdim: { imp: n(r.x_imp), click: n(r.x_click), spend: money(r.x_spend) } } : {}),
     ...(r.platform === 'M' && withSlice && !notTw(r.s_tw) && !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX)
       ? { mslice: { imp: n(r.s_imp), others: n(r.s_other) } } : {}),
   }));
@@ -272,8 +279,9 @@ export function summarizeConvRecon(rows: NexusReconRow[]): ConvRecon {
  * M 維度表 vs 事實表（曝光、點擊；花費在帳戶層分配成計費金額，非台北帳戶用 Redash 換算值，不比）。
  * 台北時區帳戶有 Others 補差額，應該 100%；落差＝Others 沒補到或維度表漏寫。算法同 summarizeRecon，分級亮燈。
  */
-export function summarizeDimRecon(rows: NexusReconRow[]): { match: number | null; diffs: NexusReconRow[] } {
-  const mine = rows.filter((r) => r.platform === 'M' && r.mdim);
+export const DIM_PLATFORMS: NexusPlatform[] = ['M', 'R', 'P'];
+export function summarizeDimRecon(rows: NexusReconRow[], platform: NexusPlatform = 'M'): { match: number | null; diffs: NexusReconRow[] } {
+  const mine = rows.filter((r) => r.platform === platform && r.mdim);
   const vals: number[] = [];
   for (const m of ['imp', 'click'] as const) {
     let diff = 0, base = 0;

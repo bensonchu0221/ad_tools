@@ -33,6 +33,9 @@ import { summarizeDimRecon, summarizeSliceOthers, SLICE_OTHERS_WARN } from '../s
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
 import { fetchReport, fetchReportPaged, isRDailyLimit } from '../src/core/rixbee.js';
+import { toRDimRows, packRAccounts, fetchRDimBatch, toPDimRows, addDimOthers, DIM_OTHERS } from '../src/tools/nexus/rpdim.js';
+import { RP_DIM_JOB, RP_DIM_CHUNK_DAYS, isRPDimJob, isDimJob } from '../src/tools/nexus/run.js';
+import { R_DIM_SCHEMA, P_DIM_SCHEMA } from '../src/tools/nexus/schema.js';
 
 const T = '2026-09-23T00:00:00.000Z';
 let n = 0;
@@ -869,9 +872,11 @@ const rr = (platform: any, accountId: string, f: [number, number, number], d: [n
   fact: { imp: f[0], click: f[1], spend: f[2] }, device: { imp: d[0], click: d[1], spend: d[2] },
 });
 
-await ok('比對 SQL：五張事實表（含 D1）＋裝置表＋媒體表＋M 轉換兩邊＋M 維度／切片表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
+await ok('比對 SQL：五張事實表（含 D1）＋裝置表＋媒體表＋M 轉換兩邊＋M／R／P 維度表＋M 切片表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
   const sql = reconSql('2026-09-23');
-  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 11);
+  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 13);
+  assert.match(sql, /nexus_r_dim_daily/);
+  assert.match(sql, /nexus_p_dim_daily/);
   assert.match(sql, /nexus_media_daily/);
   assert.match(sql, /FULL OUTER JOIN m USING \(platform, account_id\)/);
   assert.match(sql, /SUM\(charge\)/);
@@ -1725,7 +1730,125 @@ await ok('健檢：M 維度層不吻合亮燈、切片 Others 超過 2% 黃燈',
   inp.recon = { checkedAt: '2026-11-08 07:00:00', rows: [r('860001', { mdim: { imp: 1000, click: 10, spend: 50 }, mslice: { imp: 1000, others: 1 } })] };
   const ok2 = evaluateHealth(inp);
   assert.ok(!ok2.items.some((i) => /維度表|切片表/.test(i.text)));
-  assert.ok(ok2.summary.some((s) => /M 維度層吻合 100%/.test(s)) && ok2.summary.some((s) => /M 切片 Others 0.10%/.test(s)));
+  assert.ok(ok2.summary.some((s) => /維度層吻合 M 100%/.test(s)) && ok2.summary.some((s) => /M 切片 Others 0.10%/.test(s)));
+});
+
+// ────────────────────────────── R／P 維度表（2026-11-10） ──────────────────────────────
+
+await ok('R 維度列：裝置代碼歸桶（3／4 併 Others）、同 key 合併、behavior 加總、全 0 列丟掉、欄位都在 schema 裡', () => {
+  const raw = [
+    { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 2, impression: 42, click: 1, payment_revenue: 3.25, behavior0: 1 },
+    { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 1, impression: 10, click: 0, payment_revenue: 0.5 },
+    { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 3, impression: 2, click: 0, payment_revenue: 0 },
+    { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 4, impression: 3, click: 0, payment_revenue: 0.01, behavior6: 2 },
+    { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'zero.com', device_type: 2, impression: 0, click: 0, payment_revenue: 0 },
+  ];
+  const rows = toRDimRows(raw, T);
+  assert.equal(rows.length, 3);
+  const pc = rows.find((r) => r.device === 'PC')!, oth = rows.find((r) => r.device === 'Others')!;
+  assert.deepEqual([pc.imp, pc.click, pc.spend, pc.behavior0, pc.account_id, pc.campaign_id, pc.media], [42, 1, 3.25, 1, '10277', '240658', 'a.com']);
+  assert.deepEqual([oth.imp, oth.spend, oth.behavior6], [5, 0.01, 2]);
+  assert.equal(rows.find((r) => r.device === 'Mobile')!.imp, 10);
+  const cols = new Set(R_DIM_SCHEMA.map((f) => f.name));
+  for (const k of Object.keys(rows[0])) assert.ok(cols.has(k), `R 維度列多了 schema 沒有的欄 ${k}`);
+});
+
+await ok('R 帳戶分批：依估計列數裝箱、超過上限的帳戶自己一批', () => {
+  const est: Record<string, number> = { a: 7545, b: 6000, c: 1500, d: 500, e: 12000 };
+  const bins = packRAccounts(Object.keys(est), (id) => est[id], 8000);
+  assert.deepEqual(bins, [['e'], ['a'], ['b', 'c', 'd']]);   // a+d=8,045 超過；b+c+d 剛好 8,000
+  for (const bin of bins) if (bin.length > 1) assert.ok(bin.reduce((s, id) => s + est[id], 0) <= 8000);
+});
+
+await ok('R 一批截斷：多帳戶對半拆、單帳戶依同一排序翻頁去重；翻頁中總數變了就丟錯', async () => {
+  const calls: string[] = [];
+  const row = (u: string, i: number) => ({ day: '2026-11-08', user_id: u, cpg_id: 1, bundle: `b${i}`, device_type: 2, impression: 1 });
+  const once = async ({ userIds, start }: { userIds: string[]; day: string; start: number }) => {
+    calls.push(`${userIds.join('+')}@${start}`);
+    if (userIds.length > 1) return { rows: [row('x', 0)], total: 99999 };            // 一批太大
+    if (userIds[0] === 'a') return { rows: [row('a', 1), row('a', 2)], total: 2 };      // 拆開後放得下
+    // b 單帳戶 3 列、一頁 2 列：第二頁重複一列（交界不穩）要去重
+    return start === 0 ? { rows: [row('b', 1), row('b', 2)], total: 3 } : { rows: [row('b', 2), row('b', 3)], total: 3 };
+  };
+  const out = await fetchRDimBatch(['a', 'b'], '2026-11-08', once);
+  assert.deepEqual(calls, ['a+b@0', 'a@0', 'b@0', 'b@2']);
+  assert.equal(out.length, 5);   // a 2 列＋b 去重後 3 列
+  assert.deepEqual(out.filter((r) => r.user_id === 'b').map((r) => r.bundle).sort(), ['b1', 'b2', 'b3']);
+  const drift = async ({ start }: { userIds: string[]; day: string; start: number }) => ({ rows: [row('c', start)], total: start === 0 ? 2 : 3 });
+  await assert.rejects(fetchRDimBatch(['c'], '2026-11-08', drift), /翻頁期間總列數變了/);
+});
+
+await ok('P 維度列：Desktop→PC、無 advertiser 歸 (unattributed)、同 key 合併、全 0 列丟掉、欄位都在 schema 裡', () => {
+  const raw = [
+    { date: 'Tue, 15 Sep 2026 00:00:00 GMT', advertiser: '702-407-2420', advertiser_name: 'juliArt', campaign_id: 1056487025, campaign_name: 'C', creative_id: 9, domain: 'www.uho.com.tw', slot: 'newsscope', device: 'Desktop', impressions: 3377, clicks: 1, spend: 5 },
+    { date: 'Tue, 15 Sep 2026 00:00:00 GMT', advertiser: '702-407-2420', advertiser_name: 'juliArt', campaign_id: 1056487025, campaign_name: 'C', creative_id: 9, domain: 'www.uho.com.tw', slot: 'newsscope', device: 'Desktop', impressions: 3, clicks: 0, spend: 0.5 },
+    { date: 'Tue, 15 Sep 2026 00:00:00 GMT', advertiser: null, campaign_id: null, domain: null, slot: null, device: 'Mobile', impressions: 0, clicks: 1, spend: 0 },
+    { date: 'Tue, 15 Sep 2026 00:00:00 GMT', advertiser: '702-407-2420', campaign_id: 1, domain: 'x', slot: 'y', device: 'Tablet', impressions: 0, clicks: 0, spend: 0 },
+  ];
+  const rows = toPDimRows(raw, T);
+  assert.equal(rows.length, 2);
+  assert.deepEqual([rows[0].date, rows[0].device, rows[0].imp, rows[0].spend, rows[0].campaign_id, rows[0].placement], ['2026-09-15', 'PC', 3380, 5.5, '1056487025', 'newsscope']);
+  assert.equal(rows[1].account_id, P_UNATTRIBUTED);
+  const cols = new Set(P_DIM_SCHEMA.map((f) => f.name));
+  for (const r of rows) for (const k of Object.keys(r)) assert.ok(cols.has(k), `P 維度列多了 schema 沒有的欄 ${k}`);
+});
+
+await ok('R／P 維度 Others：事實表多的補一列（花費捨入誤差內不補）、維度表多只警告照寫、事實表沒有的 campaign 也警告', () => {
+  const dim = (cpg: string, imp: number, click: number, spend: number): Record<string, unknown> =>
+    ({ date: '2026-11-08', account_id: '10277', account_name: '樂敦', campaign_id: cpg, campaign_name: 'C', media: 'a.com', device: 'PC', imp, click, spend });
+  const fact = (cpg: string, imp: number, click: number, spend: number) =>
+    ({ date: '2026-11-08', accountId: '10277', accountName: '樂敦', campaignId: cpg, campaignName: 'C', m: { imp, click, spend } });
+  const res = addDimOthers({
+    platform: 'R', syncedAt: T, metrics: ['imp', 'click', 'spend'],
+    rows: [dim('1', 600, 4, 17715.06), dim('2', 100, 1, 10), dim('3', 50, 0, 0)],   // 花費差 0.04＝一列的捨入誤差內
+    facts: [fact('1', 627830, 4429, 17715.02), fact('2', 90, 1, 10)],
+  });
+  const others = res.rows.filter((r) => r.media === DIM_OTHERS);
+  assert.equal(others.length, 1);
+  assert.deepEqual([others[0].campaign_id, others[0].imp, others[0].click, others[0].spend, others[0].device], ['1', 627230, 4425, 0, null]);
+  assert.match(res.warnings[0], /維度表比事實表多 2 處.*campaign 2 imp 多 10.*2026-11-08 10277 3（事實表沒有這支 campaign）/);
+  assert.ok(res.warnings.some((w) => /補了 1 列 Others/.test(w)));
+  // P 的 Others 列要有 creative_id／placement 欄（NULL）
+  const p = addDimOthers({ platform: 'P', syncedAt: T, metrics: ['imp', 'click', 'spend'], rows: [], facts: [fact('9', 29, 0, 0)] });
+  assert.deepEqual([p.rows[0].media, p.rows[0].creative_id, p.rows[0].placement, p.rows[0].imp], [DIM_OTHERS, null, null, 29]);
+});
+
+await ok('R／P 維度 job：排程（R 7 天、P 30 天一段）、一般回補不排、帳戶欄 *dim', () => {
+  const t = (platform: any, accountId: string): AccountRef => ({ platform, accountId, accountName: accountId });
+  assert.ok(isRPDimJob(t('R', RP_DIM_JOB)) && isRPDimJob(t('P', RP_DIM_JOB)) && !isRPDimJob(t('R', '*')) && !isRPDimJob(t('M', '*dim')));
+  assert.ok(isDimJob(t('M', M_DIM_JOB)) && isDimJob(t('M', M_SLICE_JOB)) && isDimJob(t('R', RP_DIM_JOB)) && !isDimJob(t('M', '*')));
+  const jobs = planBackfill([t('R', RP_DIM_JOB), t('P', RP_DIM_JOB), t('R', '*')], '2026-05-21', '2026-07-10');
+  const span = (j: any) => (Date.parse(j.ed) - Date.parse(j.sd)) / 86400_000 + 1;
+  assert.ok(jobs.filter((j) => j.platform === 'R' && j.accountId === RP_DIM_JOB).every((j) => span(j) <= RP_DIM_CHUNK_DAYS.R));
+  assert.equal(jobs.filter((j) => j.platform === 'R' && j.accountId === RP_DIM_JOB).length, 8);   // 51 天 ÷ 7
+  assert.equal(jobs.filter((j) => j.platform === 'P').length, 2);                                  // 51 天 ÷ 30
+  assert.equal(jobs.filter((j) => j.platform === 'R' && j.accountId === '*').length, 2);
+});
+
+await ok('比對：R／P 維度層各自判斷有沒有資料、算吻合；健檢用平台名亮燈', () => {
+  const base = { account_name: 'x', f_imp: '1000', f_click: '10', f_spend: '50', v_imp: '1000', v_click: '10', v_spend: '50', m_has: false, c_has: false, s_has: false };
+  const rows = toReconRows([
+    { ...base, platform: 'R', account_id: '10277', x_has: true, x_tw: true, x_imp: '900', x_click: '10', x_spend: '50' },
+    { ...base, platform: 'P', account_id: '292-462-3142', x_has: false, x_tw: null, x_imp: '0', x_click: '0', x_spend: '0' },
+    { ...base, platform: 'D', account_id: '1', x_has: false, x_tw: null, x_imp: '0', x_click: '0', x_spend: '0' },
+  ] as any);
+  assert.deepEqual(rows[0].mdim, { imp: 900, click: 10, spend: 50 });
+  assert.ok(!rows[1].mdim && !rows[2].mdim);   // P 那天沒有維度資料（還沒回補）不當 0%、D 沒有維度表
+  assert.ok(summarizeDimRecon(rows, 'R').match! < 0.95);
+  assert.equal(summarizeDimRecon(rows, 'P').match, null);
+  const inp = healthBase();
+  inp.recon = { checkedAt: '2026-11-10 07:00:00', rows };
+  const h = evaluateHealth(inp);
+  assert.ok(h.items.some((i) => i.level === 'alert' && /^R（.*維度表與素材層的曝光／點擊只吻合/.test(i.text)), JSON.stringify(h.items));
+});
+
+await ok('狀態頁：R／P 的刻度圈只看全平台 job，維度 job 沒成功另起一行', () => {
+  const input = healthBase();
+  const batchJobs = [bjob(1, 'R', 'success', { accountId: '*' }), bjob(2, 'R', 'failed', { accountId: '*dim', message: 'R 爆了' })];
+  const html = statusPage({ input, health: evaluateHealth(input), batchJobs, jobs: batchJobs });
+  assert.match(html, /class="ring-success"/);
+  assert.match(html, /維度表：失敗：R 爆了/);
+  assert.doesNotMatch(html, /1 個帳戶失敗/);
 });
 
 console.log(`\n全部 ${n} 項通過`);

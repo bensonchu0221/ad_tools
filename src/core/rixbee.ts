@@ -186,6 +186,22 @@ export async function fetchReport(opts: ReportOptions): Promise<any[]> {
  *  - order_key 只能是查詢裡有的維度或指標（1002 "The order key only support ..."），所以只有單帳戶單日時 bundle 才唯一。
  * 回傳的列呼叫端仍要用排序鍵去重、再拿帳戶總數驗。任一頁不是合法回應就丟錯（不能把空頁當成沒資料）。
  */
+/**
+ * 單次請求（不分週、截斷也不自動拆日重打）：回這頁的列與總列數，呼叫端自己決定要拆帳戶還是翻頁。
+ * 給 nexus R 維度表用（2026-11-10）：fetchReport 單日截斷時會把同一天再打一次才發現仍截斷，白費一次請求額度。
+ */
+export async function fetchReportOnce(
+  opts: ReportOptions & { start?: number; orderKey?: string }
+): Promise<{ rows: any[]; total: number }> {
+  const { buildReq, parse } = reportClient(opts);
+  const start = opts.start ?? 0;
+  const extra = opts.orderKey ? { order_key: opts.orderKey, order: 'asc' } : {};
+  opts.onRequests?.(1);
+  const [text] = await batchFetch([buildReq(opts.startDate, opts.endDate, start, start + PAGE_LIMIT, extra)]);
+  if (!text.trim().startsWith('{')) throw new Error(`R 報表 start=${start} 沒拿到回應`);
+  return parse(text);
+}
+
 export async function fetchReportPaged(opts: ReportOptions & { orderKey: string }): Promise<{ rows: any[]; total: number }> {
   const { buildReq, parse } = reportClient(opts);
   const extra = { order_key: opts.orderKey, order: 'asc' };

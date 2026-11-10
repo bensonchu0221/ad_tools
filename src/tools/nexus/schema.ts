@@ -216,6 +216,25 @@ export const M_SLICE_SCHEMA: BqField[] = [
   ...CONV3, SYNCED_AT,
 ];
 
+// R／P 維度表（2026-11-10，照 M 維度表的模式）：給 PAC Ad Performance「媒體 × 裝置」交叉用。
+// 兩平台 API 本來就是台北日，跟事實表同一套切法。Others 列（media='Others'、裝置等維度欄 NULL）＝事實表有、維度報表沒有的差額。
+// R：日 × 帳戶 × campaign × 媒體（app_bundle_id）× 裝置。素材層不做：單帳戶單日就破 2 萬列、全平台一天 15 萬列（11/08 實測），
+//    R 每把 token 有每日請求上限，划不來。
+// P：日 × 帳戶 × campaign × 素材 × 網域 × 版位 × 裝置（P 一天最多約 50 列）。
+const DIM_DEVICE = S('device', 'PC／Mobile／Tablet／Others（對照同 nexus_device_daily）；Others 差額列為 NULL');
+export const R_BEHAVIORS = ['behavior0', 'behavior1', 'behavior2', 'behavior3', 'behavior4', 'behavior5', 'behavior6'] as const;
+export const R_DIM_SCHEMA: BqField[] = [
+  DATE, ACCOUNT_ID, S('account_name'), S('campaign_id'), S('campaign_name'),
+  S('media', 'app_bundle_id 原始值（網域或 App bundle）；差額列為 Others'), DIM_DEVICE,
+  I('imp'), I('click'), F('spend', 'payment_revenue（台幣）'),
+  ...R_BEHAVIORS.map((b) => I(b)), SYNCED_AT,
+];
+export const P_DIM_SCHEMA: BqField[] = [
+  DATE, ACCOUNT_ID, S('account_name'), S('campaign_id'), S('campaign_name'), S('creative_id', 'Others 列為 NULL'),
+  S('media', 'domain 原始值；差額列為 Others'), S('placement', 'slot；Others 列為 NULL'), DIM_DEVICE,
+  I('imp'), I('click'), F('spend'), SYNCED_AT,
+];
+
 // customer 對照表：目前由 AE/AM 在系統外維護，這張先建空表當「介面」。之後不論改成 Sheet 外部表
 // 或從 Cloud SQL 同步，只要表名與欄位不變，view 與 Looker 都不用改。
 export const CUSTOMER_MAP_SCHEMA: BqField[] = [
@@ -235,6 +254,8 @@ export const DEVICE_TABLE = nexusTable('device_daily');
 export const MEDIA_TABLE = nexusTable('media_daily');
 export const M_DIM_TABLE = nexusTable('m_dim_daily');
 export const M_SLICE_TABLE = nexusTable('m_slice_daily');
+export const R_DIM_TABLE = nexusTable('r_dim_daily');
+export const P_DIM_TABLE = nexusTable('p_dim_daily');
 export const CUSTOMER_MAP_TABLE = nexusTable('customer_account_map');
 export const INTEGRATED_VIEW = nexusTable('integrated_daily');
 
@@ -249,6 +270,8 @@ export const TABLE_SPECS: BqTableSpec[] = [
   { table: MEDIA_TABLE, schema: MEDIA_SCHEMA, partitionField: 'date', clustering: ['platform', 'media', 'account_id'], description: 'nexus：四平台 媒體×帳戶×日' },
   { table: M_DIM_TABLE, schema: M_DIM_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id', 'source'], description: 'nexus：M 平台 teaser×裝置×來源網站×OS×瀏覽器×widget×台北日（Redash）' },
   { table: M_SLICE_TABLE, schema: M_SLICE_SCHEMA, partitionField: 'date', clustering: ['slice', 'account_id'], description: 'nexus：M 平台 teaser×小時／地區／國家切片×台北日（statistics-reports）' },
+  { table: R_DIM_TABLE, schema: R_DIM_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id', 'media'], description: 'nexus：R 平台 campaign×媒體×裝置×日' },
+  { table: P_DIM_TABLE, schema: P_DIM_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id', 'media'], description: 'nexus：P 平台 素材×網域×版位×裝置×日' },
   { table: CUSTOMER_MAP_TABLE, schema: CUSTOMER_MAP_SCHEMA, description: 'nexus：平台帳戶 → 客戶 對照（人工維護）' },
 ];
 

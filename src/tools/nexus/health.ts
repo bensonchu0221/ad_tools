@@ -9,7 +9,7 @@ import {
   type NexusBatchStats, type NexusJobRow, type NexusPlatform, type NexusReconRow,
 } from '../../core/store.js';
 import { addDays, twToday, UNREACHABLE_TAG, isSkipped } from './run.js';
-import { summarizeRecon, summarizeMediaRecon, summarizeConvRecon, summarizeDimRecon, summarizeSliceOthers, fmtMatch, RECON, SLICE_OTHERS_WARN } from './recon.js';
+import { summarizeRecon, summarizeMediaRecon, summarizeConvRecon, summarizeDimRecon, summarizeSliceOthers, fmtMatch, RECON, SLICE_OTHERS_WARN, DIM_PLATFORMS } from './recon.js';
 import { M_UNMAPPED_PREFIX } from './fetch.js';
 
 export type Level = 'ok' | 'warn' | 'alert';
@@ -238,18 +238,21 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
         });
       }
     }
-    // M 維度表（Redash 五維）vs 事實表：台北時區帳戶有 Others 補差額，應該 100%。分級亮燈
-    const dim = summarizeDimRecon(inp.recon.rows);
-    if (dim.match !== null) {
-      summary.push(`M 維度層吻合 ${fmtMatch(dim.match)}`);
+    // 維度表 vs 事實表（M＝Redash 五維、台北時區帳戶；R／P＝媒體×裝置，2026-11-10）：有 Others 補差額，應該 100%。分級亮燈
+    const dparts: string[] = [];
+    for (const dp of DIM_PLATFORMS) {
+      const dim = summarizeDimRecon(inp.recon.rows, dp);
+      if (dim.match === null) continue;
+      dparts.push(`${dp} ${fmtMatch(dim.match)}`);
       if (dim.match < RECON.ok) {
         const top = dim.diffs.slice(0, 3).map((r) => r.accountName || r.accountId).join('、');
         items.push({
           level: dim.match < RECON.warn ? 'alert' : 'warn',
-          text: `${PNAME.M} ${t1} 維度表與素材層的曝光／點擊只吻合 ${fmtMatch(dim.match)}（${dim.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}；PAC 的 MGID 細分維度會不準）`,
+          text: `${PNAME[dp]} ${t1} 維度表與素材層的曝光／點擊只吻合 ${fmtMatch(dim.match)}（${dim.diffs.length} 個帳戶有落差${top ? `，最大：${top}` : ''}；PAC 的細分維度會不準）`,
         });
       }
     }
+    if (dparts.length) summary.push(`維度層吻合 ${dparts.join('／')}`);
     // M 切片表：Others（事實表有、API 切片沒有）佔比。生涯零點擊 teaser、API 曝光比後台少，平常 < 0.2%
     const sl = summarizeSliceOthers(inp.recon.rows);
     if (sl.share !== null) {
@@ -290,8 +293,10 @@ export function evaluateHealth(inp: HealthInput): HealthReport {
       }
       const c = summarizeConvRecon(rows);
       if (c.match !== null && c.match < RECON.ok) bad.push({ text: `M ${dt.slice(5)} 轉換層 ${fmtMatch(c.match)}`, alert: c.match < RECON.warn });
-      const x = summarizeDimRecon(rows);
-      if (x.match !== null && x.match < RECON.ok) bad.push({ text: `M ${dt.slice(5)} 維度層 ${fmtMatch(x.match)}`, alert: x.match < RECON.warn });
+      for (const dp of DIM_PLATFORMS) {
+        const x = summarizeDimRecon(rows, dp);
+        if (x.match !== null && x.match < RECON.ok) bad.push({ text: `${dp} ${dt.slice(5)} 維度層 ${fmtMatch(x.match)}`, alert: x.match < RECON.warn });
+      }
       const sl = summarizeSliceOthers(rows);
       if (sl.share !== null && sl.share > SLICE_OTHERS_WARN) bad.push({ text: `M ${dt.slice(5)} 切片 Others ${(sl.share * 100).toFixed(1)}%`, alert: false });
     }

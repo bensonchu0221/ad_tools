@@ -10,7 +10,7 @@ import { isRDailyLimit } from '../../core/rixbee.js';
 import { bqEnsureTable, bqLoadRows, bqQuery, bqDeleteTable, bqUpsertView, sqlString, type BqField } from '../../core/bigquery.js';
 import {
   getDAccountTokenById, listDAccounts, getMgidTokenById, listMgidAccounts,
-  nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs, withNexusBqWriteLock,
+  nexusCoveredRows, replaceNexusCoverage, nexusPendingJobs, nexusJobPending, withNexusBqWriteLock,
   type NexusJobInput, type NexusJobRow, type NexusCoverageEntry, type NexusPlatform,
 } from '../../core/store.js';
 import {
@@ -20,9 +20,10 @@ import {
 import { exceedsAction4Window } from '../../core/action4.js';
 import {
   FACT_TABLE, FACT_SCHEMA, DEVICE_TABLE, DEVICE_SCHEMA, MEDIA_TABLE, MEDIA_SCHEMA, M_DIM_TABLE, M_DIM_SCHEMA, M_SLICE_TABLE, M_SLICE_SCHEMA,
-  TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX, integratedViewSql,
+  R_DIM_TABLE, R_DIM_SCHEMA, P_DIM_TABLE, P_DIM_SCHEMA, TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX, integratedViewSql,
 } from './schema.js';
 import { fetchMDim, fetchMSlice } from './mdim.js';
+import { fetchRDim, fetchPDim } from './rpdim.js';
 
 /** 回補起點＝P 平台最早有資料的日子（使用者拍板 2026-05-21）。 */
 export const BACKFILL_START = '2026-05-21';
@@ -75,6 +76,17 @@ export function mdimBackfillBlock(o: { sd: string; ed: string; hhmm: string }): 
 }
 export const isMExtraJob = (j: { platform: NexusPlatform; accountId: string }) =>
   j.platform === 'M' && (j.accountId === M_DIM_JOB || j.accountId === M_SLICE_JOB);
+/**
+ * R／P 維度 job（2026-11-10，nexus_r_dim_daily／nexus_p_dim_daily）：帳戶欄同 M 的 '*dim'。等同一批次該平台的 '*' job
+ * （事實表）寫完才做（Others 要比事實表、R 分批要看媒體表列數）。只寫自己那張表。一般回補不排，要明講 dim=only。
+ * 回補切段：R 7 天一段（每天約 8~12 次請求，一段約 70~80 次；R 回補一天只放行一段，見 rBackfillBlock）、P 30 天一段（一段一次呼叫）。
+ */
+export const RP_DIM_JOB = '*dim';
+export const RP_DIM_CHUNK_DAYS: Record<'R' | 'P', number> = { R: 7, P: 30 };
+export const isRPDimJob = (j: { platform: NexusPlatform; accountId: string }) =>
+  (j.platform === 'R' || j.platform === 'P') && j.accountId === RP_DIM_JOB;
+/** 維度類 job（M 維度／切片、R／P 維度）：一般回補不排、只在 dim=only 時排。 */
+export const isDimJob = (j: { platform: NexusPlatform; accountId: string }) => isMExtraJob(j) || isRPDimJob(j);
 
 // ────────────────────────────── 日期工具（純字串，無時區誤差） ──────────────────────────────
 
@@ -193,7 +205,9 @@ export async function listTargets(): Promise<AccountRef[]> {
   return [
     ...d, ...m,
     { platform: 'R' as const, accountId: '*', accountName: 'R 全平台' },
+    { platform: 'R' as const, accountId: RP_DIM_JOB, accountName: 'R 維度（媒體×裝置）' },
     { platform: 'P' as const, accountId: '*', accountName: 'P 全平台' },
+    { platform: 'P' as const, accountId: RP_DIM_JOB, accountName: 'P 維度（媒體×裝置）' },
     { platform: 'D1' as const, accountId: '*', accountName: 'D1 影音全平台' },
     // 放最後：它要用到同一批次 M 各帳戶剛寫好的計費金額來分配花費
     { platform: 'M' as const, accountId: M_DEVICE_JOB, accountName: 'M 裝置（Redash 全平台）' },
@@ -212,7 +226,8 @@ export function planDaily(targets: AccountRef[], today: string): NexusJobInput[]
 export function planBackfill(targets: AccountRef[], sd: string, ed: string): NexusJobInput[] {
   const out: NexusJobInput[] = [];
   for (const t of targets) {
-    const days = isMDeviceJob(t) ? M_DEVICE_CHUNK_DAYS : isMExtraJob(t) ? M_EXTRA_CHUNK_DAYS : BACKFILL_CHUNK_DAYS[t.platform];
+    const days = isMDeviceJob(t) ? M_DEVICE_CHUNK_DAYS : isMExtraJob(t) ? M_EXTRA_CHUNK_DAYS
+      : isRPDimJob(t) ? RP_DIM_CHUNK_DAYS[t.platform as 'R' | 'P'] : BACKFILL_CHUNK_DAYS[t.platform];
     for (const w of chunkRange(sd, ed, days)) out.push({ ...t, ...w });
   }
   return out;
@@ -368,11 +383,17 @@ export async function writeSlice(o: {
  * M 維度表／切片表整段取代（只動那一張表）：DELETE 日期區間 ; INSERT。兩張都是全平台 job 寫的，所以不分帳戶。
  * 跟其他表不同交易，不會跟裝置表的交易互相取消；寫入鎖照拿（同一張表的每日 job 與回補 job 可能撞在一起）。
  */
-export async function writeMExtra(o: { which: 'dim' | 'slice'; sd: string; ed: string; rows: Row[] }): Promise<void> {
-  assertRowsInSlice(o.rows, o.sd, o.ed, null, o.which === 'dim' ? 'M 維度表' : 'M 切片表', 'M');
+const EXTRA_TABLES = {
+  dim: { table: M_DIM_TABLE, schema: M_DIM_SCHEMA, label: 'M 維度表', platform: 'M' },
+  slice: { table: M_SLICE_TABLE, schema: M_SLICE_SCHEMA, label: 'M 切片表', platform: 'M' },
+  rdim: { table: R_DIM_TABLE, schema: R_DIM_SCHEMA, label: 'R 維度表', platform: 'R' },
+  pdim: { table: P_DIM_TABLE, schema: P_DIM_SCHEMA, label: 'P 維度表', platform: 'P' },
+} as const;
+export async function writeMExtra(o: { which: keyof typeof EXTRA_TABLES; sd: string; ed: string; rows: Row[] }): Promise<void> {
+  const { table, schema, label, platform } = EXTRA_TABLES[o.which];
+  assertRowsInSlice(o.rows, o.sd, o.ed, null, label, platform);
   if (!bqReady) await ensureNexusBq();
-  const [table, schema] = o.which === 'dim' ? [M_DIM_TABLE, M_DIM_SCHEMA] : [M_SLICE_TABLE, M_SLICE_SCHEMA];
-  const stage = await loadStage(schema, o.rows, `M_${o.which}`);
+  const stage = await loadStage(schema, o.rows, `${platform}_${o.which}`);
   try {
     const cols = schema.map((f) => f.name).join(', ');
     const sql = [
@@ -408,6 +429,33 @@ async function runMExtraJob(job: NexusJobRow | NexusJobInput, onPhase: (p: strin
   const warn = res.warnings.length ? `；⚠️ ${res.warnings.join('；')}` : '';
   const reqs = res.requests !== undefined ? `、API 請求 ${res.requests} 次` : '';
   return { facts: 0, device: 0, skipped: false, message: `${label}：${which === 'dim' ? '維度' : '切片'} ${res.rows.length} 列${reqs}${warn}` };
+}
+
+/** R／P 維度 job：等同批次 '*' job（事實表）跑完 → 抓 → 防呆 → 寫。R 1003 ⇒ 放回佇列、不算失敗。 */
+async function runRPDimJob(job: NexusJobRow | NexusJobInput, onPhase: (p: string) => void): Promise<JobResult> {
+  const platform = job.platform as 'R' | 'P';
+  const label = `${platform} ${job.accountName} ${job.sd}~${job.ed}`;
+  const batch = (job as Partial<NexusJobRow>).batch;
+  const pending = batch ? await nexusJobPending(batch, platform, '*') : 0;
+  if (pending) throw new NexusDeferError(`${platform} 全平台 job 還沒跑完，稍後再產生維度表`);
+  const syncedAt = new Date().toISOString();
+  let res;
+  try {
+    res = platform === 'R' ? await fetchRDim(job.sd, job.ed, syncedAt, onPhase) : await fetchPDim(job.sd, job.ed, syncedAt, onPhase);
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (platform === 'R' && isRDailyLimit(msg)) {
+      throw new NexusQuotaError(`${label}：R 平台 API 今天的請求額度用完（1003），${R_QUOTA_RETRY_MIN / 60} 小時後再試，不算失敗`);
+    }
+    throw e;
+  }
+  // 事實表有點擊、維度報表卻 0 列＝API 出狀況，拒絕把這段清空（規則同媒體表）
+  if (!res.rows.length && res.factClicks > 0) throw new Error(`${label}：事實表有 ${res.factClicks} 次點擊，維度報表卻回 0 列，疑似異常，不寫入`);
+  onPhase(`寫入 BQ（${res.rows.length} 列）`);
+  await writeMExtra({ which: platform === 'R' ? 'rdim' : 'pdim', sd: job.sd, ed: job.ed, rows: res.rows });
+  const warn = res.warnings.length ? `；⚠️ ${res.warnings.join('；')}` : '';
+  const reqs = res.requests !== undefined ? `、API 請求 ${res.requests} 次` : '';
+  return { facts: 0, device: 0, skipped: false, message: `${label}：維度 ${res.rows.length} 列${reqs}${warn}` };
 }
 
 // 覆蓋紀錄用：各平台的曝光／花費／點擊取法。D1 沒有單一欄位：只算 mobile 收費曝光與 D1 金額（與 BH bh_daily_stats 同口徑）
@@ -486,6 +534,7 @@ export async function runNexusJob(
   job: NexusJobRow | NexusJobInput, onPhase: (p: string) => void = () => {}, deps: JobDeps = realDeps
 ): Promise<JobResult> {
   if (isMExtraJob(job)) return runMExtraJob(job, onPhase);
+  if (isRPDimJob(job)) return runRPDimJob(job, onPhase);
   const syncedAt = new Date().toISOString();
   const accountId = job.accountId === '*' ? null : job.accountId;
   const deviceOnly = isMDeviceJob(job);

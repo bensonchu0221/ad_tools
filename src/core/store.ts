@@ -2521,7 +2521,8 @@ export async function deferNexusJob(id: number, reason: string, minutes = 5): Pr
 export async function nexusRBackfillState(today: string): Promise<{ dailyROk: boolean; ranToday: number; reportHubBusy: boolean }> {
   const p = await nexusPool();
   const [[d], [b], [a]] = await Promise.all([
-    p.query(`SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = 'R' AND status = 'success'`, [`daily:${today}`]),
+    // 只看事實表那個 '*' job（2026-11-10 起同批次還有 R 維度 job '*dim'）
+    p.query(`SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = 'R' AND account_id = '*' AND status = 'success'`, [`daily:${today}`]),
     p.query(`SELECT COUNT(*) AS n FROM nexus_jobs WHERE platform = 'R' AND kind = 'backfill'
                AND heartbeat_at IS NOT NULL AND CONVERT_TZ(heartbeat_at,'+00:00','+08:00') >= ?`, [`${today} 00:00:00`]),
     p.query(`SELECT COUNT(*) AS n FROM adstream_jobs WHERE status IN ('queued','running')`),
@@ -2533,7 +2534,16 @@ export async function nexusRBackfillState(today: string): Promise<{ dailyROk: bo
   };
 }
 
-/** 同批次、某平台還沒跑完（排隊或執行中）的 job 數，可排除某個帳戶（通常是自己）。 */
+/** 同一批次某一個 job（平台＋帳戶）是不是還在排隊／執行中（R／P 維度 job 等自己平台的 '*' job 用，2026-11-10）。 */
+export async function nexusJobPending(batch: string, platform: NexusPlatform, accountId: string): Promise<number> {
+  const p = await nexusPool();
+  const [rows] = await p.query(
+    `SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = ? AND account_id = ? AND status IN ('queued','running')`,
+    [batch, platform, accountId]
+  );
+  return Number((rows as any[])[0]?.n ?? 0);
+}
+
 /**
  * 同一批次某平台還沒跑完的「帳戶 job」數（M 裝置／維度／切片 job 用來等各帳戶 job）。
  * '*' 開頭的全平台 job 一律不算：M 有三個全平台 job（'*' 裝置、'*dim' 維度、'*slice' 切片）互相不等，

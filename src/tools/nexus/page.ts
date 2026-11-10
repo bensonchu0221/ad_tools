@@ -11,7 +11,7 @@ import { addDays, isSkipped } from './run.js';
 import { P_UNATTRIBUTED } from './fetch.js';
 import type { HealthInput, HealthReport } from './health.js';
 import {
-  summarizeRecon, summarizeMediaRecon, summarizeConvRecon, summarizeDimRecon, summarizeSliceOthers, SLICE_OTHERS_WARN, reconLevel, fmtMatch, RECON, CONV_METRICS, CONV_LABEL,
+  summarizeRecon, summarizeMediaRecon, summarizeConvRecon, summarizeDimRecon, summarizeSliceOthers, SLICE_OTHERS_WARN, DIM_PLATFORMS, reconLevel, fmtMatch, RECON, CONV_METRICS, CONV_LABEL,
   type PlatformRecon, type ConvRecon,
 } from './recon.js';
 
@@ -218,7 +218,11 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
       imp += c.imp; spend += c.spend;
       if (c.accountId !== P_UNATTRIBUTED) acctWithData.add(c.accountId); // P 沒帶 advertiser 的事件是虛擬帳戶，不算
     }
-    const t = dialText(pj, acctWithData.size);
+    // R／P 的刻度圈只看全平台 '*' job（2026-11-10 起同批次多了維度 job '*dim'，算進去會變成「2 個帳戶」）；
+    // 維度 job 沒成功時在下面另起一行
+    const dialJobs = WHOLE_PLATFORM.has(p) ? pj.filter((j) => j.accountId !== '*dim') : pj;
+    const dimJob = WHOLE_PLATFORM.has(p) ? pj.find((j) => j.accountId === '*dim') : undefined;
+    const t = dialText(dialJobs, acctWithData.size);
 
     let matchBtn: string;
     if (!reconRows) {
@@ -242,10 +246,13 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
       if (cv && cv.match !== null) {
         matchBtn += `<p class="pf-media pm-${reconLevel(cv.match)}" title="素材層（MGID API）與裝置層（MGID Redash）的點擊、goal2、goal1、Main goal 加總比對">轉換層 ${fmtMatch(cv.match)}</p>`;
       }
-      // M 維度表（Redash 五維）與切片表（API 小時／地區／國家）：只算台北時區帳戶（2026-11-09）
+      // 維度表：M＝Redash 五維（只算台北時區帳戶，2026-11-09）、R／P＝媒體×裝置（2026-11-10）；M 另有切片表（API 小時／地區／國家）
+      if (DIM_PLATFORMS.includes(p)) {
+        const xd = summarizeDimRecon(reconRows, p);
+        const what = p === 'M' ? '維度表（裝置×網站×作業系統×瀏覽器×widget）與素材層的曝光／點擊加總比對，只算台北時區帳戶' : '維度表（媒體×裝置）與素材層的曝光／點擊加總比對';
+        if (xd.match !== null) matchBtn += `<p class="pf-media pm-${reconLevel(xd.match)}" title="${what}">維度層 ${fmtMatch(xd.match)}</p>`;
+      }
       if (p === 'M') {
-        const xd = summarizeDimRecon(reconRows);
-        if (xd.match !== null) matchBtn += `<p class="pf-media pm-${reconLevel(xd.match)}" title="維度表（裝置×網站×作業系統×瀏覽器×widget）與素材層的曝光／點擊加總比對，只算台北時區帳戶">維度層 ${fmtMatch(xd.match)}</p>`;
         const so = summarizeSliceOthers(reconRows);
         if (so.share !== null) matchBtn += `<p class="pf-media pm-${so.share > SLICE_OTHERS_WARN ? 'warn' : 'ok'}" title="切片表（小時／地區／國家）裡落在 Others 的曝光比例；生涯零點擊 teaser 與 API 曝光比後台少的部分">切片 Others ${(so.share * 100).toFixed(2)}%</p>`;
       }
@@ -254,8 +261,9 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
       <header class="pf-h"><div class="pf-hd">${platformTitle(p)}
           <span class="pf-c">${(() => { const n = pj.filter((j) => !j.accountId.startsWith('*')).length; return n ? `${num(n)} 帳戶` : WHOLE_PLATFORM.has(p) ? '全平台一次抓' : '—'; })()}</span></div></header>
-      <div class="dial-box"${reconRows ? ` data-p="${p}" title="看吻合明細"` : ''}>${dial(pj)}<div class="dial-c">${t.center}</div></div>
+      <div class="dial-box"${reconRows ? ` data-p="${p}" title="看吻合明細"` : ''}>${dial(dialJobs)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
+      ${dimJob && dimJob.status !== 'success' ? `<p class="pf-line tone-${dimJob.status}">維度表：${esc(dimJob.status === 'running' ? (dimJob.phase ?? '執行中') : dimJob.status === 'failed' ? `失敗：${dimJob.message ?? ''}` : '排隊中')}</p>` : ''}
       <dl class="pf-num">
         <div><dt>${t1.slice(5)} 曝光</dt><dd>${imp ? num(imp) : '—'}</dd></div>
         <div><dt>花費</dt><dd>${spend ? num(spend) : '—'}</dd></div>
