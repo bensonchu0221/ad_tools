@@ -2347,6 +2347,16 @@ async function nexusPool(): Promise<mysql.Pool> {
       ADD COLUMN cf_click BIGINT NULL, ADD COLUMN cf_interest BIGINT NULL, ADD COLUMN cf_decision BIGINT NULL, ADD COLUMN cf_buy BIGINT NULL,
       ADD COLUMN cd_click BIGINT NULL, ADD COLUMN cd_interest BIGINT NULL, ADD COLUMN cd_decision BIGINT NULL, ADD COLUMN cd_buy BIGINT NULL`);
   }
+  // 2026-11-09 M 維度表（x_*）／切片表（s_*）比對：NULL＝那次比對沒有這兩層（非 M、舊結果、非台北時區帳戶、那天還沒回補）
+  const [xcol] = await p.query(
+    `SELECT COUNT(*) AS c FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = 'nexus_recon' AND column_name = 'x_imp'`
+  );
+  if (!(((xcol as any[])[0]?.c ?? 0) > 0)) {
+    await p.query(`ALTER TABLE nexus_recon
+      ADD COLUMN x_imp BIGINT NULL, ADD COLUMN x_click BIGINT NULL, ADD COLUMN x_spend DECIMAL(18,4) NULL,
+      ADD COLUMN s_imp BIGINT NULL, ADD COLUMN s_other BIGINT NULL`);
+  }
   // 2026-10-22 覆蓋紀錄加點擊（走速算 CPC 用）；之前寫的列由 poc/backfill_coverage_click.mts 從 BQ 事實表回填
   const [kcol] = await p.query(
     `SELECT COUNT(*) AS c FROM information_schema.columns
@@ -2524,10 +2534,16 @@ export async function nexusRBackfillState(today: string): Promise<{ dailyROk: bo
 }
 
 /** 同批次、某平台還沒跑完（排隊或執行中）的 job 數，可排除某個帳戶（通常是自己）。 */
+/**
+ * 同一批次某平台還沒跑完的「帳戶 job」數（M 裝置／維度／切片 job 用來等各帳戶 job）。
+ * '*' 開頭的全平台 job 一律不算：M 有三個全平台 job（'*' 裝置、'*dim' 維度、'*slice' 切片）互相不等，
+ * 否則彼此都在等對方 ⇒ 永遠延後。excludeAccountId 保留給呼叫端明講「不算自己」。
+ */
 export async function nexusPendingJobs(batch: string, platform: NexusPlatform, excludeAccountId: string): Promise<number> {
   const p = await nexusPool();
   const [rows] = await p.query(
-    `SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = ? AND account_id <> ? AND status IN ('queued','running')`,
+    `SELECT COUNT(*) AS n FROM nexus_jobs WHERE batch = ? AND platform = ? AND account_id <> ? AND account_id NOT LIKE '*%'
+        AND status IN ('queued','running')`,
     [batch, platform, excludeAccountId]
   );
   return Number((rows as any[])[0]?.n ?? 0);
@@ -2711,7 +2727,8 @@ export async function nexusReconRecent(hours: number, beforeDt: string): Promise
   const [rows] = await p.query(
     `SELECT DATE_FORMAT(r.dt,'%Y-%m-%d') AS dt, r.platform, r.account_id, r.account_name, r.f_imp, r.f_click, r.f_spend,
             r.d_imp, r.d_click, r.d_spend, r.m_imp, r.m_click, r.m_spend,
-            r.cf_click, r.cf_interest, r.cf_decision, r.cf_buy, r.cd_click, r.cd_interest, r.cd_decision, r.cd_buy
+            r.cf_click, r.cf_interest, r.cf_decision, r.cf_buy, r.cd_click, r.cd_interest, r.cd_decision, r.cd_buy,
+            r.x_imp, r.x_click, r.x_spend, r.s_imp, r.s_other
        FROM nexus_recon r
        JOIN nexus_recon k ON k.dt = r.dt AND k.platform = '*' AND k.account_id = '*'
       WHERE k.checked_at >= NOW() - INTERVAL ? HOUR AND r.dt < ? AND r.platform <> '*'
@@ -2783,6 +2800,10 @@ export interface NexusReconRow {
   media?: NexusReconTotals;
   /** M 轉換層（2026-10-15 起）：事實表 vs 裝置表 events（2026-10-21 前是 M 裝置轉換表）的點擊與三段轉換；非 M、舊結果、那天還沒回補＝undefined */
   conv?: { fact: NexusConvTotals; device: NexusConvTotals };
+  /** M 維度表（nexus_m_dim_daily，2026-11-09）加總；只有台北時區帳戶、那天維度表有資料才有 */
+  mdim?: NexusReconTotals;
+  /** M 切片表 hour_device 切片的曝光與其中 Others 差額列的曝光；只有台北時區帳戶、那天切片表有資料才有 */
+  mslice?: { imp: number; others: number };
 }
 export interface NexusConvTotals { click: number; interest: number; decision: number; buy: number }
 
@@ -2800,13 +2821,14 @@ export async function replaceNexusRecon(dt: string, rows: NexusReconRow[]): Prom
       const chunk = all.slice(i, i + 500);
       await conn.query(
         `INSERT INTO nexus_recon (dt, platform, account_id, account_name, f_imp, f_click, f_spend, d_imp, d_click, d_spend, m_imp, m_click, m_spend,
-           cf_click, cf_interest, cf_decision, cf_buy, cd_click, cd_interest, cd_decision, cd_buy)
-         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',')}`,
+           cf_click, cf_interest, cf_decision, cf_buy, cd_click, cd_interest, cd_decision, cd_buy, x_imp, x_click, x_spend, s_imp, s_other)
+         VALUES ${chunk.map(() => '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').join(',')}`,
         chunk.flatMap((r) => [dt, r.platform, r.accountId, r.accountName.slice(0, 255),
           r.fact.imp, r.fact.click, r.fact.spend, r.device.imp, r.device.click, r.device.spend,
           r.media?.imp ?? null, r.media?.click ?? null, r.media?.spend ?? null,
           r.conv?.fact.click ?? null, r.conv?.fact.interest ?? null, r.conv?.fact.decision ?? null, r.conv?.fact.buy ?? null,
-          r.conv?.device.click ?? null, r.conv?.device.interest ?? null, r.conv?.device.decision ?? null, r.conv?.device.buy ?? null])
+          r.conv?.device.click ?? null, r.conv?.device.interest ?? null, r.conv?.device.decision ?? null, r.conv?.device.buy ?? null,
+          r.mdim?.imp ?? null, r.mdim?.click ?? null, r.mdim?.spend ?? null, r.mslice?.imp ?? null, r.mslice?.others ?? null])
       );
     }
     await conn.commit();
@@ -2849,9 +2871,12 @@ function mapNexusReconRow(r: any): NexusReconRow {
         device: { click: Number(r.cd_click), interest: Number(r.cd_interest), decision: Number(r.cd_decision), buy: Number(r.cd_buy) },
       },
     }),
+    // x_*／s_* 是 NULL（或欄位不存在）＝那次比對沒有 M 維度表／切片表
+    ...(r.x_imp === null || r.x_imp === undefined ? {} : { mdim: { imp: Number(r.x_imp), click: Number(r.x_click), spend: Number(r.x_spend) } }),
+    ...(r.s_imp === null || r.s_imp === undefined ? {} : { mslice: { imp: Number(r.s_imp), others: Number(r.s_other) } }),
   };
 }
-const NEXUS_RECON_CONV_COLS = 'cf_click, cf_interest, cf_decision, cf_buy, cd_click, cd_interest, cd_decision, cd_buy';
+const NEXUS_RECON_CONV_COLS = 'cf_click, cf_interest, cf_decision, cf_buy, cd_click, cd_interest, cd_decision, cd_buy, x_imp, x_click, x_spend, s_imp, s_other';
 
 // ---------- tool#10 走速（pacing）----------
 // BH（Budget Hunter，repo r_bulk_upload）跟本工具在同一個 Cloud SQL，庫名 budget_hunter；本工具對它只讀不寫。

@@ -26,6 +26,8 @@ export interface RedashRow {
   device: string;
   /** teaser ID（只有素材級查詢有值；裝置查詢沒拆 teaser 時是空字串） */
   teaserId: string;
+  /** dimension_1..5 原始值（照請求的 dimension1..5 順序；沒拆的是 '-' 或空字串） */
+  dims: string[];
   /** Impressions (Viewable)＝API impressions */
   imp: number;
   /** Impressions (Total)＝ad requests */
@@ -47,7 +49,7 @@ type RedashOpts = { timeoutMs?: number; onWait?: (sec: number) => void };
 
 /** 日 × campaign × 裝置（全部 Broadciel 帳戶），日期依 tz 切。 */
 export function fetchRedashDeviceDaily(sd: string, ed: string, tz: string, opts: RedashOpts = {}): Promise<RedashRow[]> {
-  return runRedash(sd, ed, tz, { Teaser_Breakdown: '0', dimension1: 'device' }, opts);
+  return runRedash(sd, ed, tz, { Teaser_Breakdown: '0', dims: ['device'] }, opts);
 }
 
 /**
@@ -55,11 +57,22 @@ export function fetchRedashDeviceDaily(sd: string, ed: string, tz: string, opts:
  * 2026-10-05 實測：只有 teaser ID，沒有標題／圖片／落地頁；曝光、點擊跟 API 完全一致。
  */
 export function fetchRedashTeaserDaily(sd: string, ed: string, tz: string, opts: RedashOpts = {}): Promise<RedashRow[]> {
-  return runRedash(sd, ed, tz, { Teaser_Breakdown: 'teaser', dimension1: '0' }, opts);
+  return runRedash(sd, ed, tz, { Teaser_Breakdown: 'teaser', dims: [] }, opts);
+}
+
+/** 維度表（nexus_m_dim_daily）用的五個維度，順序就是 RedashRow.dims 的順序。 */
+export const REDASH_DIM_FIELDS = ['device', 'sources_name', 'os_name', 'browser_name', 'uid'] as const;
+
+/**
+ * 日 × campaign × teaser × 五個維度（全部 Broadciel 帳戶），台北日。
+ * 2026-11-09 實測 11/07 一天：55 秒、155,914 列（全 0 列 97,206），曝光／點擊與 nexus_m_teaser_daily 逐 campaign 相同。
+ */
+export function fetchRedashDimDaily(sd: string, ed: string, opts: RedashOpts = {}): Promise<RedashRow[]> {
+  return runRedash(sd, ed, 'Asia/Taipei', { Teaser_Breakdown: 'teaser', dims: [...REDASH_DIM_FIELDS] }, opts);
 }
 
 async function runRedash(
-  sd: string, ed: string, tz: string, breakdown: { Teaser_Breakdown: string; dimension1: string }, opts: RedashOpts
+  sd: string, ed: string, tz: string, breakdown: { Teaser_Breakdown: string; dims: string[] }, opts: RedashOpts
 ): Promise<RedashRow[]> {
   const key = process.env.MGID_REDASH_KEY;
   if (!key) throw new Error('MGID_REDASH_KEY 未設定（Secret Manager ad-tools-nexus-mgid-redash-key）');
@@ -70,7 +83,7 @@ async function runRedash(
       Date: { start: sd, end: ed }, timezone: tz, Date_Breakdown: 'date', Teaser_Breakdown: breakdown.Teaser_Breakdown,
       client_id: ['0'], curator: ['ALL'], country_name: ['ALL'], camp_types: ['ALL'], teas_category: 'ALL',
       pub_subnet: ['-1'], tier: ['ALL'], site_language: ['ALL'],
-      dimension1: breakdown.dimension1, dimension2: '0', dimension3: '0', dimension4: '0', dimension5: '0',
+      ...Object.fromEntries([0, 1, 2, 3, 4].map((i) => [`dimension${i + 1}`, breakdown.dims[i] ?? '0'])),
     },
   });
   const started = Date.now();
@@ -102,6 +115,7 @@ export function toRedashRows(raw: any[]): RedashRow[] {
     return {
       date: String(r['Date Breakdown']), clientId: String(r['Client ID']), clientName: String(r['Clients Name'] ?? '').trim(),
       campaignId: String(r['Campaign ID']), campaignName: String(r['Campaign Name'] ?? ''), device: String(r.dimension_1 ?? ''),
+      dims: [1, 2, 3, 4, 5].map((i) => String(r[`dimension_${i}`] ?? '')),
       teaserId: /^\d+$/.test(String(r['Teaser Breakdown'] ?? '')) && String(r['Teaser Breakdown']) !== '0' ? String(r['Teaser Breakdown']) : '',
       imp: n(r['Impressions (Viewable)']), adRequests: n(r['Impressions (Total)']), click: n(r.Clicks),
       spendUsd: n(r['Spent, USD']), spendTwd: n(r['Spent, TWD']), convBuy: n(r['Conversion (main goal)']),

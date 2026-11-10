@@ -24,6 +24,12 @@ import {
   reconSql, toReconRows, summarizeRecon, summarizeMediaRecon, summarizeConvRecon, reconLevel, fmtMatch, reconDue, reconDueDates, RECON,
 } from '../src/tools/nexus/recon.js';
 import { statusPage } from '../src/tools/nexus/page.js';
+import {
+  fixText, osFamily, browserFamily, toMDimRows, addMDimOthers, toMSliceRows, addMSliceOthers, M_OTHERS, type FactCell, type SliceAccount,
+} from '../src/tools/nexus/mdim.js';
+import { M_DIM_JOB, M_SLICE_JOB, M_EXTRA_CHUNK_DAYS, isMExtraJob, mdimBackfillBlock } from '../src/tools/nexus/run.js';
+import { M_DIM_SCHEMA, M_SLICE_SCHEMA } from '../src/tools/nexus/schema.js';
+import { summarizeDimRecon, summarizeSliceOthers, SLICE_OTHERS_WARN } from '../src/tools/nexus/recon.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
 import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
 import { fetchReport, fetchReportPaged, isRDailyLimit } from '../src/core/rixbee.js';
@@ -863,9 +869,9 @@ const rr = (platform: any, accountId: string, f: [number, number, number], d: [n
   fact: { imp: f[0], click: f[1], spend: f[2] }, device: { imp: d[0], click: d[1], spend: d[2] },
 });
 
-await ok('比對 SQL：五張事實表（含 D1）＋裝置表＋媒體表＋M 轉換兩邊都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
+await ok('比對 SQL：五張事實表（含 D1）＋裝置表＋媒體表＋M 轉換兩邊＋M 維度／切片表都只查單一日期分區、各平台欄名正確、FULL JOIN', () => {
   const sql = reconSql('2026-09-23');
-  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 9);
+  assert.equal((sql.match(/WHERE date = DATE '2026-09-23'/g) ?? []).length, 11);
   assert.match(sql, /nexus_media_daily/);
   assert.match(sql, /FULL OUTER JOIN m USING \(platform, account_id\)/);
   assert.match(sql, /SUM\(charge\)/);
@@ -1561,6 +1567,165 @@ await ok('狀態頁：今天批次沒有某平台的 job 時，平台名下方�
   assert.equal(pfc('m'), '—');
   assert.equal(pfc('d'), '1 帳戶');
   assert.equal(pfc('r'), '全平台一次抓');
+});
+
+// ────────────────────────────── M 維度表／切片表（2026-11-09） ──────────────────────────────
+
+const rdx = (o: Partial<RedashRow> & { dims: string[] }): RedashRow => ({
+  date: '2026-11-07', clientId: '980001', clientName: 'C', campaignId: '100', campaignName: 'cpg', device: o.dims[0],
+  teaserId: '9001', imp: 0, adRequests: 0, click: 0, spendUsd: 0, spendTwd: 0, convBuy: 0, convDecision: 0, convInterest: 0, ...o,
+});
+const twOwner = { accountId: '860001', accountName: 'A 台北', tz: 'Asia/Taipei', currency: 'twd' };
+const laOwner = { accountId: '860002', accountName: 'B 洛杉磯', tz: 'America/Los_Angeles', currency: 'usd' };
+
+await ok('M 維度：字串整理（俄文 х → x、空白）與作業系統／瀏覽器大類（11/07 實際出現的值）', () => {
+  assert.equal(fixText('Android mobile 13.хх'), 'Android mobile 13.xx');
+  assert.equal(fixText('Other Desktop OS desktop '), 'Other Desktop OS desktop');
+  for (const [os, fam] of [['iOS', 'iOS'], ['Android', 'Android'], ['Windows OS', 'Windows'], ['Mac OS', 'Mac'], ['Other Desktop OS', 'Other'],
+    ['Tizen', 'Other'], ['iOS mobile 26.xx', 'iOS'], ['Windows OS desktop 10', 'Windows']]) assert.equal(osFamily(os), fam, os);
+  for (const [b, fam] of [['Google Chrome', 'Chrome'], ['Mobile Samsung Brows', 'Samsung'], ['Safari', 'Safari'], ['Microsoft Edge', 'Edge'],
+    ['Facebook', 'Facebook'], ['Google Search App', 'Google App'], ['WebView', 'WebView'], ['Opera Mini', 'Opera'], ['Instagram', 'Instagram'],
+    ['Firefox', 'Firefox'], ['Bots', 'Bots'], ['Zalo', 'Other'], ['Other', 'Other']]) assert.equal(browserFamily(b), fam, b);
+});
+
+await ok('M 維度：Redash 五維 → 列（帳戶對照、全 0 丟掉、同 key 合併、台北帳戶花費＝計費按美金比例、尾差補到最大列）', () => {
+  const owners = new Map([['100', twOwner]]);
+  const rows = toMDimRows({
+    rows: [
+      rdx({ dims: ['mobile', 'news.ebc.net.tw', 'iOS', 'Safari', '73395127'], imp: 10, click: 1, spendUsd: 1 }),
+      rdx({ dims: ['mobile', 'news.ebc.net.tw', 'iOS', 'Safari', '73395127'], imp: 5, spendUsd: 1 }),       // 同 key 合併
+      rdx({ dims: ['desktop', 'MSN Homepage Infopane', 'Windows OS', 'Microsoft Edge', '69151562'], imp: 20, click: 2, spendUsd: 1 }),
+      rdx({ dims: ['tablet', 'pixiv.net', 'iOS', 'Safari', '66890001'], adRequests: 99 }),                   // 只有 ad requests ⇒ 丟
+    ],
+    owners, apiSpend: new Map([['860001|2026-11-07', 100]]), sd: '2026-11-07', ed: '2026-11-07', syncedAt: T,
+  });
+  assert.equal(rows.length, 2);
+  const m = rows.find((r) => r.device === 'mobile')!;
+  assert.deepEqual([m.account_id, m.imp, m.click, m.os_family, m.browser_family, m.widget_uid, m.account_tz, m.currency], ['860001', 15, 1, 'iOS', 'Safari', '73395127', 'Asia/Taipei', 'twd']);
+  assert.equal(rows.reduce((a, r) => a + Number(r.spend), 0), 100);
+  assert.equal(m.spend, 66.6667);
+  assert.deepEqual(keysOf(Object.keys(m).map((name) => ({ name }))), keysOf(M_DIM_SCHEMA));
+});
+
+await ok('M 維度：非台北帳戶用 Redash 換算值（usd 帳戶用美金）、沒 token 的帳戶記 client:', () => {
+  const rows = toMDimRows({
+    rows: [
+      rdx({ campaignId: '200', dims: ['mobile', 'a.com', 'iOS', 'Safari', '1'], imp: 1, spendUsd: 2, spendTwd: 64 }),
+      rdx({ campaignId: '300', clientId: '991479', clientName: 'Orphan', dims: ['mobile', 'a.com', 'iOS', 'Safari', '1'], imp: 1, spendUsd: 1, spendTwd: 32 }),
+    ],
+    owners: new Map([['200', laOwner]]), apiSpend: new Map([['860002|2026-11-07', 999]]), sd: '2026-11-07', ed: '2026-11-07', syncedAt: T,
+  });
+  const la = rows.find((r) => r.account_id === '860002')!;
+  assert.deepEqual([la.spend, la.account_tz, la.currency], [2, 'America/Los_Angeles', 'usd']);
+  const orphan = rows.find((r) => String(r.account_id).startsWith(M_UNMAPPED_PREFIX))!;
+  assert.deepEqual([orphan.account_id, orphan.spend, orphan.currency, orphan.account_tz], ['client:991479', 32, 'twd', 'Asia/Taipei']);
+});
+
+await ok('M 維度：dimension_1 不是裝置（查詢維度順序被改）⇒ 丟錯，不把網站寫進裝置欄', () => {
+  assert.throws(() => toMDimRows({
+    rows: [rdx({ dims: ['news.ebc.net.tw', 'mobile', 'iOS', 'Safari', '1'], imp: 1 })],
+    owners: new Map(), apiSpend: new Map(), sd: '2026-11-07', ed: '2026-11-07', syncedAt: T,
+  }), /dimension_1 應該是裝置/);
+});
+
+await ok('M 維度 Others：台北帳戶事實表多的寫一列 Others（花費 0）；非台北不補；維度表多 ⇒ 丟錯', () => {
+  const base = toMDimRows({
+    rows: [rdx({ dims: ['mobile', 'a.com', 'iOS', 'Safari', '1'], imp: 90, click: 3, convBuy: 1 }), rdx({ campaignId: '200', dims: ['mobile', 'a.com', 'iOS', 'Safari', '1'], imp: 5 })],
+    owners: new Map([['100', twOwner], ['200', laOwner]]), apiSpend: new Map(), sd: '2026-11-07', ed: '2026-11-07', syncedAt: T,
+  });
+  const tzOf = (id: string) => (id === '860002' ? 'America/Los_Angeles' : 'Asia/Taipei');
+  const fc = (o: Partial<FactCell>): FactCell => ({ accountId: '860001', date: '2026-11-07', campaignId: '100', imp: 0, click: 0, buy: 0, decision: 0, interest: 0, ...o });
+  const r = addMDimOthers(base, [fc({ imp: 100, click: 3, buy: 1 }), fc({ accountId: '860002', campaignId: '200', imp: 50 })], tzOf, T);
+  const others = r.rows.filter((x) => x.source === M_OTHERS);
+  assert.equal(others.length, 1);
+  assert.deepEqual([others[0].account_id, others[0].campaign_id, others[0].imp, others[0].click, others[0].spend, others[0].teaser_id], ['860001', '100', 10, 0, 0, null]);
+  assert.throws(() => addMDimOthers(base, [fc({ imp: 80, click: 3, buy: 1 })], tzOf, T), /維度表比事實表多/);
+  assert.throws(() => addMDimOthers(base, [], tzOf, T), /事實表沒有這支 campaign/);
+});
+
+const sliceAcc: SliceAccount = { accountId: '860001', accountName: 'A 台北', tz: 'Asia/Taipei', currency: 'twd' };
+const sr = (values: string[], o: Partial<{ imp: number; click: number; spend: number }> = {}) =>
+  ({ teaserId: '9001', values, imp: 0, click: 0, spend: 0, conv_interest: 0, conv_decision: 0, conv_buy: 0, ...o });
+
+await ok('M 切片：hour_device／region_device／country_region 欄位互斥、teaser 對回 campaign、全 0 丟掉、重複合併', () => {
+  const tc = new Map([['9001', '100']]);
+  const h = toMSliceRows({ account: sliceAcc, day: '2026-11-07', slice: 'hour_device', raw: [sr(['23', 'mobile'], { imp: 3 }), sr(['23', 'mobile'], { imp: 2 }), sr(['5', 'desktop'])], teaserCampaign: tc, syncedAt: T });
+  assert.equal(h.length, 1);
+  assert.deepEqual([h[0].hour, h[0].device, h[0].region, h[0].country, h[0].imp, h[0].campaign_id, h[0].slice], [23, 'mobile', null, null, 5, '100', 'hour_device']);
+  const c = toMSliceRows({ account: sliceAcc, day: '2026-11-07', slice: 'country_region', raw: [sr(['Taiwan', "T'ai-pei"], { imp: 1 })], teaserCampaign: new Map(), syncedAt: T });
+  assert.deepEqual([c[0].country, c[0].region, c[0].device, c[0].hour, c[0].campaign_id], ['Taiwan', "T'ai-pei", null, null, null]);
+  assert.deepEqual(keysOf(Object.keys(h[0]).map((name) => ({ name }))), keysOf(M_SLICE_SCHEMA));
+  assert.throws(() => toMSliceRows({ account: sliceAcc, day: '2026-11-07', slice: 'hour_device', raw: [sr(['x', 'mobile'], { imp: 1 })], teaserCampaign: tc, syncedAt: T }), /hour 值無法解析/);
+});
+
+await ok('M 切片 Others：每種切片各補差額；切片比事實表多只記警告（超過範圍的寫在最前面）；非台北帳戶不補', () => {
+  const rows = [
+    ...toMSliceRows({ account: sliceAcc, day: '2026-11-07', slice: 'hour_device', raw: [sr(['1', 'mobile'], { imp: 990, click: 10, spend: 50 })], teaserCampaign: new Map(), syncedAt: T }),
+    ...toMSliceRows({ account: sliceAcc, day: '2026-11-07', slice: 'region_device', raw: [sr(['Other regions', 'mobile'], { imp: 1000, click: 10, spend: 50 })], teaserCampaign: new Map(), syncedAt: T }),
+    ...toMSliceRows({ account: sliceAcc, day: '2026-11-07', slice: 'country_region', raw: [sr(['Taiwan', 'Other regions'], { imp: 1002, click: 10, spend: 50.4 })], teaserCampaign: new Map(), syncedAt: T }),
+  ];
+  const f = { accountId: '860001', date: '2026-11-07', imp: 1000, click: 10, spend: 50, buy: 0, decision: 0, interest: 0 };
+  const r = addMSliceOthers(rows, [f], new Map([['860001', sliceAcc]]), T);
+  const others = r.rows.filter((x) => x.teaser_id === null);
+  assert.deepEqual(others.map((o) => [o.slice, o.imp]), [['hour_device', 10]]);
+  assert.ok(r.warnings.some((w) => /country_region imp 切片比事實表多 2/.test(w)), r.warnings.join('|'));
+  // 切片比事實表多：不丟錯（回補舊日子 API 口徑已變），超過範圍的警告寫在最前面、照寫不補
+  const big = addMSliceOthers(rows, [{ ...f, imp: 900, spend: 40 }], new Map([['860001', sliceAcc]]), T);
+  assert.match(big.warnings[0], /超過容許範圍 \d+ 處[\s\S]*imp 多 100[\s\S]*spend 多 10/);
+  assert.equal(big.rows.length, rows.length);
+  const small = addMSliceOthers(rows, [{ ...f, spend: 49.6 }], new Map([['860001', sliceAcc]]), T);
+  assert.ok(!small.warnings.some((w) => /超過容許範圍/.test(w)));
+  const la = addMSliceOthers(rows, [{ ...f, imp: 5000 }], new Map([['860001', { ...sliceAcc, tz: 'America/Los_Angeles' }]]), T);
+  assert.equal(la.rows.length, rows.length);
+});
+
+await ok('M 維度／切片 job：全平台帳戶值、回補一天一段、回補只在 07:00~23:00 收且一次最多 7 天', () => {
+  assert.ok(isMExtraJob({ platform: 'M', accountId: M_DIM_JOB }) && isMExtraJob({ platform: 'M', accountId: M_SLICE_JOB }));
+  assert.ok(!isMExtraJob({ platform: 'M', accountId: M_DEVICE_JOB }) && !isMExtraJob({ platform: 'D', accountId: M_DIM_JOB }));
+  const jobs = planBackfill([{ platform: 'M', accountId: M_DIM_JOB, accountName: 'M 維度' }], '2026-06-05', '2026-06-11');
+  assert.equal(M_EXTRA_CHUNK_DAYS, 1);
+  assert.equal(jobs.length, 7);
+  assert.ok(jobs.every((j) => j.sd === j.ed));
+  assert.equal(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-11', hhmm: '10:00' }), null);
+  assert.match(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-12', hhmm: '10:00' })!, /最多 7 天/);
+  assert.match(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-05', hhmm: '04:30' })!, /07:00~23:00/);
+});
+
+await ok('比對：M 維度層（台北帳戶）與切片 Others 佔比；非台北帳戶、沒有維度資料的日子不比', () => {
+  const sql = reconSql('2026-11-07');
+  assert.match(sql, /nexus_m_dim_daily/);
+  assert.match(sql, /nexus_m_slice_daily[\s\S]*slice = 'hour_device'/);
+  const base = { platform: 'M', f_imp: '1000', f_click: '10', f_spend: '50', v_imp: '1000', v_click: '10', v_spend: '50', m_has: false, c_has: false };
+  const rows = toReconRows([
+    { ...base, account_id: '860001', x_has: true, x_tw: true, x_imp: '1000', x_click: '10', x_spend: '50', s_has: true, s_tw: true, s_imp: '1000', s_other: '30' },
+    { ...base, account_id: '860002', x_has: true, x_tw: false, x_imp: '10', x_click: '0', x_spend: '1', s_has: true, s_tw: false, s_imp: '10', s_other: '0' },
+    { ...base, account_id: '860003', x_has: false, x_tw: null, x_imp: '0', x_click: '0', x_spend: '0', s_has: false, s_tw: null, s_imp: '0', s_other: '0' },
+  ] as any);
+  assert.ok(rows[0].mdim && rows[0].mslice && !rows[1].mdim && !rows[1].mslice);
+  assert.deepEqual(rows[2].mdim, { imp: 0, click: 0, spend: 0 });   // 台北帳戶整個不在維度表＝真的漏，當 0 比
+  const dim = summarizeDimRecon(rows);
+  assert.ok(dim.match! < 0.6 && dim.diffs[0].accountId === '860003');
+  const sl = summarizeSliceOthers(rows);
+  assert.equal(sl.share, 0.03);
+  assert.ok(sl.share! > SLICE_OTHERS_WARN && sl.top[0].accountId === '860001');
+  const none = toReconRows([{ ...base, account_id: '860001', x_has: false, s_has: false }] as any);
+  assert.equal(summarizeDimRecon(none).match, null);
+  assert.equal(summarizeSliceOthers(none).share, null);
+});
+
+await ok('健檢：M 維度層不吻合亮燈、切片 Others 超過 2% 黃燈', () => {
+  const inp = healthBase();
+  const r = (id: string, over: Partial<NexusReconRow>): NexusReconRow => ({
+    platform: 'M', accountId: id, accountName: id, fact: { imp: 1000, click: 10, spend: 50 }, device: { imp: 1000, click: 10, spend: 50 }, ...over,
+  });
+  inp.recon = { checkedAt: '2026-11-08 07:00:00', rows: [r('860001', { mdim: { imp: 900, click: 10, spend: 50 }, mslice: { imp: 1000, others: 50 } })] };
+  const h = evaluateHealth(inp);
+  assert.ok(h.items.some((i) => i.level === 'alert' && /維度表與素材層的曝光／點擊只吻合/.test(i.text)), JSON.stringify(h.items));
+  assert.ok(h.items.some((i) => i.level === 'warn' && /切片表（小時／地區／國家）有 5.0% 曝光落在 Others/.test(i.text)));
+  inp.recon = { checkedAt: '2026-11-08 07:00:00', rows: [r('860001', { mdim: { imp: 1000, click: 10, spend: 50 }, mslice: { imp: 1000, others: 1 } })] };
+  const ok2 = evaluateHealth(inp);
+  assert.ok(!ok2.items.some((i) => /維度表|切片表/.test(i.text)));
+  assert.ok(ok2.summary.some((s) => /M 維度層吻合 100%/.test(s)) && ok2.summary.some((s) => /M 切片 Others 0.10%/.test(s)));
 });
 
 console.log(`\n全部 ${n} 項通過`);

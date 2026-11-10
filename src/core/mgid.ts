@@ -666,3 +666,37 @@ export async function fetchMgidSourceReport(
   }
   return out;
 }
+
+/** 切片報表列（nexus_m_slice_daily）：teaser × 兩個切片維度原始值。 */
+export interface MgidSliceRow {
+  teaserId: string;
+  /** 依請求的 dims 順序（teaserId 以外的兩個）取回的原始值 */
+  values: string[];
+  imp: number;
+  click: number;
+  spend: number;
+  conv_interest: number;
+  conv_decision: number;
+  conv_buy: number;
+}
+
+/**
+ * 抓單一天 teaserId × 兩個維度（例如 hour、deviceType）。statistics-reports 一次最多 3 個維度，day 不能再放進去
+ * ⇒ 一天一次、dateFrom＝dateTo。**邊界固定用台北時間**（切片表是台北日；跟事實表的帳戶本地日不同，見 nexus 設計文件）。
+ * 生涯零點擊 teaser 不會回（MGID API 限制），由呼叫端拿事實表補差額。
+ */
+export async function fetchMgidSliceReport(
+  client: MgidClient, day: string, dims: [string, string]
+): Promise<MgidSliceRow[]> {
+  const raw = await fetchStatWindow(client, day, day, ['teaserId', ...dims], SOURCE_METRICS, FALLBACK_TZ);
+  return raw.map((r) => ({
+    teaserId: String(r.teaserId ?? ''),
+    values: dims.map((d) => String(r[d] ?? '')),
+    imp: Number(r.impressions) || 0,
+    click: Number(r.clicks) || 0,
+    spend: amt(r.spent),
+    conv_interest: Number(r.conversionsInterest) || 0,
+    conv_decision: Number(r.conversionsDecision) || 0,
+    conv_buy: Number(r.conversionsBuy) || 0,
+  }));
+}

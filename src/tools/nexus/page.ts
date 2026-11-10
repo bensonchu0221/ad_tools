@@ -11,7 +11,7 @@ import { addDays, isSkipped } from './run.js';
 import { P_UNATTRIBUTED } from './fetch.js';
 import type { HealthInput, HealthReport } from './health.js';
 import {
-  summarizeRecon, summarizeMediaRecon, summarizeConvRecon, reconLevel, fmtMatch, RECON, CONV_METRICS, CONV_LABEL,
+  summarizeRecon, summarizeMediaRecon, summarizeConvRecon, summarizeDimRecon, summarizeSliceOthers, SLICE_OTHERS_WARN, reconLevel, fmtMatch, RECON, CONV_METRICS, CONV_LABEL,
   type PlatformRecon, type ConvRecon,
 } from './recon.js';
 
@@ -242,11 +242,18 @@ export function statusPage({ input, health, batchJobs, jobs, trend = [] }: Statu
       if (cv && cv.match !== null) {
         matchBtn += `<p class="pf-media pm-${reconLevel(cv.match)}" title="素材層（MGID API）與裝置層（MGID Redash）的點擊、goal2、goal1、Main goal 加總比對">轉換層 ${fmtMatch(cv.match)}</p>`;
       }
+      // M 維度表（Redash 五維）與切片表（API 小時／地區／國家）：只算台北時區帳戶（2026-11-09）
+      if (p === 'M') {
+        const xd = summarizeDimRecon(reconRows);
+        if (xd.match !== null) matchBtn += `<p class="pf-media pm-${reconLevel(xd.match)}" title="維度表（裝置×網站×作業系統×瀏覽器×widget）與素材層的曝光／點擊加總比對，只算台北時區帳戶">維度層 ${fmtMatch(xd.match)}</p>`;
+        const so = summarizeSliceOthers(reconRows);
+        if (so.share !== null) matchBtn += `<p class="pf-media pm-${so.share > SLICE_OTHERS_WARN ? 'warn' : 'ok'}" title="切片表（小時／地區／國家）裡落在 Others 的曝光比例；生涯零點擊 teaser 與 API 曝光比後台少的部分">切片 Others ${(so.share * 100).toFixed(2)}%</p>`;
+      }
     }
 
     cards.push(`<article class="pf pf-${p.toLowerCase()}">
       <header class="pf-h"><div class="pf-hd">${platformTitle(p)}
-          <span class="pf-c">${(() => { const n = pj.filter((j) => j.accountId !== '*').length; return n ? `${num(n)} 帳戶` : WHOLE_PLATFORM.has(p) ? '全平台一次抓' : '—'; })()}</span></div></header>
+          <span class="pf-c">${(() => { const n = pj.filter((j) => !j.accountId.startsWith('*')).length; return n ? `${num(n)} 帳戶` : WHOLE_PLATFORM.has(p) ? '全平台一次抓' : '—'; })()}</span></div></header>
       <div class="dial-box"${reconRows ? ` data-p="${p}" title="看吻合明細"` : ''}>${dial(pj)}<div class="dial-c">${t.center}</div></div>
       <p class="pf-line tone-${t.tone}">${esc(t.line)}</p>
       <dl class="pf-num">
