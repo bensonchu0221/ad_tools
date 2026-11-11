@@ -235,11 +235,14 @@ export const P_DIM_SCHEMA: BqField[] = [
   I('imp'), I('click'), F('spend'), SYNCED_AT,
 ];
 
-// customer 對照表：目前由 AE/AM 在系統外維護，這張先建空表當「介面」。之後不論改成 Sheet 外部表
-// 或從 Cloud SQL 同步，只要表名與欄位不變，view 與 Looker 都不用改。
+// customer 對照表＝帳戶 → 品牌的人工綁定（只放帳戶名規則解析不對的例外）。2026-11-10 起由 audience_center
+// 的品牌綁定頁（/ad-performance/brands，OWNER）寫入，ad_tools 只建表、不寫。updated_by 是 2026-11-10
+// ALTER TABLE 加在最後的欄位（bqEnsureTable 不改既有表的 schema）。
 export const CUSTOMER_MAP_SCHEMA: BqField[] = [
-  S('platform', 'D/R/M/P/D1', 'REQUIRED'), ACCOUNT_ID, S('customer_name', '客戶名稱'),
+  S('platform', 'D/R/M/P/D1', 'REQUIRED'), ACCOUNT_ID,
+  S('customer_name', '品牌（audience_center 品牌綁定頁 /ad-performance/brands 寫入）'),
   S('note'), { name: 'updated_at', type: 'TIMESTAMP' },
+  S('updated_by', '綁定者（audience_center 品牌綁定頁的登入 email）'),
 ];
 
 export const FACT_TABLE: Record<Platform, string> = {
@@ -272,7 +275,7 @@ export const TABLE_SPECS: BqTableSpec[] = [
   { table: M_SLICE_TABLE, schema: M_SLICE_SCHEMA, partitionField: 'date', clustering: ['slice', 'account_id'], description: 'nexus：M 平台 teaser×小時／地區／國家切片×台北日（statistics-reports）' },
   { table: R_DIM_TABLE, schema: R_DIM_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id', 'media'], description: 'nexus：R 平台 campaign×媒體×裝置×日' },
   { table: P_DIM_TABLE, schema: P_DIM_SCHEMA, partitionField: 'date', clustering: ['account_id', 'campaign_id', 'media'], description: 'nexus：P 平台 素材×網域×版位×裝置×日' },
-  { table: CUSTOMER_MAP_TABLE, schema: CUSTOMER_MAP_SCHEMA, description: 'nexus：平台帳戶 → 客戶 對照（人工維護）' },
+  { table: CUSTOMER_MAP_TABLE, schema: CUSTOMER_MAP_SCHEMA, description: 'nexus：平台帳戶 → 品牌 綁定（audience_center 品牌綁定頁維護，只放例外）' },
 ];
 
 /**
