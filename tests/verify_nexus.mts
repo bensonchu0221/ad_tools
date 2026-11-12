@@ -1735,18 +1735,22 @@ await ok('健檢：M 維度層不吻合亮燈、切片 Others 超過 2% 黃燈',
 
 // ────────────────────────────── R／P 維度表（2026-11-10） ──────────────────────────────
 
-await ok('R 維度列：裝置代碼歸桶（3／4 併 Others）、同 key 合併、behavior 加總、全 0 列丟掉、欄位都在 schema 裡', () => {
+await ok('R 維度列：裝置代碼歸桶（3／4 併 Others）、同 key 合併、behavior 加總、全 0 列丟掉、欄位都在 schema 裡、廣告群組分開', () => {
   const raw = [
     { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 2, impression: 42, click: 1, payment_revenue: 3.25, behavior0: 1 },
     { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 1, impression: 10, click: 0, payment_revenue: 0.5 },
     { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 3, impression: 2, click: 0, payment_revenue: 0 },
     { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'a.com', device_type: 4, impression: 3, click: 0, payment_revenue: 0.01, behavior6: 2 },
     { day: '2026-11-08', user_id: 10277, user_name: '樂敦', cpg_id: 240658, cpg_name: 'C', bundle: 'zero.com', device_type: 2, impression: 0, click: 0, payment_revenue: 0 },
-  ];
+  ].map((r) => ({ group_id: 501, group_name: 'G_興趣', ...r }));
+  // 同 campaign × bundle × 裝置、不同廣告群組＝另一列
+  raw.push({ ...raw[0], group_id: 502, group_name: 'G_RT', impression: 8, click: 0, payment_revenue: 0.4, behavior0: 0 });
   const rows = toRDimRows(raw, T);
-  assert.equal(rows.length, 3);
-  const pc = rows.find((r) => r.device === 'PC')!, oth = rows.find((r) => r.device === 'Others')!;
-  assert.deepEqual([pc.imp, pc.click, pc.spend, pc.behavior0, pc.account_id, pc.campaign_id, pc.media], [42, 1, 3.25, 1, '10277', '240658', 'a.com']);
+  assert.equal(rows.length, 4);
+  const g2 = rows.find((r) => r.group_id === '502')!;
+  assert.deepEqual([g2.imp, g2.device, g2.media, g2.group_name], [8, 'PC', 'a.com', 'G_RT']);
+  const pc = rows.find((r) => r.device === 'PC' && r.group_id === '501')!, oth = rows.find((r) => r.device === 'Others')!;
+  assert.deepEqual([pc.imp, pc.click, pc.spend, pc.behavior0, pc.account_id, pc.campaign_id, pc.media, pc.group_name], [42, 1, 3.25, 1, '10277', '240658', 'a.com', 'G_興趣']);
   assert.deepEqual([oth.imp, oth.spend, oth.behavior6], [5, 0.01, 2]);
   assert.equal(rows.find((r) => r.device === 'Mobile')!.imp, 10);
   const cols = new Set(R_DIM_SCHEMA.map((f) => f.name));
@@ -1806,6 +1810,7 @@ await ok('R／P 維度 Others：事實表多的補一列（花費捨入誤差內
   const others = res.rows.filter((r) => r.media === DIM_OTHERS);
   assert.equal(others.length, 1);
   assert.deepEqual([others[0].campaign_id, others[0].imp, others[0].click, others[0].spend, others[0].device], ['1', 627230, 4425, 0, null]);
+  assert.deepEqual([others[0].group_id, others[0].group_name], [null, null]);   // R 的 Others 列也要有廣告群組欄（NULL）
   assert.match(res.warnings[0], /維度表比事實表多 2 處.*campaign 2 imp 多 10.*2026-11-08 10277 3（事實表沒有這支 campaign）/);
   assert.ok(res.warnings.some((w) => /補了 1 列 Others/.test(w)));
   // P 的 Others 列要有 creative_id／placement 欄（NULL）

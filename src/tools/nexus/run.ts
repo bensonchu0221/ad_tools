@@ -246,6 +246,8 @@ export async function ensureNexusBq(): Promise<string[]> {
   for (const spec of TABLE_SPECS) if (await bqEnsureTable(spec)) created.push(spec.table);
   // 建表後才加的欄位（bqEnsureTable 只建不改）：DDL 不計費、IF NOT EXISTS 冪等
   await bqQuery(`ALTER TABLE \`${DEVICE_TABLE}\` ADD COLUMN IF NOT EXISTS spend_usd FLOAT64 OPTIONS(description='M：MGID Redash 原始美金花費（含 data fee）；其他平台 NULL')`);
+  await bqQuery(`ALTER TABLE \`${R_DIM_TABLE}\` ADD COLUMN IF NOT EXISTS group_id STRING OPTIONS(description='廣告群組（group_id）；差額列為 NULL'),
+    ADD COLUMN IF NOT EXISTS group_name STRING OPTIONS(description='廣告群組名稱；差額列為 NULL')`);
   await bqUpsertView(INTEGRATED_VIEW, integratedViewSql(), 'nexus：四平台統一 view（含 customer 對照）');
   bqReady = true;
   return created;

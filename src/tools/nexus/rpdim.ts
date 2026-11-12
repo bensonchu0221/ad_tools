@@ -1,7 +1,8 @@
 // tool#9 nexus：R／P 維度表（nexus_r_dim_daily／nexus_p_dim_daily）抓取與轉換（2026-11-10，照 M 維度表 mdim.ts 的模式）。
 // 給 PAC Ad Performance「媒體 × 裝置」交叉用；現有的事實表／裝置表／媒體表都不動。
 //
-//  - R＝報表 API 維度 day × user_id × cpg_id × app_bundle_id × device_type（台北日，跟事實表同一套切法）。
+//  - R＝報表 API 維度 day × user_id × cpg_id × group_id × app_bundle_id × device_type（台北日，跟事實表同一套切法；group_id 2026-11-12 加，
+//    API 會一起回 group_name，PAC 用它判斷受眾）。加了 group_id 列數約 1.6 倍（11/10 全平台 36,059 → 57,241 列）。
 //    全平台一天約 5.4 萬列（含全 0 列，佔單次 1 萬列上限），單帳戶最大約 7.5 千列；歷史上有單帳戶單日 1.5 萬列（9763 6/13）。
 //    ⇒ 逐日、依媒體表列數估算把帳戶分批（一批估 ≤ R_DIM_BATCH_ROWS 列）；某批被截斷就對半拆，單帳戶仍超過就依 bundle 排序翻頁。
 //    R 每把 token 有每日請求上限（1003），所以：用 fetchReportOnce（截斷時不自動重打同一天）、回補一個 job 7 天、一天只跑一個。
@@ -24,7 +25,7 @@ export const DIM_OTHERS = 'Others';
 
 // ────────────────────────────── R ──────────────────────────────
 
-export const R_DIM_DIMENSIONS = ['day', 'user_id', 'cpg_id', 'app_bundle_id', 'device_type'];
+export const R_DIM_DIMENSIONS = ['day', 'user_id', 'cpg_id', 'group_id', 'app_bundle_id', 'device_type'];
 export const R_DIM_METRICS = ['impression', 'click', 'payment_revenue', ...R_BEHAVIORS];
 /** R device_type 代碼 → 裝置（同 fetch.ts toRDeviceRows／Report Hub）。 */
 const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5': 'Tablet' };
@@ -32,10 +33,11 @@ const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5':
 export const R_DIM_BATCH_ROWS = 8000;
 /**
  * 估計列數＝媒體表那天的非 0 列數 × 這個倍數。11/08 實測 10277／9358／9313／10089 分別是 3.6／4.4／3.7／4.5 倍
- * （乘上裝置、再加上 API 會一起回的全 0 列）。媒體表沒那天的資料就當 2,000 列。
+ * （乘上裝置、再加上 API 會一起回的全 0 列）；加了 group_id 再乘約 1.6（11/10 全平台 1.59、最大帳戶 10061 1.42），5 → 8。
+ * 媒體表沒那天的資料就當 3,000 列。估少了只會多一次截斷對半拆，不會漏資料。
  */
-export const R_DIM_ROWS_PER_MEDIA_ROW = 5;
-export const R_DIM_DEFAULT_EST = 2000;
+export const R_DIM_ROWS_PER_MEDIA_ROW = 8;
+export const R_DIM_DEFAULT_EST = 3000;
 
 /** R 原始列 → 維度表列：裝置代碼歸桶後合併同 key、全 0 列丟掉。純函式。 */
 export function toRDimRows(raw: any[], syncedAt: string): Row[] {
@@ -45,13 +47,15 @@ export function toRDimRows(raw: any[], syncedAt: string): Row[] {
     if (!date) throw new Error(`R 維度報表回傳無法解析的日期：${String(r.day ?? '')}`);
     const device = R_DEVICE_BUCKET[String(r.device_type)] ?? 'Others';
     const media = str(r.bundle ?? r.app_bundle_id);
-    const key = [date, r.user_id, r.cpg_id, media, device].join('\u0001');
+    const groupId = str(r.group_id);
+    const key = [date, r.user_id, r.cpg_id, groupId, media, device].join('\u0001');
     let o = acc.get(key);
     if (!o) {
       o = {
         date, account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
         campaign_id: str(r.cpg_id), campaign_name: str(r.cpg_name), media, device,
         imp: 0, click: 0, spend: 0, ...Object.fromEntries(R_BEHAVIORS.map((b) => [b, 0])), synced_at: syncedAt,
+        group_id: groupId, group_name: str(r.group_name),
       };
       acc.set(key, o);
     }
@@ -74,11 +78,11 @@ export function packRAccounts(ids: string[], est: (id: string) => number, cap = 
   return bins.map((b) => b.ids);
 }
 
-/** 單帳戶翻頁回來的列去重（同 campaign × bundle × 裝置代碼只留一列）。純函式。 */
+/** 單帳戶翻頁回來的列去重（同 campaign × 廣告群組 × bundle × 裝置代碼只留一列）。純函式。 */
 export function dedupeRDimPages(rows: any[]): any[] {
   const seen = new Map<string, any>();
   for (const r of rows) {
-    const k = [r.day, r.user_id, r.cpg_id, r.bundle ?? r.app_bundle_id, r.device_type].join('\u0001');
+    const k = [r.day, r.user_id, r.cpg_id, r.group_id, r.bundle ?? r.app_bundle_id, r.device_type].join('\u0001');
     if (!seen.has(k)) seen.set(k, r);
   }
   return [...seen.values()];
@@ -256,7 +260,7 @@ export function addDimOthers(o: {
       date: f.date, account_id: f.accountId, account_name: f.accountName ?? s?.sample.account_name ?? null,
       campaign_id: f.campaignId || null, campaign_name: f.campaignName ?? s?.sample.campaign_name ?? null,
       media: DIM_OTHERS, device: null, synced_at: o.syncedAt,
-      ...(o.platform === 'P' ? { creative_id: null, placement: null } : {}),
+      ...(o.platform === 'P' ? { creative_id: null, placement: null } : { group_id: null, group_name: null }),
     };
     out.push({ ...base, ...d });
   }
