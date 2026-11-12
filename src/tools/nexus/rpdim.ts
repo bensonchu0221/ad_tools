@@ -5,7 +5,7 @@
 //    API 會一起回 group_name，PAC 用它判斷受眾）。加了 group_id 列數約 1.6 倍（11/10 全平台 36,059 → 57,241 列）。
 //    全平台一天約 5.4 萬列（含全 0 列，佔單次 1 萬列上限），單帳戶最大約 7.5 千列；歷史上有單帳戶單日 1.5 萬列（9763 6/13）。
 //    ⇒ 逐日、依媒體表列數估算把帳戶分批（一批估 ≤ R_DIM_BATCH_ROWS 列）；某批被截斷就對半拆，單帳戶仍超過就依 bundle 排序翻頁。
-//    R 每把 token 有每日請求上限（1003），所以：用 fetchReportOnce（截斷時不自動重打同一天）、回補一個 job 7 天、一天只跑一個。
+//    R 每把 token 有每日請求上限（1003），所以：用 fetchReportOnce（截斷時不自動重打同一天）、回補一個 job 7 天、一天最多跑 R_BACKFILL_PER_DAY 個（run.ts）。
 //  - P＝一次呼叫 date × advertiser × campaign × creative × domain × slot × device（每次呼叫 P 後端掃一次 prism_events，約 US$0.025／天）。
 //  - Others：逐「帳戶 × 日 × campaign」比事實表，事實表多的寫一列 media='Others'。維度表比事實表多（回補舊日子時來源已被改過，
 //    例：P 9/15 現在比倉庫少 29 曝光）**只記警告、照寫**——讓 job 失敗會白燒 R 的請求額度，落差交給正確性比對（x_* 欄）亮燈。

@@ -10,7 +10,7 @@ import { mergeTeaserStat, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX
 import {
   addDays, chunkRange, planDaily, planBackfill, buildReplaceSql, assertRowsInSlice, coverageEntries, runNexusJob,
   isSkipped, NexusNoRetryError, UNREACHABLE_TAG, M_DEVICE_JOB, isBqConflict, retryOnBqConflict,
-  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, twHhmm, isValidAccountId, writeSlice,
+  NexusQuotaError, R_QUOTA_RETRY_MIN, rBackfillBlock, R_BACKFILL_FROM, R_BACKFILL_PER_DAY, twHhmm, isValidAccountId, writeSlice,
   parsePlatforms, d1WindowError, D1_BACKFILL_START, backfillStart,
   type JobDeps, type AccountRef,
 } from '../src/tools/nexus/run.js';
@@ -494,7 +494,9 @@ await ok('R 回補節流：07:00 前、每日 R 未成功、Report Hub 在跑、
   assert.match(rBackfillBlock({ ...go, hhmm: '06:59' })!, /07:00 以後/);
   assert.match(rBackfillBlock({ ...go, dailyROk: false })!, /每日 R/);
   assert.match(rBackfillBlock({ ...go, reportHubBusy: true })!, /Report Hub/);
-  assert.match(rBackfillBlock({ ...go, ranToday: 1 })!, /一天只跑一段/);
+  assert.equal(R_BACKFILL_PER_DAY, 4);
+  assert.equal(rBackfillBlock({ ...go, ranToday: 3 }), null);
+  assert.match(rBackfillBlock({ ...go, ranToday: 4 })!, /一天最多跑 4 段/);
   assert.equal(rBackfillBlock({ ...go, hhmm: '23:59' }), null);
 });
 

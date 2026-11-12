@@ -79,7 +79,7 @@ export const isMExtraJob = (j: { platform: NexusPlatform; accountId: string }) =
 /**
  * R／P 維度 job（2026-11-10，nexus_r_dim_daily／nexus_p_dim_daily）：帳戶欄同 M 的 '*dim'。等同一批次該平台的 '*' job
  * （事實表）寫完才做（Others 要比事實表、R 分批要看媒體表列數）。只寫自己那張表。一般回補不排，要明講 dim=only。
- * 回補切段：R 7 天一段（每天約 8~12 次請求，一段約 70~80 次；R 回補一天只放行一段，見 rBackfillBlock）、P 30 天一段（一段一次呼叫）。
+ * 回補切段：R 7 天一段（每天約 8~12 次請求，一段約 70~80 次；R 回補一天最多放行 R_BACKFILL_PER_DAY 段，見 rBackfillBlock）、P 30 天一段（一段一次呼叫）。
  */
 export const RP_DIM_JOB = '*dim';
 export const RP_DIM_CHUNK_DAYS: Record<'R' | 'P', number> = { R: 7, P: 30 };
@@ -156,14 +156,17 @@ export const R_QUOTA_RETRY_MIN = 120;
  * R 回補節流（2026-10-11）：R 全平台共用 Super token，回補一入列 5 段連著跑會把當天額度打光，
  * 連帶隔天早上 nexus 每日 R 與 Report Hub 用 Super 的設定一起失敗（10-09 Report Hub 11 個設定 R 失敗）。
  * 規則：台北 R_BACKFILL_FROM 之後、今天每日 R 已成功、Report Hub 沒有排隊／執行中的設定、
- * 今天還沒跑過任何 R 回補 job ⇒ 才放行一段（30 天一段約 70 次請求）。回傳 null＝放行，否則回傳原因。純函式。
+ * 今天跑過的 R 回補 job 還不到 R_BACKFILL_PER_DAY 個 ⇒ 才放行下一段（維度 7 天一段約 70 次請求）。回傳 null＝放行，否則回傳原因。純函式。
+ * 2026-11-12 由一天一段改成四段（使用者：R 維度表加廣告群組後要重補 26 段，一段一天要 26 天）：一天約 280 次請求，
+ * 10-08 那次是約 765 次才打光，留一半以上給每日批次與 Report Hub。
  */
 export const R_BACKFILL_FROM = '07:00';
+export const R_BACKFILL_PER_DAY = 4;
 export function rBackfillBlock(s: { hhmm: string; dailyROk: boolean; reportHubBusy: boolean; ranToday: number }): string | null {
   if (s.hhmm < R_BACKFILL_FROM) return `R 回補 ${R_BACKFILL_FROM} 以後才跑（讓每日批次與 Report Hub 先用額度）`;
   if (!s.dailyROk) return '今天的每日 R 還沒成功，R 回補先不跑';
   if (s.reportHubBusy) return 'Report Hub 還在跑，R 回補先不跑';
-  if (s.ranToday > 0) return 'R 回補一天只跑一段，今天已經跑過';
+  if (s.ranToday >= R_BACKFILL_PER_DAY) return `R 回補一天最多跑 ${R_BACKFILL_PER_DAY} 段，今天已經跑滿`;
   return null;
 }
 /** 台北現在的 HH:MM。 */
