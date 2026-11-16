@@ -3,7 +3,7 @@
 - 目的：D1 系統兩種廣告型態（廣編／影音）中的**影音**，做一份 AM 自己查得到的報表。分層：`core/firestore_d1.ts`（campaign 清單/名稱/影音旗標）＋`core/action4.ts`（成效）→ `metrics.ts`（口徑純函式）→ `report.ts`（組裝）→ `xlsx.ts`／`page.ts`／`route.ts`
 - **⚠️⚠️ D 平台報表 API（s2s.popin.cc）一格影音資料都沒有**，別再去那邊找。三重實證（2026-09-01）：①掃 `nexus.d_tokens` **全部 242 個帳號、8302 個 campaign** 的 `campaign/lists`，`type` **100% 是 `native`**、0 個 `video`，`charge_type` 只有 cpc/ocpc/max_cv（`poc/probe_d_video_types.mts`）；②官方文件 mhtml 全文解碼後搜 `video/play/quartile/播放`，**沒有任何播放指標**（只有 `cv_complete_registration`＝表單完成註冊，不同東西）；③文件 §3.4 明寫 Video Ads/Wave 的 campaign 打 date_reporting 會報錯，根因就在 D1 原始碼 `popin-discovery-v2/app/Http/Controllers/Api/Campaign.php:607` 的 `if (is_wave || is_video) return 80000 'not supported campaign.'`（`CampaignModel.php:70` 定義 `is_video = type === 'video'`）
 - **資料源 ①：Action4（成效）** `https://action4.popin.cc/popin-action/?op=article&nid={campaignId}&country=&start=YYYYMMDD&stop=YYYYMMDD&categories=ca_all`
-  - **公網可直接打、無認證**（→ `df-gw.bdjp.io` / 202.232.100.210，HTTP 與 HTTPS 皆 200）。舊筆記寫「內網、要 `ssh popin`」是過時的。⚠️ **Cloud Run 出口 IP 是否被那個 gateway 放行還沒實測**，這是上線第一件要驗的事
+  - **公網可直接打、無認證**（→ `df-gw.bdjp.io` / 202.232.100.210，HTTP 與 HTTPS 皆 200）。舊筆記寫「內網、要 `ssh popin`」是過時的。Cloud Run 出口打得到（nexus D1 線上回補 2026-10-21 在 Cloud Run 跑完，見 `nexus/CLAUDE.md`）
   - **⚠️ 區間上限 12 個月**（D1 `apiUtils.php:115` 寫死）。超過會**靜默回 `{"result":1}` 不帶任何日期、不報錯** → 會被誤讀成「這段沒投放」。`exceedsAction4Window()` 在送出前就擋掉
   - **⚠️ 一定要帶 `categories=ca_all`**，否則回應塞滿 `ca_`/`cc_`/`ab_` 分類子表。實測同一支 campaign 12 個月：11,379 → **1,425 bytes（省 87%）**
   - **只回「有量的日子」**，沒投放的日期整個不出現（不是回 0）⇒ **最小的日期鍵就是實際開跑日**，輸入項(3)「預設開跑第一天」不必另外查走期，一次呼叫同時拿到
