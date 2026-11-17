@@ -242,6 +242,8 @@ export const P_DIM_SCHEMA: BqField[] = [
   DATE, ACCOUNT_ID, S('account_name'), S('campaign_id'), S('campaign_name'), S('creative_id', 'Others 列為 NULL'),
   S('media', 'domain 原始值；差額列為 Others'), S('placement', 'slot；Others 列為 NULL'), DIM_DEVICE,
   I('imp'), I('click'), F('spend'), SYNCED_AT,
+  // 2026-11-17 新增、放最後（ensureNexusBq ALTER 補上）
+  I('viewable_imp', '可視曝光 viewable_impressions（獨立事件，可能大於曝光）；差額列＝事實表差額；11-17 以前寫的列為 NULL'),
 ];
 
 // customer 對照表＝帳戶 → 品牌的人工綁定（只放帳戶名規則解析不對的例外）。2026-11-10 起由 audience_center

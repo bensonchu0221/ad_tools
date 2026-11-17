@@ -1254,6 +1254,16 @@ await ok('R 維度表可視曝光（2026-11-17）：exposure_report 加總進 vi
   assert.equal(others.viewable_imp, 3);
 });
 
+await ok('P 維度表可視曝光（2026-11-17）：viewable_impressions 加總；只有 viewable 的列也留著；欄位都在 schema', () => {
+  const rows = toPDimRows([
+    { date: '2026-11-15', advertiser: 'a', campaign_id: 7, creative_id: 1, domain: 'x', slot: 's', device: 'Desktop', impressions: 9, clicks: 1, spend: 1, viewable_impressions: 8 },
+    { date: '2026-11-15', advertiser: 'a', campaign_id: 7, creative_id: 1, domain: 'y', slot: 's', device: 'Mobile', impressions: 0, clicks: 0, spend: 0, viewable_impressions: 2 },
+  ], T);
+  assert.deepEqual(rows.map((r) => r.viewable_imp), [8, 2]);
+  const cols = new Set(P_DIM_SCHEMA.map((f) => f.name));
+  for (const k of Object.keys(rows[0])) assert.ok(cols.has(k), k);
+});
+
 await ok('可視曝光 viewable_imp（2026-11-17）：R exposure_report、P viewable_impressions、M＝imp、D 為 NULL；同 key 加總', () => {
   const [r] = toRMediaRows([
     { day: '2026-11-15', user_id: 1, bundle: 'b', impression: 10, click: 1, payment_revenue: 1, exposure_report: 6 },

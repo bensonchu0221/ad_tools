@@ -1,6 +1,7 @@
 # 四平台曝光／可視曝光欄位對照（D／R／M／P）
 
 > 2026-10-13 整理。每一條都附實測來源；「未驗證」的地方有標出來。
+> **2026-11-17 更新**：裝置表、媒體表、R／P 維度表都加了 `viewable_imp`（R `exposure_report`、P `viewable_impressions`、M＝imp、D 為 NULL），給 PAC Ad Performance 的 vCTR（點擊 ÷ 可視曝光）。11-17 以前寫的列是 NULL，要回補；M 已全部補成 imp。實測 Rix API 帶 `device_type` 或 `app_bundle_id` 維度時都會回 `exposure_report`（11/15 依裝置拆與總數完全相同）。
 > 樣本期間：比例統計用 nexus BQ 9/14–10/12 或 10/5–10/11；公式驗算用 10/8 單日真 API。
 
 ---
@@ -86,7 +87,7 @@
 | 表 | 一般曝光 | 可視曝光 |
 |---|---|---|
 | `nexus_r_cr_daily` | `impression` | **`exposure_report`** |
-| `nexus_device_daily`（platform='R'） | `imp` ← `impression` | ❌ 沒抓 |
+| `nexus_device_daily`（platform='R'） | `imp` ← `impression` | ✅ `viewable_imp` ← `exposure_report`（2026-11-17 起） |
 | `nexus_media_daily`（platform='R'） | `imp` ← `impression` | ❌ 沒抓 |
 | `nexus_integrated_daily` | `impressions` ← `impression` | ❌ 不在 view 裡 |
 
@@ -174,7 +175,7 @@ P 的每個指標都是 BQ `prism_events` 裡**各自獨立的事件計數**：
 | 表 | 一般曝光 | 可視曝光 |
 |---|---|---|
 | `nexus_p_creative_daily` | `impressions` | **`viewable_impressions`** |
-| `nexus_device_daily`（platform='P'） | `imp` ← `impressions` | ❌ 沒抓 |
+| `nexus_device_daily`（platform='P'） | `imp` ← `impressions` | ✅ `viewable_imp` ← `viewable_impressions`（2026-11-17 起） |
 | `nexus_media_daily`（platform='P'） | `imp` ← `impressions` | ❌ 沒抓 |
 | `nexus_integrated_daily` | `impressions` ← `impressions` | ❌ 不在 view 裡 |
 

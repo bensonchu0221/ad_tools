@@ -190,6 +190,7 @@ export function toPDimRows(raw: any[], syncedAt: string): Row[] {
       date, account_id: id || P_UNATTRIBUTED, account_name: id ? str(r.advertiser_name) : '（無 advertiser 的事件）',
       campaign_id: str(r.campaign_id), campaign_name: str(r.campaign_name), creative_id: str(r.creative_id),
       media: str(r.domain), placement: str(r.slot), device, imp: 0, click: 0, spend: 0, synced_at: syncedAt,
+      viewable_imp: 0,
     };
     const key = [date, row.account_id, row.campaign_id, row.creative_id, row.media, row.placement, device].join('\u0001');
     const o = acc.get(key) ?? row;
@@ -197,25 +198,30 @@ export function toPDimRows(raw: any[], syncedAt: string): Row[] {
     o.imp = (o.imp as number) + int(r.impressions);
     o.click = (o.click as number) + int(r.clicks);
     o.spend = money((o.spend as number) + Number(r.spend || 0));
+    o.viewable_imp = (o.viewable_imp as number) + int(r.viewable_impressions);
   }
-  return [...acc.values()].filter((o) => o.imp || o.click || o.spend);
+  // viewable 是獨立事件，可能出現只有 viewable 的列：也留著，不然可視曝光會比事實表少
+  return [...acc.values()].filter((o) => o.imp || o.click || o.spend || o.viewable_imp);
 }
 
 /** P 維度 job：一次呼叫全平台。 */
 export async function fetchPDim(sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void): Promise<DimResult> {
   const range = `date BETWEEN DATE ${sqlString(sd)} AND DATE ${sqlString(ed)}`;
   const f = await bqQuery(`SELECT CAST(date AS STRING) AS date, account_id, ANY_VALUE(account_name) AS account_name,
-      campaign_id, ANY_VALUE(campaign_name) AS campaign_name, SUM(impressions) AS imp, SUM(clicks) AS click, SUM(spend) AS spend
+      campaign_id, ANY_VALUE(campaign_name) AS campaign_name, SUM(impressions) AS imp, SUM(clicks) AS click, SUM(spend) AS spend,
+      SUM(viewable_impressions) AS viewable_imp
     FROM \`${FACT_TABLE.P}\` WHERE ${range} GROUP BY date, account_id, campaign_id`);
   const facts: DimFactCell[] = f.map((r) => ({
     date: String(r.date), accountId: String(r.account_id), accountName: str(r.account_name),
     campaignId: String(r.campaign_id ?? ''), campaignName: str(r.campaign_name),
-    m: { imp: int(r.imp), click: int(r.click), spend: money(r.spend) },
+    m: { imp: int(r.imp), click: int(r.click), spend: money(r.spend), viewable_imp: int(r.viewable_imp) },
   }));
   onPhase(`P 維度：全平台報表 ${sd}~${ed}`);
-  const raw = await fetchPrismReportAll({ startDate: sd, endDate: ed, dimensions: P_DIM_DIMENSIONS, metrics: ['impressions', 'clicks', 'spend'] });
+  const raw = await fetchPrismReportAll({
+    startDate: sd, endDate: ed, dimensions: P_DIM_DIMENSIONS, metrics: ['impressions', 'clicks', 'spend', 'viewable_impressions'],
+  });
   const rows = toPDimRows(raw, syncedAt);
-  const res = addDimOthers({ platform: 'P', rows, facts, metrics: ['imp', 'click', 'spend'], syncedAt });
+  const res = addDimOthers({ platform: 'P', rows, facts, metrics: ['imp', 'click', 'spend', 'viewable_imp'], syncedAt });
   return { rows: res.rows, warnings: res.warnings, factClicks: facts.reduce((a, x) => a + x.m.click, 0), requests: 1 };
 }
 
