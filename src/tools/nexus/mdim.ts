@@ -384,5 +384,8 @@ export async function fetchMSlice(
   warnings.push(...res.warnings);
   const nonTw = [...accMap.values()].filter((a) => a.tz !== M_DEFAULT_TZ).map((a) => `${a.accountName}（${a.tz}）`);
   if (nonTw.length) warnings.push(`非台北時區帳戶不補差額：${nonTw.join('、')}`);
-  return { rows: res.rows, warnings, factClicks: facts.filter((f) => active.has(f.accountId)).reduce((a, f) => a + f.click, 0), requests };
+  // 防呆用的點擊數只算實際有打 API 的帳戶：排除清單帳戶（例 XMEI02 token 失效）不打，
+  // 若算進來，回補「當天只有排除帳戶有投放」的日子（6/5~6/7）會被誤判成 API 異常、job 永遠失敗
+  const fetched = new Set(targets.map((a) => a.apiClientId));
+  return { rows: res.rows, warnings, factClicks: facts.filter((f) => fetched.has(f.accountId)).reduce((a, f) => a + f.click, 0), requests };
 }
