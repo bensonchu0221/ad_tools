@@ -108,6 +108,8 @@ export const DEVICE_SCHEMA: BqField[] = [
   // 只有 M 有值：Redash 原始美金花費（spend 是依它的比例分配的帳戶幣別計費金額）。
   // 2026-09-24 新增、放最後：既有表由 ensureNexusBq 用 ALTER TABLE ADD COLUMN 補上
   F('spend_usd', 'M：MGID Redash 原始美金花費（含 data fee）；其他平台 NULL'),
+  // 2026-11-17 新增、放最後（ensureNexusBq ALTER 補上）：可視曝光，給 vCTR（點擊 ÷ 可視曝光）
+  I('viewable_imp', '可視曝光：R exposure_report／P viewable_impressions／M＝imp（M 曝光本身就是可視）；D、D1 與舊列為 NULL'),
 ];
 
 // 媒體表（2026-10-08）：四平台「日 × 帳戶 × 投放媒體」，給 AM dashboard 看某天某媒體底下各帳戶的花費／曝光／點擊。
@@ -122,6 +124,7 @@ export const MEDIA_SCHEMA: BqField[] = [
   SYNCED_AT,
   // 2026-11-17 新增、放最後：既有表由 ensureNexusBq 用 ALTER TABLE ADD COLUMN 補上
   S('events', 'JSON：平台原生轉換事件名 → 次數（D 只有 cv_* 細項、主要轉換 cv 在版位報表一律 0；P 與 11-17 以前的舊列為 NULL）'),
+  I('viewable_imp', '可視曝光：R exposure_report／P viewable_impressions／M＝imp（M 曝光本身就是可視）；D 與舊列為 NULL'),
 ];
 
 // M 裝置三段轉換（2026-10-21 起）：寫在裝置表 events（conv_buy／conv_decision＝goal1／conv_interest＝goal2，來源 Redash）。

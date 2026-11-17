@@ -1167,7 +1167,7 @@ await ok('媒體列：四平台欄位＝schema、media／placement 對到各平�
   assert.deepEqual(Object.keys(d[0]).sort(), keysOf(MEDIA_SCHEMA));
   assert.deepEqual({ ...d[0], synced_at: undefined }, {
     date: '2026-10-06', platform: 'D', account_id: '32265', account_name: '帳D', campaign_id: '3636982', campaign_name: 'C',
-    media: 'www.storm.mg', placement: '61887744', imp: 27423, click: 1529, spend: 7908.92, synced_at: undefined, events: '{}',
+    media: 'www.storm.mg', placement: '61887744', imp: 27423, click: 1529, spend: 7908.92, synced_at: undefined, events: '{}', viewable_imp: null,
   });
 
   const rs = toRMediaRows([
@@ -1235,6 +1235,28 @@ await ok('媒體列 events（2026-11-17）：D cv_* 改名對齊事實表、R be
 
   const [p] = toPMediaRows([{ date: '2026-10-06', advertiser: 'a', campaign_id: 7, domain: 'x', slot: 's', impressions: 1, clicks: 0, spend: 0 }], T);
   assert.equal(p.events, null);
+});
+
+await ok('可視曝光 viewable_imp（2026-11-17）：R exposure_report、P viewable_impressions、M＝imp、D 為 NULL；同 key 加總', () => {
+  const [r] = toRMediaRows([
+    { day: '2026-11-15', user_id: 1, bundle: 'b', impression: 10, click: 1, payment_revenue: 1, exposure_report: 6 },
+    { day: '2026-11-15', user_id: 1, bundle: 'b', impression: 5, click: 0, payment_revenue: 0, exposure_report: 2 },
+  ], T);
+  assert.equal(r.viewable_imp, 8);
+  const [m] = toMMediaRows({ id: '1', name: 'a' }, [{ date: '2026-11-15', source: 'x', imp: 7, click: 1, spend: 1, conv_interest: 0, conv_decision: 0, conv_buy: 0 }], T);
+  assert.equal(m.viewable_imp, 7);
+  const [p] = toPMediaRows([{ date: '2026-11-15', advertiser: 'a', campaign_id: 7, domain: 'x', slot: 's', impressions: 9, clicks: 1, spend: 0, viewable_impressions: 8 }], T);
+  assert.equal(p.viewable_imp, 8);
+  const [d] = toDMediaRows({ id: '1', name: 'a' }, [{ date: '2026-11-15', site_id: '1', site_name: 's', impression: 3, click: 0, spend: 0 }], T);
+  assert.equal(d.viewable_imp, null);
+  const dev = toRDeviceRows([
+    { day: '2026-11-15', user_id: 1, cpg_id: 2, device_type: 3, impression: 4, click: 0, payment_revenue: 0, exposure_report: 1 },
+    { day: '2026-11-15', user_id: 1, cpg_id: 2, device_type: 7, impression: 4, click: 0, payment_revenue: 0, exposure_report: 2 },
+  ], T);
+  assert.equal(dev.length, 1);                   // 3／7 都歸 Others，合併成一列
+  assert.equal(dev[0].viewable_imp, 3);
+  const [pd] = toPDeviceRows([{ date: '2026-11-15', advertiser: 'a', campaign_id: 7, device: 'Desktop', impressions: 9, clicks: 1, spend: 0, viewable_impressions: 5 }], T);
+  assert.equal(pd.viewable_imp, 5);
 });
 
 await ok('R 媒體分頁對帳：差額 Others 帶上 behavior 差額（只放正的）', () => {

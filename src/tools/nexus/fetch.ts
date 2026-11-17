@@ -58,6 +58,8 @@ interface MediaInput {
   imp: unknown; click: unknown; spend: unknown;
   /** 轉換事件（平台原生事件名 → 次數）；undefined＝這個平台媒體層沒有轉換（P），寫 NULL。 */
   events?: Record<string, number>;
+  /** 可視曝光（2026-11-17）：R exposure_report／P viewable_impressions／M＝imp（M 的曝光本身就是可視）；undefined＝平台沒有（D），寫 NULL。 */
+  viewable?: unknown;
 }
 
 /** 事件累加（略過 0 與非數字）。 */
@@ -87,6 +89,7 @@ export function toMediaRows(inputs: MediaInput[], syncedAt: string): Row[] {
       cur.click = (cur.click as number) + int(r.click);
       cur.spend = money((cur.spend as number) + money(r.spend));
       if (r.events) addEvents((cur._ev ??= {}) as Record<string, number>, r.events);
+      if (cur.viewable_imp !== null) cur.viewable_imp = (cur.viewable_imp as number) + int(r.viewable);
       continue;
     }
     const ev: Record<string, number> | undefined = r.events ? {} : undefined;
@@ -95,6 +98,7 @@ export function toMediaRows(inputs: MediaInput[], syncedAt: string): Row[] {
       date: r.date, platform: r.platform, account_id: r.account_id, account_name: r.account_name,
       campaign_id: r.campaign_id, campaign_name: r.campaign_name, media: r.media, placement: r.placement,
       imp: int(r.imp), click: int(r.click), spend: money(r.spend), synced_at: syncedAt, _ev: ev,
+      viewable_imp: r.viewable === undefined ? null : int(r.viewable),
     });
   }
   return [...byKey.values()]
@@ -133,7 +137,7 @@ export function toRMediaRows(raw: any[], syncedAt: string): Row[] {
   return toMediaRows(raw.map((r) => ({
     date: requireDate(r.day, 'R'), platform: 'R' as const, account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
     campaign_id: null, campaign_name: null, media: str(r.bundle), placement: null,
-    imp: r.impression, click: r.click, spend: r.payment_revenue,
+    imp: r.impression, click: r.click, spend: r.payment_revenue, viewable: r.exposure_report,
     events: Object.fromEntries(R_BEHAVIORS.map((b) => [b, Number(r[b]) || 0])),
   })), syncedAt);
 }
@@ -143,7 +147,7 @@ export function toMMediaRows(account: { id: string; name: string }, raw: MgidSou
   return toMediaRows(raw.map((r) => ({
     date: requireDate(r.date, 'M'), platform: 'M' as const, account_id: account.id, account_name: account.name,
     campaign_id: null, campaign_name: null, media: str(r.source), placement: null,
-    imp: r.imp, click: r.click, spend: r.spend,
+    imp: r.imp, click: r.click, spend: r.spend, viewable: r.imp, // M 的曝光本身就是可視曝光
     events: mEvents({ buy: r.conv_buy, decision: r.conv_decision, interest: r.conv_interest }),
   })), syncedAt);
 }
@@ -244,7 +248,7 @@ export function toDDeviceRows(account: { id: string; name: string }, raw: any[],
       const d = { imp: int(r[`${prefix}_imp`]), click: int(r[`${prefix}_click`]), spend: money(r[`${prefix}_charge`]) };
       imp += d.imp; click += d.click; spend += d.spend;
       if (!d.imp && !d.click && !d.spend && !Object.keys(events).length) continue;
-      out.push({ ...base, device, ...d, spend_usd: null, events: JSON.stringify(events), synced_at: syncedAt });
+      out.push({ ...base, device, ...d, spend_usd: null, events: JSON.stringify(events), synced_at: syncedAt, viewable_imp: null });
     }
     // Others＝平台總數 − PC − Mobile（平板等）。總數比兩者合計還小不應發生，真發生就寫 0、讓正確性比對亮燈，不硬湊
     const events: Record<string, number> = {};
@@ -254,7 +258,7 @@ export function toDDeviceRows(account: { id: string; name: string }, raw: any[],
       spend: Math.max(0, money(money(r.charge) - spend)),
     };
     if (!o.imp && !o.click && !o.spend && !Object.keys(events).length) continue;
-    out.push({ ...base, device: 'Others', ...o, spend_usd: null, events: JSON.stringify(events), synced_at: syncedAt });
+    out.push({ ...base, device: 'Others', ...o, spend_usd: null, events: JSON.stringify(events), synced_at: syncedAt, viewable_imp: null });
   }
   return out;
 }
@@ -336,13 +340,14 @@ export function toRDeviceRows(raw: any[], syncedAt: string): Row[] {
     if (!o) {
       o = {
         date, platform: 'R', account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
-        campaign_id: str(r.cpg_id), device, imp: 0, click: 0, spend: 0, spend_usd: null, synced_at: syncedAt, _ev: {},
+        campaign_id: str(r.cpg_id), device, imp: 0, click: 0, spend: 0, spend_usd: null, synced_at: syncedAt, viewable_imp: 0, _ev: {},
       };
       acc.set(key, o);
     }
     o.imp = (o.imp as number) + int(r.impression);
     o.click = (o.click as number) + int(r.click);
     o.spend = money((o.spend as number) + Number(r.payment_revenue || 0));
+    o.viewable_imp = (o.viewable_imp as number) + int(r.exposure_report);
     for (const e of R_DEVICE_EVENTS) {
       const n = int(r[e]);
       if (n) o._ev[e] = (o._ev[e] ?? 0) + n;
@@ -365,7 +370,7 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
   const dev = await fetchReport({
     userType: 'super', userIds: [], startDate: sd, endDate: ed,
     dimensions: ['day', 'user_id', 'cpg_id', 'device_type'],
-    metrics: ['impression', 'click', 'payment_revenue', ...R_DEVICE_EVENTS], onWarn: (m) => warnings.push(m), onRequests,
+    metrics: ['impression', 'click', 'payment_revenue', 'exposure_report', ...R_DEVICE_EVENTS], onWarn: (m) => warnings.push(m), onRequests,
   });
   // 單日仍超過 R 的單次列數上限＝資料被截斷，寧可整個 job 失敗也不要寫進半套數字
   if (warnings.length) throw new Error(`R 資料被截斷，不寫入：${warnings.join('；')}`);
@@ -454,6 +459,7 @@ export function reconcileRMediaPaged(userId: string, day: string, rows: any[], a
   out.push({ day: a.day ?? day, user_id: a.user_id, user_name: a.user_name, bundle: 'Others',
     impression: diff.imp, click: diff.click, payment_revenue: Math.max(diff.spend, 0),
     // 轉換差額一起放進 Others（只放正的：轉換不參與上面的對帳判斷）
+    exposure_report: Math.max(sum(acct, 'exposure_report') - sum(out, 'exposure_report'), 0),
     ...Object.fromEntries(R_BEHAVIORS.map((b) => [b, Math.max(sum(acct, b) - sum(out, b), 0)])) });
   return out;
 }
@@ -464,7 +470,7 @@ export function reconcileRMediaPaged(userId: string, day: string, rows: any[], a
  */
 export const R_MEDIA_BATCH = 13;
 /** R 媒體報表指標：base 3 項＋behavior0-6（2026-11-17 加，給媒體層轉換；只多欄不多列，不多吃請求額度）。 */
-export const R_MEDIA_METRICS = ['impression', 'click', 'payment_revenue', ...R_BEHAVIORS];
+export const R_MEDIA_METRICS = ['impression', 'click', 'payment_revenue', 'exposure_report', ...R_BEHAVIORS];
 
 /**
  * R 帳戶×媒體分批抓：bundle 長尾很長（一天 7 千多個），全平台一次查會破單次 10,000 列上限而被截斷。
@@ -600,7 +606,7 @@ export function toMRedashDeviceRows(o: {
   const rows: Row[] = [];
   const push = (c: Acc, spend: number, campaignId: string | null = c.campaignId, device = c.device) => rows.push({
     date: c.date, platform: 'M', account_id: c.accountId, account_name: c.accountName, campaign_id: campaignId, device,
-    imp: c.imp, click: c.click, spend: money(spend), spend_usd: money(c.usd),
+    imp: c.imp, click: c.click, spend: money(spend), spend_usd: money(c.usd), viewable_imp: c.imp, // M 的曝光本身就是可視曝光
     events: JSON.stringify(mEvents(c)), synced_at: o.syncedAt,
   });
   for (const [k, list] of groups) {
@@ -832,7 +838,7 @@ export function toPMediaRows(raw: any[], syncedAt: string): Row[] {
     return {
       date, platform: 'P' as const, account_id: acc.id, account_name: acc.name,
       campaign_id: str(r.campaign_id), campaign_name: null, media: str(r.domain), placement: str(r.slot),
-      imp: r.impressions, click: r.clicks, spend: r.spend,
+      imp: r.impressions, click: r.clicks, spend: r.spend, viewable: r.viewable_impressions,
     };
   }), syncedAt);
 }
@@ -847,7 +853,7 @@ export function toPDeviceRows(raw: any[], syncedAt: string): Row[] {
     return {
       date, platform: 'P', account_id: acc.id, account_name: acc.name,
       campaign_id: str(r.campaign_id), device, imp: int(r.impressions), click: int(r.clicks), spend: money(r.spend),
-      spend_usd: null, events: '{}', synced_at: syncedAt,
+      spend_usd: null, events: '{}', synced_at: syncedAt, viewable_imp: int(r.viewable_impressions),
     };
   });
 }
@@ -862,12 +868,12 @@ export async function fetchPAll(sd: string, ed: string, syncedAt: string, onPhas
   onPhase(`P 全平台裝置報表 ${sd}~${ed}`);
   const dev = await fetchPrismReportAll({
     startDate: sd, endDate: ed,
-    dimensions: ['date', 'advertiser', 'campaign_id', 'device'], metrics: ['impressions', 'clicks', 'spend'],
+    dimensions: ['date', 'advertiser', 'campaign_id', 'device'], metrics: ['impressions', 'clicks', 'spend', 'viewable_impressions'],
   });
   onPhase(`P 全平台媒體報表 ${sd}~${ed}`);
   const med = await fetchPrismReportAll({
     startDate: sd, endDate: ed,
-    dimensions: ['date', 'advertiser', 'campaign_id', 'domain', 'slot'], metrics: ['impressions', 'clicks', 'spend'],
+    dimensions: ['date', 'advertiser', 'campaign_id', 'domain', 'slot'], metrics: ['impressions', 'clicks', 'spend', 'viewable_impressions'],
   });
   return { facts: toPRows(raw, syncedAt), device: toPDeviceRows(dev, syncedAt), media: toPMediaRows(med, syncedAt), warnings: [] };
 }
@@ -926,7 +932,7 @@ export function toD1DeviceRows(c: D1VideoCampaign, report: Action4Report, synced
       if (!s.imp && !s.click && !s.spend) continue;
       out.push({
         date: ymdDash(day), platform: 'D1', account_id: c.account, account_name: c.account, campaign_id: c.id,
-        device, imp: int(s.imp), click: int(s.click), spend: s.spend, events: null, spend_usd: null, synced_at: syncedAt,
+        device, imp: int(s.imp), click: int(s.click), spend: s.spend, events: null, spend_usd: null, synced_at: syncedAt, viewable_imp: null,
       });
     }
   }
