@@ -26,7 +26,8 @@ export const DIM_OTHERS = 'Others';
 // ────────────────────────────── R ──────────────────────────────
 
 export const R_DIM_DIMENSIONS = ['day', 'user_id', 'cpg_id', 'group_id', 'app_bundle_id', 'device_type'];
-export const R_DIM_METRICS = ['impression', 'click', 'payment_revenue', ...R_BEHAVIORS];
+// exposure_report（可視曝光，2026-11-17 加，給 vCTR）：只多欄不多列
+export const R_DIM_METRICS = ['impression', 'click', 'payment_revenue', 'exposure_report', ...R_BEHAVIORS];
 /** R device_type 代碼 → 裝置（同 fetch.ts toRDeviceRows／Report Hub）。 */
 const R_DEVICE_BUCKET: Record<string, string> = { '2': 'PC', '1': 'Mobile', '5': 'Tablet' };
 /** 一批帳戶的估計列數上限（單次 10,000 列，留餘裕）。 */
@@ -55,13 +56,14 @@ export function toRDimRows(raw: any[], syncedAt: string): Row[] {
         date, account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
         campaign_id: str(r.cpg_id), campaign_name: str(r.cpg_name), media, device,
         imp: 0, click: 0, spend: 0, ...Object.fromEntries(R_BEHAVIORS.map((b) => [b, 0])), synced_at: syncedAt,
-        group_id: groupId, group_name: str(r.group_name),
+        group_id: groupId, group_name: str(r.group_name), viewable_imp: 0,
       };
       acc.set(key, o);
     }
     o.imp = (o.imp as number) + int(r.impression);
     o.click = (o.click as number) + int(r.click);
     o.spend = money((o.spend as number) + Number(r.payment_revenue || 0));
+    o.viewable_imp = (o.viewable_imp as number) + int(r.exposure_report);
     for (const b of R_BEHAVIORS) o[b] = (o[b] as number) + int(r[b]);
   }
   return [...acc.values()].filter((o) => o.imp || o.click || o.spend || R_BEHAVIORS.some((b) => o[b]));
@@ -122,7 +124,7 @@ async function rFactCells(sd: string, ed: string): Promise<{ facts: DimFactCell[
   const [f, m] = await Promise.all([
     bqQuery(`SELECT CAST(date AS STRING) AS date, account_id, ANY_VALUE(account_name) AS account_name,
         campaign_id, ANY_VALUE(campaign_name) AS campaign_name,
-        SUM(impression) AS imp, SUM(click) AS click, SUM(payment_revenue) AS spend,
+        SUM(impression) AS imp, SUM(click) AS click, SUM(payment_revenue) AS spend, SUM(exposure_report) AS viewable_imp,
         ${R_BEHAVIORS.map((b) => `SUM(${b}) AS ${b}`).join(', ')}
       FROM \`${FACT_TABLE.R}\` WHERE ${range} GROUP BY date, account_id, campaign_id`),
     bqQuery(`SELECT CAST(date AS STRING) AS date, account_id, COUNT(*) AS n
@@ -132,7 +134,7 @@ async function rFactCells(sd: string, ed: string): Promise<{ facts: DimFactCell[
     facts: f.map((r) => ({
       date: String(r.date), accountId: String(r.account_id), accountName: str(r.account_name),
       campaignId: String(r.campaign_id ?? ''), campaignName: str(r.campaign_name),
-      m: { imp: int(r.imp), click: int(r.click), spend: money(r.spend), ...Object.fromEntries(R_BEHAVIORS.map((b) => [b, int(r[b])])) },
+      m: { imp: int(r.imp), click: int(r.click), spend: money(r.spend), viewable_imp: int(r.viewable_imp), ...Object.fromEntries(R_BEHAVIORS.map((b) => [b, int(r[b])])) },
     })),
     mediaRows: new Map(m.map((r) => [`${r.date}|${r.account_id}`, int(r.n)])),
   };
@@ -168,7 +170,7 @@ export async function fetchRDim(
     for (const bin of bins) for (const r of await fetchRDimBatch(bin, day, doOnce)) raw.push(r);
   }
   const rows = toRDimRows(raw, syncedAt);
-  const res = addDimOthers({ platform: 'R', rows, facts, metrics: ['imp', 'click', 'spend', ...R_BEHAVIORS], syncedAt });
+  const res = addDimOthers({ platform: 'R', rows, facts, metrics: ['imp', 'click', 'spend', 'viewable_imp', ...R_BEHAVIORS], syncedAt });
   return { rows: res.rows, warnings: res.warnings, factClicks: facts.reduce((a, f) => a + f.m.click, 0), requests };
 }
 

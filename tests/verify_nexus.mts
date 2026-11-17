@@ -1237,6 +1237,23 @@ await ok('媒體列 events（2026-11-17）：D cv_* 改名對齊事實表、R be
   assert.equal(p.events, null);
 });
 
+await ok('R 維度表可視曝光（2026-11-17）：exposure_report 加總進 viewable_imp；Others 帶事實表的可視曝光差額', () => {
+  const rows = toRDimRows([
+    { day: '2026-11-15', user_id: 1, cpg_id: 2, group_id: 3, bundle: 'b', device_type: 2, impression: 10, click: 1, payment_revenue: 1, exposure_report: 6 },
+    { day: '2026-11-15', user_id: 1, cpg_id: 2, group_id: 3, bundle: 'b', device_type: 2, impression: 5, click: 0, payment_revenue: 0, exposure_report: 2 },
+  ], T);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].viewable_imp, 8);
+  assert.deepEqual(Object.keys(rows[0]).sort(), keysOf(R_DIM_SCHEMA));
+  const res = addDimOthers({
+    platform: 'R', syncedAt: T, metrics: ['imp', 'click', 'spend', 'viewable_imp'], rows,
+    facts: [{ date: '2026-11-15', accountId: '1', accountName: 'a', campaignId: '2', campaignName: 'c', m: { imp: 20, click: 1, spend: 1, viewable_imp: 11 } }],
+  });
+  const others = res.rows.find((r) => r.media === DIM_OTHERS)!;
+  assert.equal(others.imp, 5);
+  assert.equal(others.viewable_imp, 3);
+});
+
 await ok('可視曝光 viewable_imp（2026-11-17）：R exposure_report、P viewable_impressions、M＝imp、D 為 NULL；同 key 加總', () => {
   const [r] = toRMediaRows([
     { day: '2026-11-15', user_id: 1, bundle: 'b', impression: 10, click: 1, payment_revenue: 1, exposure_report: 6 },

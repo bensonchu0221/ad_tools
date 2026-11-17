@@ -252,6 +252,7 @@ export async function ensureNexusBq(): Promise<string[]> {
   await bqQuery(`ALTER TABLE \`${R_DIM_TABLE}\` ADD COLUMN IF NOT EXISTS group_id STRING OPTIONS(description='廣告群組（group_id）；差額列為 NULL'),
     ADD COLUMN IF NOT EXISTS group_name STRING OPTIONS(description='廣告群組名稱；差額列為 NULL')`);
   await bqQuery(`ALTER TABLE \`${MEDIA_TABLE}\` ADD COLUMN IF NOT EXISTS events STRING OPTIONS(description='JSON：平台原生轉換事件名 → 次數（D 只有 cv_* 細項；P 與 2026-11-17 以前的舊列為 NULL）')`);
+  await bqQuery(`ALTER TABLE \`${R_DIM_TABLE}\` ADD COLUMN IF NOT EXISTS viewable_imp INT64 OPTIONS(description='可視曝光 exposure_report；差額列＝事實表差額；2026-11-17 以前寫的列為 NULL')`);
   for (const t of [DEVICE_TABLE, MEDIA_TABLE]) {
     await bqQuery(`ALTER TABLE \`${t}\` ADD COLUMN IF NOT EXISTS viewable_imp INT64 OPTIONS(description='可視曝光：R exposure_report／P viewable_impressions／M＝imp；D、D1 與 2026-11-17 以前的舊列為 NULL')`);
   }

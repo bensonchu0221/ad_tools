@@ -235,6 +235,8 @@ export const R_DIM_SCHEMA: BqField[] = [
   ...R_BEHAVIORS.map((b) => I(b)), SYNCED_AT,
   // 2026-11-12 新增、放最後：既有表由 ensureNexusBq 用 ALTER TABLE ADD COLUMN 補上
   S('group_id', '廣告群組（group_id）；差額列為 NULL'), S('group_name', '廣告群組名稱；差額列為 NULL'),
+  // 2026-11-17 新增、放最後（ensureNexusBq ALTER 補上）
+  I('viewable_imp', '可視曝光 exposure_report；差額列＝事實表差額；11-17 以前寫的列為 NULL'),
 ];
 export const P_DIM_SCHEMA: BqField[] = [
   DATE, ACCOUNT_ID, S('account_name'), S('campaign_id'), S('campaign_name'), S('creative_id', 'Others 列為 NULL'),
