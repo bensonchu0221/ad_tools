@@ -382,6 +382,17 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
     if (!idsByDay.has(day)) idsByDay.set(day, new Set());
     idsByDay.get(day)!.add(id);
   }
+  const mediaRaw = await fetchRMediaDays(idsByDay, onPhase, onRequests, (m) => warnings.push(m));
+  return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings, requests };
+}
+
+/**
+ * R 媒體層逐日抓（每天只查給定的帳戶）：fetchRAll 與媒體表回補腳本（poc/backfill_nexus_media_events.mts）共用。
+ * 一天約 2 次請求；某批截斷就對半拆，單帳戶仍破上限就依 bundle 排序翻頁、拿帳戶當日總數對帳。
+ */
+export async function fetchRMediaDays(
+  idsByDay: Map<string, Set<string>>, onPhase: (p: string) => void, onRequests: (n: number) => void, onWarn: (m: string) => void,
+): Promise<any[]> {
   const mediaRaw: any[] = [];
   for (const day of [...idsByDay.keys()].sort()) {
     const ids = [...idsByDay.get(day)!].sort();
@@ -405,11 +416,11 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
       const acct = await fetchReport({
         userType: 'super', userIds: [id], startDate: day, endDate: day, dimensions: ['day', 'user_id'], metrics, onRequests,
       });
-      return reconcileRMediaPaged(id, day, rows, acct, (m) => warnings.push(m));
+      return reconcileRMediaPaged(id, day, rows, acct, onWarn);
     });
     for (const r of dayRaw) mediaRaw.push(r);
   }
-  return { facts: toRRows(raw, syncedAt), device: toRDeviceRows(dev, syncedAt), media: toRMediaRows(mediaRaw, syncedAt), warnings, requests };
+  return mediaRaw;
 }
 
 /**

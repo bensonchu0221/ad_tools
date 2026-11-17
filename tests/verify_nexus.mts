@@ -1200,6 +1200,18 @@ await ok('媒體列：四平台欄位＝schema、media／placement 對到各平�
   assert.equal(p[1].account_id, P_UNATTRIBUTED); // 沒 advertiser 的事件跟事實表一樣歸虛擬帳戶
 });
 
+await ok('只寫媒體表（tables=media）：只刪／寫媒體表這段切片，事實表、裝置表不動；沒給媒體表就丟錯', () => {
+  const base = {
+    factTable: 'f', factCols: ['date'], factStage: null, deviceTable: 'dev', deviceCols: ['date'], deviceStage: null,
+    platform: 'R' as const, accountId: null, sd: '2026-08-17', ed: '2026-08-23', tables: 'media' as const,
+  };
+  const sql = buildReplaceSql({ ...base, mediaTable: 'med', mediaCols: ['date', 'events'], mediaStage: 'stg' });
+  assert.doesNotMatch(sql, /`f`|`dev`/);
+  assert.match(sql, /DELETE FROM `med` WHERE date BETWEEN DATE '2026-08-17' AND DATE '2026-08-23' AND platform = 'R';/);
+  assert.match(sql, /INSERT INTO `med` \(date, events\) SELECT date, events FROM `stg`;/);
+  assert.throws(() => buildReplaceSql(base), /沒給媒體表/);
+});
+
 await ok('媒體列 events（2026-11-17）：D cv_* 改名對齊事實表、R behavior、M 三段；同 key 加總；只有轉換的列留著；P 為 NULL', () => {
   const d = toDMediaRows({ id: '29349', name: '帳D' }, [
     { date: '2026-11-10', campaign_id: '4177228', site_id: '1', site_name: 's', impression: 10, click: 1, spend: 2,

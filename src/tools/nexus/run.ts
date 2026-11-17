@@ -280,7 +280,8 @@ export function assertRowsInSlice(rows: Row[], sd: string, ed: string, accountId
  * 媒體表跟著事實表走：'both'／'facts' 會一併取代媒體表這段（同平台＋同帳戶），裝置類模式不碰。
  * （2026-10-15~10-21 還有 'mconv' 寫 M 裝置轉換表 nexus_m_device_conv_daily；Redash 有 goal1／goal2 之後改寫進裝置表 events，已拿掉）
  */
-export type SliceTables = 'both' | 'facts' | 'device' | 'device_orphans';
+/** media＝只取代媒體表（2026-11-17 媒體轉換回補用：事實表／裝置表原封不動）。 */
+export type SliceTables = 'both' | 'facts' | 'device' | 'device_orphans' | 'media';
 
 /** 取代腳本（純函式，方便測試）：同一個 transaction 內把事實表、裝置表、媒體表的這段切片刪掉再寫回。 */
 export function buildReplaceSql(o: {
@@ -299,15 +300,16 @@ export function buildReplaceSql(o: {
     // 這段的墊底列一律先刪：帳戶補了 token 之後重跑，它就不會再是對不上的帳戶，舊墊底列在這裡退場（不會跟正式列重複）
     lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range} AND STARTS_WITH(account_id, ${sqlString(M_UNMAPPED_PREFIX)});`);
     if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
-  } else if (tables !== 'device') {
+  } else if (tables !== 'device' && tables !== 'media') {
     lines.push(`DELETE FROM \`${o.factTable}\` WHERE ${range}${acct};`);
     if (o.factStage) lines.push(`INSERT INTO \`${o.factTable}\` (${cols(o.factCols)}) SELECT ${cols(o.factCols)} FROM \`${o.factStage}\`;`);
   }
-  if (tables !== 'facts') {
+  if (tables !== 'facts' && tables !== 'media') {
     lines.push(`DELETE FROM \`${o.deviceTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
     if (o.deviceStage) lines.push(`INSERT INTO \`${o.deviceTable}\` (${cols(o.deviceCols)}) SELECT ${cols(o.deviceCols)} FROM \`${o.deviceStage}\`;`);
   }
-  if (o.mediaTable && o.mediaCols && (tables === 'both' || tables === 'facts')) {
+  if (tables === 'media' && !(o.mediaTable && o.mediaCols)) throw new Error('只寫媒體表卻沒給媒體表');
+  if (o.mediaTable && o.mediaCols && (tables === 'both' || tables === 'facts' || tables === 'media')) {
     lines.push(`DELETE FROM \`${o.mediaTable}\` WHERE ${range} AND platform = ${sqlString(o.platform)}${acct};`);
     if (o.mediaStage) lines.push(`INSERT INTO \`${o.mediaTable}\` (${cols(o.mediaCols)}) SELECT ${cols(o.mediaCols)} FROM \`${o.mediaStage}\`;`);
   }
@@ -358,6 +360,7 @@ export async function writeSlice(o: {
   assertRowsInSlice(o.facts, o.sd, o.ed, o.accountId, `${o.platform} 事實表`, o.platform);
   assertRowsInSlice(o.device, o.sd, o.ed, o.accountId, `${o.platform} 裝置表`, o.platform);
   if (o.media) assertRowsInSlice(o.media, o.sd, o.ed, o.accountId, `${o.platform} 媒體表`, o.platform);
+  if (o.tables === 'media' && !o.media) throw new Error(`${o.platform} 只寫媒體表卻沒給媒體列`);
   if (o.tables === 'device_orphans') {
     const bad = o.facts.find((r) => !String(r.account_id ?? '').startsWith(M_UNMAPPED_PREFIX));
     if (bad) throw new Error(`M 墊底列的帳戶 ${String(bad.account_id)} 不是 ${M_UNMAPPED_PREFIX} 開頭，拒絕寫入（會跟正式帳戶重複）`);
