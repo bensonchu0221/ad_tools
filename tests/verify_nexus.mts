@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   pruneDCampaigns, toDRows, toDDeviceRows, toRRows, toRDeviceRows, toMRows, toMRedashDeviceRows, toMRedashOrphanFacts, addFactCampaignOwners, releaseSkippedOwners, M_UNMAPPED_PREFIX, toPRows, toPDeviceRows, ymdDash, P_UNATTRIBUTED,
-  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, mEvents,
+  toDMediaRows, toRMediaRows, toMMediaRows, toPMediaRows, fetchRMediaRaw, reconcileRMediaPaged, mEvents, dSiteEvents,
   toD1Rows, toD1DeviceRows, d1MobileImp, d1MobileSpend, fetchRAll, mDoubleCountRisk,
 } from '../src/tools/nexus/fetch.js';
 import { mergeTeaserStat, teaserStatCutoff, dropStaleTeaserStat, TEASER_STAT_MAX_AGE_DAYS } from '../src/core/mgid.js';
@@ -1167,7 +1167,7 @@ await ok('媒體列：四平台欄位＝schema、media／placement 對到各平�
   assert.deepEqual(Object.keys(d[0]).sort(), keysOf(MEDIA_SCHEMA));
   assert.deepEqual({ ...d[0], synced_at: undefined }, {
     date: '2026-10-06', platform: 'D', account_id: '32265', account_name: '帳D', campaign_id: '3636982', campaign_name: 'C',
-    media: 'www.storm.mg', placement: '61887744', imp: 27423, click: 1529, spend: 7908.92, synced_at: undefined,
+    media: 'www.storm.mg', placement: '61887744', imp: 27423, click: 1529, spend: 7908.92, synced_at: undefined, events: '{}',
   });
 
   const rs = toRMediaRows([
@@ -1198,6 +1198,40 @@ await ok('媒體列：四平台欄位＝schema、media／placement 對到各平�
   assert.equal(p[0].placement, 'tsna_prism_hot');
   assert.equal(p[0].campaign_id, '7');
   assert.equal(p[1].account_id, P_UNATTRIBUTED); // 沒 advertiser 的事件跟事實表一樣歸虛擬帳戶
+});
+
+await ok('媒體列 events（2026-11-17）：D cv_* 改名對齊事實表、R behavior、M 三段；同 key 加總；只有轉換的列留著；P 為 NULL', () => {
+  const d = toDMediaRows({ id: '29349', name: '帳D' }, [
+    { date: '2026-11-10', campaign_id: '4177228', site_id: '1', site_name: 's', impression: 10, click: 1, spend: 2,
+      conversion: 0, cv_add_to_car: 2, cv_add_payment_info: 1, cv_view_content: 1, cv_lead_qualified: 0 },
+    { date: '2026-11-10', campaign_id: '4177228', site_id: '1', site_name: 's', impression: 0, click: 0, spend: 0, cv_view_content: 3 },
+    { date: '2026-11-10', campaign_id: '4177228', site_id: '2', site_name: 't', impression: 0, click: 0, spend: 0, conversion: 1 },
+    { date: '2026-11-10', campaign_id: '4177228', site_id: '3', site_name: 'u', impression: 0, click: 0, spend: 0, cv_purchase: 0 },
+  ], T);
+  assert.equal(d.length, 2); // 全 0 且沒轉換的 u 丟掉；只有轉換的 t 留著
+  assert.deepEqual(JSON.parse(d[0].events as string), { cv_add_to_cart: 2, cv_add_paymentInfo: 1, cv_view_content: 4 });
+  assert.deepEqual(JSON.parse(d[1].events as string), { cv: 1 });
+  assert.deepEqual(dSiteEvents({ conversion: '0', cv_other: '2', impression: 5 }), { cv_other: 2 });
+
+  const [r] = toRMediaRows([{ day: '2026-10-06', user_id: 1, bundle: 'b', impression: 5, click: 1, payment_revenue: 1, behavior0: 3, behavior4: 1 }], T);
+  assert.deepEqual(JSON.parse(r.events as string), { behavior0: 3, behavior4: 1 });
+
+  const [m] = toMMediaRows({ id: '1', name: 'a' }, [
+    { date: '2026-10-06', source: 'x', imp: 5, click: 1, spend: 1, conv_interest: 2, conv_decision: 0, conv_buy: 1 },
+  ], T);
+  assert.deepEqual(JSON.parse(m.events as string), { conv_buy: 1, conv_interest: 2 });
+
+  const [p] = toPMediaRows([{ date: '2026-10-06', advertiser: 'a', campaign_id: 7, domain: 'x', slot: 's', impressions: 1, clicks: 0, spend: 0 }], T);
+  assert.equal(p.events, null);
+});
+
+await ok('R 媒體分頁對帳：差額 Others 帶上 behavior 差額（只放正的）', () => {
+  const acct = [{ day: '2026-06-13', user_id: 9763, user_name: 'n', impression: 10, click: 2, payment_revenue: 1, behavior0: 5, behavior1: 0 }];
+  const rows = [{ day: '2026-06-13', user_id: 9763, bundle: 'a', impression: 6, click: 1, payment_revenue: 0.6, behavior0: 3, behavior1: 1 }];
+  const out = reconcileRMediaPaged('9763', '2026-06-13', rows, acct, () => {});
+  const others = out.find((x) => x.bundle === 'Others');
+  assert.equal(others.behavior0, 2);
+  assert.equal(others.behavior1, 0);
 });
 
 await ok('媒體列：日期壞掉 → 丟錯（不寫進錯的分區）；缺帳戶 → 丟錯', () => {

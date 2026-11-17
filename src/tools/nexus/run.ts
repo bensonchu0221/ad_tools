@@ -251,6 +251,7 @@ export async function ensureNexusBq(): Promise<string[]> {
   await bqQuery(`ALTER TABLE \`${DEVICE_TABLE}\` ADD COLUMN IF NOT EXISTS spend_usd FLOAT64 OPTIONS(description='M：MGID Redash 原始美金花費（含 data fee）；其他平台 NULL')`);
   await bqQuery(`ALTER TABLE \`${R_DIM_TABLE}\` ADD COLUMN IF NOT EXISTS group_id STRING OPTIONS(description='廣告群組（group_id）；差額列為 NULL'),
     ADD COLUMN IF NOT EXISTS group_name STRING OPTIONS(description='廣告群組名稱；差額列為 NULL')`);
+  await bqQuery(`ALTER TABLE \`${MEDIA_TABLE}\` ADD COLUMN IF NOT EXISTS events STRING OPTIONS(description='JSON：平台原生轉換事件名 → 次數（D 只有 cv_* 細項；P 與 2026-11-17 以前的舊列為 NULL）')`);
   await bqUpsertView(INTEGRATED_VIEW, integratedViewSql(), 'nexus：四平台統一 view（含 customer 對照）');
   bqReady = true;
   return created;

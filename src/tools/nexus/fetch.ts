@@ -17,7 +17,7 @@ import { fetchCvDetailMap } from '../adstream/run.js';
 import { parseLooseDate } from '../weeklyreport/report.js';
 import { bqQuery, sqlString } from '../../core/bigquery.js';
 import {
-  D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, type Platform,
+  D_CV_COLS, R_DIMENSIONS, R_METRICS, P_DIMENSIONS, P_METRICS, FACT_TABLE, R_BEHAVIORS, type Platform,
   D1_ACTION4_METRICS, D1_METRIC_COLS, D1_ACTION4_CHARGES, D1_CHARGE_COLS,
 } from './schema.js';
 import { listD1VideoCampaigns, listD1VideoAds, type D1VideoCampaign, type D1VideoAd } from '../../core/firestore_d1.js';
@@ -56,6 +56,16 @@ interface MediaInput {
   date: string; platform: Platform; account_id: string; account_name: string | null;
   campaign_id: string | null; campaign_name: string | null; media: string | null; placement: string | null;
   imp: unknown; click: unknown; spend: unknown;
+  /** 轉換事件（平台原生事件名 → 次數）；undefined＝這個平台媒體層沒有轉換（P），寫 NULL。 */
+  events?: Record<string, number>;
+}
+
+/** 事件累加（略過 0 與非數字）。 */
+function addEvents(into: Record<string, number>, from: Record<string, number> | undefined): void {
+  for (const [k, v] of Object.entries(from ?? {})) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n !== 0) into[k] = (into[k] ?? 0) + n;
+  }
 }
 
 /**
@@ -63,6 +73,8 @@ interface MediaInput {
  * 媒體名照 API 原值存、不歸戶（使用者 2026-10-07 決定）。
  * 曝光／點擊／花費全 0 的列丟掉：R 一天 18,098 列裡 11,151 列全 0（帳戶×媒體組合出現但沒投到），
  * 留著只會讓 dashboard 列出「花 0 元的帳戶」，加總不受影響（2026-10-06 實測丟前丟後四平台加總相同）。
+ * 有轉換事件的列即使三項全 0 也留著（轉換歸在曝光當天之後的日子），不然媒體層轉換會比事實表少。
+ * events（2026-11-17）：D/R/M 一律寫 JSON 字串（沒有轉換＝'{}'）；P 沒有轉換寫 NULL。NULL 也代表 11-17 以前寫的舊列。
  */
 export function toMediaRows(inputs: MediaInput[], syncedAt: string): Row[] {
   const byKey = new Map<string, Row>();
@@ -74,15 +86,37 @@ export function toMediaRows(inputs: MediaInput[], syncedAt: string): Row[] {
       cur.imp = (cur.imp as number) + int(r.imp);
       cur.click = (cur.click as number) + int(r.click);
       cur.spend = money((cur.spend as number) + money(r.spend));
+      if (r.events) addEvents((cur._ev ??= {}) as Record<string, number>, r.events);
       continue;
     }
+    const ev: Record<string, number> | undefined = r.events ? {} : undefined;
+    if (ev) addEvents(ev, r.events);
     byKey.set(key, {
       date: r.date, platform: r.platform, account_id: r.account_id, account_name: r.account_name,
       campaign_id: r.campaign_id, campaign_name: r.campaign_name, media: r.media, placement: r.placement,
-      imp: int(r.imp), click: int(r.click), spend: money(r.spend), synced_at: syncedAt,
+      imp: int(r.imp), click: int(r.click), spend: money(r.spend), synced_at: syncedAt, _ev: ev,
     });
   }
-  return [...byKey.values()].filter((r) => r.imp || r.click || r.spend);
+  return [...byKey.values()]
+    .filter((r) => r.imp || r.click || r.spend || Object.keys((r._ev as object) ?? {}).length)
+    .map(({ _ev, ...row }) => ({ ...row, events: _ev ? JSON.stringify(_ev) : null }));
+}
+
+/**
+ * D 版位報表事件名 → 事實表／裝置表的名稱（同一事件兩支 API 拼法不同，2026-11-17 實測）。
+ * 版位報表的 conversion（＝cv）實測一律 0、也沒有 mcv／mcv2：D 媒體層只有 cv_* 細項，主要轉換拿不到。
+ */
+const D_SITE_EVENT_ALIAS: Record<string, string> = { cv_add_to_car: 'cv_add_to_cart', cv_add_payment_info: 'cv_add_paymentInfo' };
+
+/** D 版位報表一列的轉換事件：conversion（記成 cv）＋所有 cv_* 欄位。純函式。 */
+export function dSiteEvents(r: any): Record<string, number> {
+  const ev: Record<string, number> = {};
+  for (const [k, v] of Object.entries(r ?? {})) {
+    if (k !== 'conversion' && !k.startsWith('cv_')) continue;
+    const name = k === 'conversion' ? 'cv' : (D_SITE_EVENT_ALIAS[k] ?? k);
+    addEvents(ev, { [name]: Number(v) });
+  }
+  return ev;
 }
 
 /** D 版位報表（getSiteReports）→ 媒體列。media＝site_name（版位名，例如 news.ebc.net.tw_APP）。純函式。 */
@@ -90,7 +124,7 @@ export function toDMediaRows(account: { id: string; name: string }, raw: any[], 
   return toMediaRows(raw.map((r) => ({
     date: requireDate(r.date, 'D'), platform: 'D' as const, account_id: account.id, account_name: account.name,
     campaign_id: str(r.campaign_id), campaign_name: str(r.campaign_name), media: str(r.site_name), placement: str(r.site_id),
-    imp: r.impression, click: r.click, spend: r.spend,
+    imp: r.impression, click: r.click, spend: r.spend, events: dSiteEvents(r),
   })), syncedAt);
 }
 
@@ -100,6 +134,7 @@ export function toRMediaRows(raw: any[], syncedAt: string): Row[] {
     date: requireDate(r.day, 'R'), platform: 'R' as const, account_id: String(r.user_id ?? ''), account_name: str(r.user_name),
     campaign_id: null, campaign_name: null, media: str(r.bundle), placement: null,
     imp: r.impression, click: r.click, spend: r.payment_revenue,
+    events: Object.fromEntries(R_BEHAVIORS.map((b) => [b, Number(r[b]) || 0])),
   })), syncedAt);
 }
 
@@ -109,6 +144,7 @@ export function toMMediaRows(account: { id: string; name: string }, raw: MgidSou
     date: requireDate(r.date, 'M'), platform: 'M' as const, account_id: account.id, account_name: account.name,
     campaign_id: null, campaign_name: null, media: str(r.source), placement: null,
     imp: r.imp, click: r.click, spend: r.spend,
+    events: mEvents({ buy: r.conv_buy, decision: r.conv_decision, interest: r.conv_interest }),
   })), syncedAt);
 }
 
@@ -354,14 +390,14 @@ export async function fetchRAll(sd: string, ed: string, syncedAt: string, onPhas
       let truncated = false;
       const rows = await fetchReport({
         userType: 'super', userIds, startDate: day, endDate: day,
-        dimensions: ['day', 'user_id', 'app_bundle_id'], metrics: ['impression', 'click', 'payment_revenue'],
+        dimensions: ['day', 'user_id', 'app_bundle_id'], metrics: R_MEDIA_METRICS,
         onWarn: () => { truncated = true; }, onRequests,
       });
       return { rows, truncated };
     }, R_MEDIA_BATCH, async (id) => {
       // 單帳戶單日仍破 10,000 列：依 bundle 排序逐頁抓完，再拿帳戶當日總數驗（每個帳戶日多 2~3 次請求）
       onPhase(`R 媒體報表 ${day} 帳戶 ${id} 超過單次上限，排序分頁抓`);
-      const metrics = ['impression', 'click', 'payment_revenue'];
+      const metrics = R_MEDIA_METRICS;
       const { rows } = await fetchReportPaged({
         userType: 'super', userIds: [id], startDate: day, endDate: day,
         dimensions: ['day', 'user_id', 'app_bundle_id'], metrics, orderKey: 'app_bundle_id', onRequests,
@@ -405,7 +441,9 @@ export function reconcileRMediaPaged(userId: string, day: string, rows: any[], a
   onWarn(`R 媒體報表帳戶 ${userId} ${day} 分頁後仍差曝光 ${diff.imp}、點擊 ${diff.click}、花費 ${diff.spend}，差額寫成 Others`);
   const a = acct[0];
   out.push({ day: a.day ?? day, user_id: a.user_id, user_name: a.user_name, bundle: 'Others',
-    impression: diff.imp, click: diff.click, payment_revenue: Math.max(diff.spend, 0) });
+    impression: diff.imp, click: diff.click, payment_revenue: Math.max(diff.spend, 0),
+    // 轉換差額一起放進 Others（只放正的：轉換不參與上面的對帳判斷）
+    ...Object.fromEntries(R_BEHAVIORS.map((b) => [b, Math.max(sum(acct, b) - sum(out, b), 0)])) });
   return out;
 }
 
@@ -414,6 +452,8 @@ export function reconcileRMediaPaged(userId: string, day: string, rows: any[], a
  * 13 帳戶一批＝一天 2 次請求；某批破上限就對半拆（多 3 次），比固定小批次省請求額度。
  */
 export const R_MEDIA_BATCH = 13;
+/** R 媒體報表指標：base 3 項＋behavior0-6（2026-11-17 加，給媒體層轉換；只多欄不多列，不多吃請求額度）。 */
+export const R_MEDIA_METRICS = ['impression', 'click', 'payment_revenue', ...R_BEHAVIORS];
 
 /**
  * R 帳戶×媒體分批抓：bundle 長尾很長（一天 7 千多個），全平台一次查會破單次 10,000 列上限而被截斷。

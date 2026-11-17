@@ -120,6 +120,8 @@ export const MEDIA_SCHEMA: BqField[] = [
   S('placement', 'D site_id／P slot；R/M 為 NULL'),
   I('imp'), I('click'), F('spend', '花費（帳戶幣別）'),
   SYNCED_AT,
+  // 2026-11-17 新增、放最後：既有表由 ensureNexusBq 用 ALTER TABLE ADD COLUMN 補上
+  S('events', 'JSON：平台原生轉換事件名 → 次數（D 只有 cv_* 細項、主要轉換 cv 在版位報表一律 0；P 與 11-17 以前的舊列為 NULL）'),
 ];
 
 // M 裝置三段轉換（2026-10-21 起）：寫在裝置表 events（conv_buy／conv_decision＝goal1／conv_interest＝goal2，來源 Redash）。
