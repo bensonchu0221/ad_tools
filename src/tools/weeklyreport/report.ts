@@ -12,7 +12,7 @@ import {
 import { getDAccountTokenById, getMgidTokenById, listMgidAccounts } from '../../core/store.js';
 import { downloadImages, clusterImageUrls } from './imagehash.js';
 import {
-  planWeeklySources, readNexusD, readNexusR, readNexusM, readNexusP, daysBetween, API_MAX_DAYS, type Segment,
+  planWeeklySources, readNexusD, readNexusR, readNexusM, readNexusP, daysBetween, API_MAX_DAYS, R_TYPE_NOTE_PREFIX, type Segment,
 } from './nexussource.js';
 import type { UserType } from '../../core/rixbee.js';
 import { fetchMgidReportCorrected, fetchMgidDeviceReport, type MgidClient, type MgidDeviceRow } from '../../core/mgid.js';
@@ -805,7 +805,7 @@ export async function fetchWeeklyRaw(
           warnings.push(`R 在 ${sub.startDate}~${sub.endDate}（打 API 的那段）查無資料`);
           return emptyResult();
         }
-        if (!typeNoted) warnings.push(`R 端自動使用「${R_TYPE_LABEL[userType]}」帳號類型`);
+        if (!typeNoted) warnings.push(`${R_TYPE_NOTE_PREFIX}${R_TYPE_LABEL[userType]}」帳號類型`);
         typeNoted = true;
         const [rows, device] = await Promise.all([
           fetchRData(sub, userType, (m) => warnings.push(m)),

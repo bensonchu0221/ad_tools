@@ -2,7 +2,7 @@
 // 純函式＋離線，不連 BQ／Cloud SQL／平台 API。執行：npx tsx tests/verify_weekly_nexus.mts
 import {
   coveredPrefixEnd, planSegments, planLimitError, planWeeklySources, toDDeviceApiRows, mergeMDevice,
-  weeklySourceMode, NEXUS_START, M_DEVICE_JOB, API_MAX_DAYS,
+  weeklySourceMode, NEXUS_START, M_DEVICE_JOB, API_MAX_DAYS, userFacingWarnings,
 } from '../src/tools/weeklyreport/nexussource.js';
 import { addDOthers, aggregateDevices, buildDDeviceRaw, buildRDevice, buildMgidDevice } from '../src/tools/weeklyreport/report.js';
 import { BACKFILL_START, M_DEVICE_JOB as RUN_M_DEVICE_JOB } from '../src/tools/nexus/run.js';
@@ -71,6 +71,11 @@ check(planLimitError({ R: [{ sd: '2026-04-20', ed: '2026-05-20', source: 'api' }
   const { plan, notes } = await planWeeklySources(input, 'auto');
   check(plan.D?.length === 1 && plan.D[0].source === 'api', 'DB 查不到時 D 退回打 API');
   check(notes.some((n) => n.includes('查不到倉庫涵蓋範圍')) && notes[0].startsWith('資料來源：'), '提示寫出退回原因與資料來源');
+  const shown = userFacingWarnings([...notes, 'R 端自動使用「台客」帳號類型', 'MGID 帳號在走期內查無報表資料']);
+  check(!shown.some((n) => n.startsWith('資料來源：')), '前端提醒濾掉資料來源');
+  check(!shown.some((n) => n.startsWith('R 端自動使用')), '前端提醒濾掉 R 帳號類型');
+  check(shown.some((n) => n.includes('查不到倉庫涵蓋範圍')) && shown.includes('MGID 帳號在走期內查無報表資料'), '其他提醒照留');
+  check(userFacingWarnings(null).length === 0, '舊任務 warnings 為空也不出錯');
   const api = await planWeeklySources(input, 'api');
   check(api.plan.D?.[0].source === 'api' && !api.notes.some((n) => n.includes('查不到')), 'api 模式不查 DB');
 }

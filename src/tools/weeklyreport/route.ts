@@ -31,7 +31,7 @@ import { buildXlsx } from './xlsx.js';
 import { summarizeReport, buildNarrative } from './narrative.js';
 import { weeklyFormPage } from './form.js';
 import { type WeeklyReportInput } from './types.js';
-import { planWeeklySources, planLimitError, REPORT_MAX_DAYS } from './nexussource.js';
+import { planWeeklySources, planLimitError, REPORT_MAX_DAYS, userFacingWarnings } from './nexussource.js';
 
 export const BASE_PATH = '/tools/weeklyreport';
 
@@ -150,7 +150,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         label: j.label,
         phase: j.phase,
         error: j.error,
-        warnings: j.warnings,
+        warnings: userFacingWarnings(j.warnings), // 資料來源那行只留 DB 紀錄、不顯示
         queueAhead: j.queueAhead ?? 0,
         canAdjust: !!j.rawGcsObject, // 有 raw 暫存（14 天內）＝可進調整頁（awaiting_adjustment 或 done 再調）
         createdAt: j.createdAt,
@@ -226,7 +226,7 @@ export async function registerWeeklyReport(app: FastifyInstance) {
         basePath: BASE_PATH,
         prefill,
         status: job.status,
-        warnings: job.warnings,
+        warnings: userFacingWarnings(job.warnings),
       })
     );
   });

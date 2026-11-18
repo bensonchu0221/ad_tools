@@ -97,6 +97,18 @@ function platformKeys(input: WeeklyReportInput): [NexusPlatform, string[]][] {
 const md = (s: string) => s.slice(5).replace('-', '/');
 const segText = (s: Segment) => (s.sd === s.ed ? md(s.sd) : `${md(s.sd)}~${md(s.ed)}`);
 
+/** 「資料來源：D 08/01~08/31API；…」這行提示的開頭。 */
+export const SOURCE_NOTE_PREFIX = '資料來源：';
+/** 「R 端自動使用「台客」帳號類型」這行提示的開頭（report.ts 產生）。 */
+export const R_TYPE_NOTE_PREFIX = 'R 端自動使用「';
+/** 只留紀錄的系統資訊：仍存進 weekly_jobs.warnings_json，但不顯示給使用者。 */
+const RECORD_ONLY_PREFIXES = [SOURCE_NOTE_PREFIX, R_TYPE_NOTE_PREFIX];
+
+/** 前端要顯示的提醒：濾掉資料來源、R 帳號類型這類系統資訊（2026-11-18 使用者說有紀錄就好、不必寫在前端）。純函式。 */
+export function userFacingWarnings(warnings: string[] | null | undefined): string[] {
+  return (warnings ?? []).filter((w) => !RECORD_ONLY_PREFIXES.some((p) => w.startsWith(p)));
+}
+
 /**
  * 決定每個平台每段日期走哪條路。查 Cloud SQL nexus_jobs（不查 BQ、不花錢）。
  * 查不到（DB 掛了）⇒ 全部退回 API 並在 notes 說明，報表照產。
@@ -128,7 +140,7 @@ export async function planWeeklySources(
   }
   const parts = Object.entries(plan).map(([p, segs]) =>
     `${p} ${segs!.map((s) => `${segText(s)}${s.source === 'nexus' ? '倉庫' : 'API'}`).join('＋')}`);
-  if (parts.length) notes.unshift(`資料來源：${parts.join('；')}`);
+  if (parts.length) notes.unshift(`${SOURCE_NOTE_PREFIX}${parts.join('；')}`);
   return { plan, notes };
 }
 
