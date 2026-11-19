@@ -214,6 +214,15 @@ await ok('#11 IO 已簽署後，草稿 Cue 的報價單不壓章、有浮水印�
   assert.equal(lastDoc!.stage, 'approved');
 });
 
+await ok('複查 R2：IO 已簽後單獨開的 Cue 新版，沒上傳 Cue 確認憑證前 hasEvidence＝false（不被 IO 簽回檔誤判）', async () => {
+  const no = await signed();
+  await svc.newVersion(no, 'cue', AE);
+  await svc.cueAction(no, 2, 'submit', {}, AE);
+  assert.equal((await svc.detail(no, AE)).cue!.hasEvidence, false);
+  await upload(no, 'cue_confirm', 2);
+  assert.equal((await svc.detail(no, AE)).cue!.hasEvidence, true);
+});
+
 await ok('#14 上傳：看檔頭不看自報類型；檔名的 .. 不會讓 GCS 路徑檢查爆 500；.eml 用 octet-stream 也收；狀態不對不留孤兒檔', async () => {
   assert.equal(svc.fileTypeOf('a.pdf', 'application/pdf', Buffer.from('<html><script>')), null);
   assert.equal(svc.fileTypeOf('scan.pdf', 'image/png', Buffer.from('%PDF-1.4 x')), 'application/pdf');

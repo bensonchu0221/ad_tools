@@ -84,6 +84,8 @@
   const PLATFORMS = ['D', 'R', 'M', 'P', 'D1', 'META', 'GOOGLE', 'PR', 'OTHER'];
   const PF_LABEL = { META: 'Meta', GOOGLE: 'GG', OTHER: '其他' };
   const TRACKED = ['D', 'R', 'M', 'P', 'D1'];
+  const MAX_AMOUNT = 99_999_999_999; // 同 model.ts
+  const MAX_VOLUME = 1e13;
   const ROLE = { ae: 'AE', am: 'AM', manager: '主管', finance: '財務', admin: '管理員' };
   const tag = (pair, extra = '') => `<span class="tag ${pair[1]}">${pair[1] === 'errs' || pair[1] === 'err' ? '' : ''}${esc(pair[0])}${extra}</span>`;
   const estimate = (l) => {
@@ -563,9 +565,13 @@
           const k = inp.dataset.l;
           if (k === 'budget') l.budget = readNum(inp.value);
           else if (k === 'unitPrice') l.unitPrice = inp.value.trim() === '' ? null : Number(inp.value.replace(/[,$\s]/g, ''));
-          if (['budget', 'unitPrice', 'volume'].includes(k)) inp.classList.toggle('bad', inp.value.trim() !== '' && !Number.isFinite(k === 'budget' ? l.budget : k === 'unitPrice' ? l.unitPrice : readNum(inp.value)));
           else if (k === 'volume') { const v = inp.value.trim(); l.volumeManual = v !== ''; l.volume = v === '' ? null : readNum(v); }
           else l[k] = inp.value;
+          // 紅框檢查要放在賦值鏈「之後」：2026-11-20 複查 R1——原本插在 else if 中間，volume 分支變死碼、手打量體存不進去
+          if (['budget', 'unitPrice', 'volume'].includes(k)) {
+            const val = k === 'budget' ? l.budget : k === 'unitPrice' ? l.unitPrice : l.volume;
+            inp.classList.toggle('bad', inp.value.trim() !== '' && !Number.isFinite(val));
+          }
           // 贈送：0 元、沒有單價；計費欄留著當量體單位（CPM＝曝光、CPC＝點擊），原本強制包版就沒辦法記 KPI（審查 #12）
           if (k === 'type' && l.type === 'bonus') { l.budget = 0; l.unitPrice = null; }
           if (k === 'model' && l.model === 'FLAT') l.unitPrice = null;
@@ -575,7 +581,8 @@
           if (vol && !l.volumeManual) { const v = estimate(l); vol.placeholder = v != null ? fmt(v) : '—'; }
           markDirty();
         });
-        if (inp.dataset.l === 'budget') inp.addEventListener('blur', () => { inp.value = fmt(S.draft.lines[i].budget); });
+        // 只在是合法數字時才格式化（複查 R3：'abc' 失焦後原本被 fmt(NaN) 蓋成 0，看起來像是 0 元）
+        if (inp.dataset.l === 'budget') inp.addEventListener('blur', () => { const b = S.draft.lines[i].budget; if (Number.isFinite(b)) inp.value = fmt(b); });
       });
     });
     el.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => { S.draft.lines.splice(Number(b.dataset.del), 1); redrawRows(); }));
@@ -610,12 +617,14 @@
   /** 存檔前擋掉不是數字、小數預算（原本 'abc' 默默變 0、小數被後端四捨五入：審查 #13）。 */
   function draftProblem() {
     const d = S.draft;
-    if (d.io && !(Number.isInteger(d.io.net) && d.io.net >= 0)) return 'IO 未稅總金額要是非負整數';
+    // 上限跟後端 model.ts MAX_AMOUNT／MAX_VOLUME 一致（複查 R3：回覆寫「前後端都擋」，前端原本漏了上限）
+    const amt = (v) => Number.isInteger(v) && v >= 0 && v <= MAX_AMOUNT;
+    if (d.io && !amt(d.io.net)) return 'IO 未稅總金額要是 0～999 億的整數';
     for (const [i, l] of d.lines.entries()) {
       const no = `第 ${pad2(i + 1)} 列`;
-      if (!(Number.isInteger(l.budget) && l.budget >= 0)) return `${no}預算要是非負整數`;
-      if (l.unitPrice != null && !(Number.isFinite(l.unitPrice) && l.unitPrice >= 0)) return `${no}目標單價不是數字`;
-      if (l.volumeManual && !(Number.isInteger(Number(l.volume)) && Number(l.volume) >= 0)) return `${no}預估量體要是非負整數`;
+      if (!amt(l.budget)) return `${no}預算要是 0～999 億的整數`;
+      if (l.unitPrice != null && !(Number.isFinite(l.unitPrice) && l.unitPrice >= 0 && l.unitPrice < 1e9)) return `${no}目標單價不是合理的數字`;
+      if (l.volumeManual && !(Number.isInteger(Number(l.volume)) && Number(l.volume) >= 0 && Number(l.volume) <= MAX_VOLUME)) return `${no}預估量體要是非負整數（上限 10 兆）`;
     }
     return '';
   }
@@ -693,7 +702,10 @@
         markDirty();
       });
       const net = document.getElementById('f-net');
-      if (net) net.addEventListener('blur', () => { net.value = fmt(S.draft.io.net); });
+      if (net) {
+        net.addEventListener('blur', () => { if (Number.isFinite(S.draft.io.net)) net.value = fmt(S.draft.io.net); });
+        net.addEventListener('input', () => net.classList.toggle('bad', net.value.trim() !== '' && !Number.isFinite(S.draft.io.net)));
+      }
       const terms = document.getElementById('terms');
       if (terms) terms.addEventListener('change', () => { S.draft.io.termsVersion = terms.value; document.getElementById('termsbody').innerHTML = termsHtml(); markDirty(); });
       if (net) net.addEventListener('input', () => { const tb = document.getElementById('termsbody'); if (tb) tb.innerHTML = termsHtml(); });

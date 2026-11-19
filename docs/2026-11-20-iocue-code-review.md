@@ -1,8 +1,9 @@
 # tool#11 IO／Cue 單（`iocue`）程式碼審查報告
 
 - 審查日期：2026-11-20
-- 審查範圍：commit `0e13f3c`（`src/tools/iocue/*`、`public/iocue/app.js`、`src/tools/sales/iosys.ts` 及相關 `sales`／`core`／`server.ts`／`adpreview` 修改）
-- 測試現況：`tsc --noEmit` 通過；`tests/verify_iocue.mts`（41 項）與 `tests/verify_sales.mts`（98 項）皆通過，但現有測試**僅覆蓋純函式**（`model.ts`、`sales/iosys.ts`），未覆蓋 `service.ts`、`store.ts`、`route.ts`、`pdf_template.ts` 與前端 `app.js`。
+- 審查範圍：初審 commit `0e13f3c`；複查 commit `9d30ddd`（對應回覆 `docs/2026-11-20-iocue-code-review-reply.md`）
+- 目前狀態：原 17 項中 P0 全部 6 項與絕大多數 P1／P2 已確實修補並補齊 MySQL 流程測試；**複查發現 1 項新引入的必修 Bug（`app.js` 手打「預估量體」變死碼）與 2 項小瑕疵**，詳見文末「[複查結果](#複查結果2026-11-20對應-commit-9d30ddd-與回覆)」。
+- 初審測試現況：`tsc --noEmit` 通過；`tests/verify_iocue.mts`（41 項）與 `tests/verify_sales.mts`（98 項）皆通過，但現有測試**僅覆蓋純函式**（`model.ts`、`sales/iosys.ts`），未覆蓋 `service.ts`、`store.ts`、`route.ts`、`pdf_template.ts` 與前端 `app.js`。
 
 ---
 
@@ -285,3 +286,52 @@
 1. **第一批（必解才正式開放業務使用）**：#1（同步架構與並發鎖）、#2（作廢同步 BQ）、#3（專案欄位版本隔離）、#4（Cue 退回與核准檢查）、#5（`approve` 權限前置與 TOCTOU）、#6（`sign` 作廢舊 Cue 條件）。
 2. **第二批（內部試用前修掉，避免操作卡關與髒資料）**：#7（`latestLive` 統一）、#8（刪列清綁定）、#9（登入過期 401）、#10（作廢權限收緊）、#11（報價單草稿不壓章）、#12（`kpiNote` 與 `贈送` 列＋`parsePaste`）、#13（前端 `S.dirty` 與 listener）、#14（上傳安全與 `.eml`/`..`）。
 3. **第三批（上線後穩定度優化）**：#15（DDL 鎖、Chromium 自動重啟、N+1 批次化）、#16（`sales` 精度與邊界）、#17（看板統計與 PDF 細節）。
+
+---
+
+## 複查結果（2026-11-20，對應 commit `9d30ddd` 與回覆）
+
+- 對照檔案：`docs/2026-11-20-iocue-code-review-reply.md` 與 commit `9d30ddd` 全部變更。
+- 驗證執行：`tsc --noEmit` 0 錯、`tests/verify_iocue.mts` 47 項通過、`tests/verify_sales.mts` 98 項通過；已檢視新增的 `tests/verify_iocue_flow.mts`（13 項真 MySQL 流程測試）。
+
+### 確認已解決與取捨同意
+- **原 P0（#1–#6）**：全部確實修到根因，包含送審凍結 `project_json` 並於作廢還原、同批 Cue 防退回／作廢／誤傳 `cue_confirm`、核准前先跑 `ioGate` 與交易失敗清 GCS 孤兒檔、作廢同步 BQ 寫成「已作廢／暫停」並清空子表。
+- **原 P1／P2（#7–#17）**：修補與回覆一致；其中 #1（改走每日 06:00 同步）、#9（暫不動共用 `core/auth.ts`、先由前端擋 302）、#15（連線池／N+1／500 筆上限）與 #16-3（斷檔波段空窗期）的暫緩取捨以目前使用量皆合理。
+
+### 複查新發現：1 項必修 Bug（新引入）
+
+#### R1.【P1・建議修完再正式使用】編輯頁手打「預估量體（`volume`）」完全失效（變成死碼）
+- **位置**：`public/iocue/app.js:564-568`
+- **現象與原因**：新增紅框檢查的 `if (['budget', 'unitPrice', 'volume'].includes(k))` 插在 `else if (k === 'unitPrice')` 與 `else if (k === 'volume')` 之間，把原本的 `if / else if` 鏈拆成兩段：
+  ```js
+  if (k === 'budget') l.budget = readNum(inp.value);
+  else if (k === 'unitPrice') l.unitPrice = inp.value.trim() === '' ? null : Number(inp.value.replace(/[,$\s]/g, ''));
+  if (['budget', 'unitPrice', 'volume'].includes(k)) inp.classList.toggle('bad', inp.value.trim() !== '' && !Number.isFinite(k === 'budget' ? l.budget : k === 'unitPrice' ? l.unitPrice : readNum(inp.value)));
+  else if (k === 'volume') { const v = inp.value.trim(); l.volumeManual = v !== ''; l.volume = v === '' ? null : readNum(v); }
+  else l[k] = inp.value;
+  ```
+  當 `k === 'volume'` 時，第 566 行的 `if` 一定為 `true`，導致第 567 行的 `else if (k === 'volume')` **永遠不會執行**。無論是一般媒體列手動覆蓋預估量體，或是 #12 新支援的「贈送列手填 KPI 量體」，在畫面輸入後存檔都不會寫入 `S.draft.lines`（冒煙測試只測到「從 Excel 貼上 14 欄」，沒覆蓋到欄位手打）。
+- **建議修法**：把紅框檢查搬到賦值分支結束之後：
+  ```js
+  if (k === 'budget') l.budget = readNum(inp.value);
+  else if (k === 'unitPrice') l.unitPrice = inp.value.trim() === '' ? null : Number(inp.value.replace(/[,$\s]/g, ''));
+  else if (k === 'volume') { const v = inp.value.trim(); l.volumeManual = v !== ''; l.volume = v === '' ? null : readNum(v); }
+  else l[k] = inp.value;
+  if (['budget', 'unitPrice', 'volume'].includes(k)) {
+    const val = k === 'budget' ? l.budget : k === 'unitPrice' ? l.unitPrice : l.volume;
+    inp.classList.toggle('bad', inp.value.trim() !== '' && !Number.isFinite(val));
+  }
+  ```
+
+### 複查新發現：2 項小瑕疵（可順手補）
+
+#### R2. Cue 單獨改版時，還沒上傳憑證 UI 就先亮「已上傳」
+- **位置**：`src/tools/iocue/service.ts:163`（對照 `service.ts:409`）
+- **現象**：`detail()` 的 `cue.hasEvidence` 為 `evidence('cue_confirm', cue.ver, 'cueVer') || evidence('client_signed', cue.ioVer, 'ioVer')`。當 IO v1 已簽署（已有 `client_signed`）、事後單獨開 Cue v2 送出（`cue.ioVer = 1`）時，因 v1 的簽回檔存在，畫面會誤顯示「已上傳」並把「Cue：上傳確認憑證並鎖定」按鈕變可按（實際按下去會被後端第 409 行正確擋掉，不會誤鎖，僅 UI 誤導）。
+- **建議修法**：同批送審的 Cue 走 IO 簽署連動，不會走 `cueAction('confirm')`，第 163 行改成只看 `evidence('cue_confirm', cue.ver, 'cueVer')` 即可。
+
+#### R3. 前端數字欄兩處小細節
+1. **非數字失焦被格式化成 `0`**（`public/iocue/app.js:578, 696`）：在預算或 IO 未稅金額輸入 `'abc'` 後失焦（`blur`），`fmt(NaN)` 會把欄位文字視覺上蓋回 `'0'`（存檔仍會因 `S.draft` 存著 `NaN` 而被 `draftProblem()` 擋下，建議僅在 `Number.isFinite(...)` 時才格式化；另 `#f-net` 可比照加上 `.bad` 紅框）。
+2. **前端上限檢查漏補**（`public/iocue/app.js:611-621`）：`draftProblem()` 目前只檢查非負整數，尚未加上 `<= 99_999_999_999` 與 `<= 1e13` 上限（後端 `cleanIo`／`cleanLines` 已有擋，不會進 DB，僅與回覆 #17.5「前後端都擋」略有落差）。
+
+> 附註：`9d30ddd` 已在 `origin/main`（push main 會觸發 Cloud Build 部署），建議修掉 R1 後一起再推一次，並對「手打預估量體／贈送列量體」補一筆前端操作確認。

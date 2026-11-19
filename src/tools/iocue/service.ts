@@ -160,7 +160,9 @@ export async function detail(no: string, ctx: Ctx) {
     cue: cue && {
       ...cue, label: CUE_STATUS_LABEL[cue.status], editable: cueEditable(cue.status) && canEdit(ctx),
       actions: cueActions(cue.status, ctx.roles), bindings: full.bindings[cue.ver] ?? [],
-      hasEvidence: evidence('cue_confirm', cue.ver, 'cueVer') || evidence('client_signed', cue.ioVer, 'ioVer'),
+      // 只看 Cue 自己的確認憑證：同批 Cue 跟著 IO 簽署鎖定、不走 Cue 確認；原本把 IO 的簽回檔也算進來，
+      // IO 已簽後單獨開的 Cue 新版會誤顯示「已上傳」、鎖定按鈕可按（複查 R2，後端會擋，但畫面誤導）
+      hasEvidence: evidence('cue_confirm', cue.ver, 'cueVer'),
     },
     can: { edit: canEdit(ctx), newIo: canEdit(ctx) && !full.ios.some((x) => ['draft', 'reviewing', 'awaiting_client'].includes(x.status)),
       newCue: canEdit(ctx) && !full.cues.some((x) => ['draft', 'pending'].includes(x.status)),
