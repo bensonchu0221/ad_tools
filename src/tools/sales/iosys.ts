@@ -10,7 +10,7 @@
 import type { Seed, SeedIo, SeedAgency, SeedClient, SeedBillingParty, SeedAllocation, SeedAssignment, SeedCueLine } from './build.js';
 import { normName } from './names.js';
 import type { SalesPlatform } from './schema.js';
-import { monthSplit, lineVolume, cueTotals, isTracked, MODEL_LABEL, type CueLine, type Binding } from '../iocue/model.js';
+import { monthSplit, kpiVolume, cueTotals, isTracked, MODEL_LABEL, type CueLine, type Binding } from '../iocue/model.js';
 
 /** 給 sales 的快照（iocue/store.ts lockedSnapshot 的形狀，只取用到的欄位）。 */
 export interface IosysProject {
@@ -18,9 +18,15 @@ export interface IosysProject {
     projectNo: string; name: string; agencyName: string; agencyAttr: string; clientName: string; billingName: string; billingTaxId: string;
     paymentTerms: string; entity: string; aeEmail: string; amEmail: string; status: string; note: string;
   };
-  io: { ver: number; net: number; start: string; end: string };
+  io: { ver: number; net: number; start: string; end: string; status?: string };
   cue: { ver: number; lines: CueLine[] };
   bindings: Binding[];
+  /**
+   * 曾經勾稽一致（進過 BQ）、現在已簽署 IO 或已確認 Cue 被作廢（2026-11-20 審查 #2）：
+   * 照樣輸出這張 IO（同 source_ref ⇒ 同 id），但狀態改作廢、金額歸 0、子表清空，
+   * 不然 sales 合併「今天沒出現就整組保留」，BQ 會永遠停在已簽署、預算與歸屬繼續算。
+   */
+  voided?: boolean;
 }
 
 const STATUS: Record<string, string> = { active: '已簽署', closed: '已結案', terminated: '提前終止' };
@@ -68,6 +74,20 @@ export function appendIosys(seed: Seed, projects: IosysProject[]): Seed {
     }
     const lines = x.cue.lines;
     const t = cueTotals(lines);
+    if (x.voided) {
+      // IO 還簽著、只是 Cue 被作廢＝暫停（等新版 Cue 確認）；IO 也作廢＝整張作廢
+      const st = x.io.status === 'signed' ? '暫停（Cue 待重新確認）' : '已作廢';
+      out.ios.push({
+        key, name: p.name, ioCode: p.projectNo,
+        clientName: clientOf(p.clientName, ref), agencyName, billingPartyName: billingName,
+        entity: p.entity, aeEmail: p.aeEmail, amEmail: p.amEmail,
+        start: x.io.start || null, end: x.io.end || null, status: st,
+        budgetNet: 0, serviceFeePct: null, serviceFee: null, setupFee: null, otherFee: null,
+        kpi: '', note: `${st}：最後鎖定 IO v${x.io.ver}・Cue v${x.cue.ver}，原未稅 ${x.io.net.toLocaleString()}（tool#11 IO／Cue 單）`,
+        source: 'iosys', sourceRef: ref, labels: [],
+      });
+      continue;
+    }
     out.ios.push({
       key, name: p.name, ioCode: p.projectNo,
       clientName: clientOf(p.clientName, ref), agencyName, billingPartyName: billingName,
@@ -104,7 +124,7 @@ export function appendIosys(seed: Seed, projects: IosysProject[]): Seed {
         ioKey: key, lineNo: l.lineNo, cueVer: x.cue.ver, lineType: l.type, platform: l.platform, adFormat: l.format,
         accountId: x.bindings.find((b) => b.lineNo === l.lineNo)?.accountId || l.accountId, campaignIds: [...new Set(bs.map((b) => b.campaignId))].join(','),
         label: l.label, start: l.start, end: l.end, budget: l.budget, billingModel: l.model,
-        targetPrice: l.model === 'FLAT' ? null : l.unitPrice, estVolume: l.type === 'media' ? lineVolume(l) : null, kpiNote: l.kpiNote,
+        targetPrice: l.model === 'FLAT' ? null : l.unitPrice, estVolume: kpiVolume(l), kpiNote: l.kpiNote,
       });
     }
   }

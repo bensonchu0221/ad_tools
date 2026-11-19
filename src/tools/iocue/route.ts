@@ -11,7 +11,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { currentUser } from '../../core/auth.js';
+import { currentUser, AUTH_ENABLED } from '../../core/auth.js';
 import { iocuePage } from './page.js';
 import * as svc from './service.js';
 import * as S from './store.js';
@@ -20,7 +20,6 @@ import { cueXlsx } from './xlsx.js';
 import { parsePaste, ROLE_LABEL, type Role, type IoAction, type CueAction } from './model.js';
 import { TERMS, ENTITY_INFO, PAYMENT_TERMS } from './config.js';
 import { postChat } from '../nexus/health.js';
-import { runSync, formatSyncFailure } from '../sales/sync.js';
 
 export const BASE_PATH = '/tools/iocue';
 const APP_JS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../public/iocue/app.js');
@@ -32,7 +31,8 @@ const ALL_ROLES = Object.keys(ROLE_LABEL) as Role[];
 const twToday = () => new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
 
 async function ctxOf(req: FastifyRequest): Promise<svc.Ctx> {
-  const email = (currentUser(req) ?? (process.env.GOOGLE_CLIENT_ID ? '' : process.env.IOCUE_DEV_USER ?? 'benson@popin.cc')).toLowerCase();
+  // 跟 core/auth.ts 用同一個判斷（三個 OAuth env 齊全才算開；審查 #17.7）：只設了 CLIENT_ID 時不會誤用 dev 身分
+  const email = (currentUser(req) ?? (AUTH_ENABLED ? '' : process.env.IOCUE_DEV_USER ?? 'benson@popin.cc')).toLowerCase();
   if (!email) throw new svc.HttpError(401, '請先登入');
   const { roles } = await S.rolesOf(email);
   const out = new Set(roles);
@@ -42,6 +42,8 @@ async function ctxOf(req: FastifyRequest): Promise<svc.Ctx> {
 
 function fail(reply: FastifyReply, req: FastifyRequest, e: unknown) {
   if (e instanceof svc.HttpError) return reply.code(e.status).send({ error: e.message });
+  // @fastify/multipart 超過 15MB 丟的不是 HttpError（審查 #14：原本回 500＋英文訊息）
+  if ((e as any)?.code === 'FST_REQ_FILE_TOO_LARGE' || (e as any)?.statusCode === 413) return reply.code(413).send({ error: '檔案超過 15 MB' });
   req.log.error(e);
   return reply.code(500).send({ error: e instanceof Error ? e.message : String(e) });
 }
@@ -69,45 +71,22 @@ const verOf = (req: FastifyRequest) => {
   return v;
 };
 const sendFile = (reply: FastifyReply, name: string, type: string, buf: Buffer, inline = false) => {
-  reply.header('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`);
+  // 使用者上傳的檔跟登入 cookie 同源：不讓瀏覽器猜類型、內嵌時關掉腳本（審查 #14）；.eml 一律下載不內嵌
+  const asInline = inline && type !== 'message/rfc822';
+  reply.header('Content-Disposition', `${asInline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`);
+  reply.header('X-Content-Type-Options', 'nosniff');
+  reply.header('Content-Security-Policy', 'sandbox');
   reply.type(type).send(buf);
 };
 
-/**
- * 鎖定／勾稽一致／改綁定後，觸發 sales 同步把 iosys 資料寫進 BQ（sales 是 nexus_sales_* 唯一的寫入者，見 sales/iosys.ts）。
- * 防抖 20 秒（連續操作只跑一次）；同一時間只跑一個，跑到一半又被觸發就跑完再補一次。
- * 本機（NODE_ENV≠production）只做 dry-run，不寫正式 BQ。每天 06:00 的排程也會帶上 iosys，這裡只是讓 PAC 不用等到隔天。
+/*
+ * 寫 BQ：不在鎖定當下觸發，由每天 06:00 的 sales 同步（Cloud Scheduler sales-sync）帶上（2026-11-20 審查 #1）。
+ * 原本鎖定後在背景 setTimeout 20 秒跑 runSync：Cloud Run 改成 --cpu-throttling 後回應完 CPU 就被壓住、跑不完；
+ * 也沒跟 06:00 排程互斥（兩邊共用同一組 BQ 暫存表會互刪）；還會在白天把財務正在改的試算表半成品一起寫進去。
  */
-function syncTrigger(app: FastifyInstance, chat: (t: string) => Promise<unknown>) {
-  let timer: NodeJS.Timeout | null = null;
-  let running = false;
-  let again = false;
-  const fire = async () => {
-    if (running) { again = true; return; }
-    running = true;
-    const prod = process.env.NODE_ENV === 'production';
-    try {
-      const r = await runSync({ dry: !prod, by: 'iosys', deps: { allowProdWrite: prod }, log: (m) => app.log.info({ marker: 'iocue_sync' }, m) });
-      app.log.info({ marker: 'iocue_sync', status: r.status, newIos: r.newIos, ms: r.ms }, 'IO 系統觸發 sales 同步完成');
-    } catch (e) {
-      app.log.error(e);
-      chat(`${formatSyncFailure(e, new Date().toISOString().slice(0, 10))}\n（由 IO／Cue 單鎖定觸發）`).catch(() => {});
-    } finally {
-      running = false;
-      if (again) { again = false; schedule(); }
-    }
-  };
-  const schedule = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { timer = null; void fire(); }, 20_000);
-  };
-  return (_no: string) => schedule();
-}
-
-export function registerIocue(app: FastifyInstance, deps: { postChat?: (t: string) => Promise<unknown>; onReconciled?: (no: string) => void } = {}): void {
+export function registerIocue(app: FastifyInstance, deps: { postChat?: (t: string) => Promise<unknown> } = {}): void {
   const chat = deps.postChat ?? postChat;
   svc.hooks.notify = (t) => { chat(t).catch(() => {}); };
-  svc.hooks.onReconciled = deps.onReconciled ?? syncTrigger(app, chat);
 
   app.get(BASE_PATH, async (_req, reply) => { reply.type('text/html').send(iocuePage()); });
   // 前端程式放 public/iocue/app.js（tsc 不會把 src 裡的 .js 帶進 dist；public 整包進映像）。正式環境讀一次就快取。
@@ -125,7 +104,8 @@ export function registerIocue(app: FastifyInstance, deps: { postChat?: (t: strin
   app.get(`${API}/meta`, h(async () => {
     const [masters, roles] = await Promise.all([loadMasters(), S.listRoles()]);
     return {
-      masters, terms: TERMS.map((t) => ({ version: t.version, label: t.label })), entities: Object.keys(ENTITY_INFO), paymentTerms: PAYMENT_TERMS,
+      // 條款全文也給前端（審查 #17.4：原本編輯頁寫死 2026.11 版的精簡文案）
+      masters, terms: TERMS, entities: Object.keys(ENTITY_INFO), paymentTerms: PAYMENT_TERMS,
       people: roles.map((r) => ({ email: r.email, name: r.name, roles: r.roles })),
     };
   }));
@@ -222,6 +202,8 @@ export function registerIocue(app: FastifyInstance, deps: { postChat?: (t: strin
     const email = String(b?.email ?? '').trim().toLowerCase();
     if (!/^[^@\s]+@(popin\.cc|broadciel\.com)$/.test(email)) throw new svc.HttpError(400, '只能設定 @popin.cc／@broadciel.com 帳號');
     const roles = (Array.isArray(b?.roles) ? b.roles : []).filter((r: string) => ALL_ROLES.includes(r as Role)) as Role[];
+    // 後端也擋：不能拿掉自己的管理員（審查 #17.7：原本只有前端 disabled，IOCUE_ADMINS 以外的管理員可能把自己鎖在外面）
+    if (email === ctx.email && !roles.includes('admin') && !ADMINS.includes(email)) throw new svc.HttpError(400, '不能拿掉自己的管理員角色（請另一位管理員操作）');
     await S.tx(async (qq) => {
       await S.upsertRole(qq, email, String(b?.name ?? '').trim().slice(0, 64), roles, ctx.email);
       await S.audit(qq, { email: ctx.email, ip: ctx.ip, projectId: null, action: 'roles', target: email, detail: { roles } });

@@ -127,8 +127,8 @@ textarea.inp{padding:8px 10px;min-height:120px;line-height:1.5}
 select.inp{padding:0 8px}
 /* 明細表 */
 .gridwrap{overflow-x:auto}
-.cue{min-width:1190px}
-.cue .h,.cue .rw{display:grid;grid-template-columns:30px 82px 72px 76px minmax(130px,1.2fr) minmax(110px,1fr) 128px 128px 78px 92px 104px 118px 30px;gap:0 8px;align-items:center;padding:8px 18px}
+.cue{min-width:1320px}
+.cue .h,.cue .rw{display:grid;grid-template-columns:30px 82px 72px 76px minmax(130px,1.2fr) minmax(110px,1fr) 128px 128px 78px 92px 104px 120px 118px 30px;gap:0 8px;align-items:center;padding:8px 18px}
 .cue .h{border-bottom:1px solid var(--line);font-size:12px;font-weight:500;color:var(--mut);padding-top:10px;padding-bottom:10px}
 .cue .rw{border-bottom:1px solid var(--row)}
 .cue .rw.bad{background:#FEF6F6}

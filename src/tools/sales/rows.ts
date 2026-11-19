@@ -10,6 +10,10 @@ export type SalesRows = Record<SalesTable, Row[]>;
 export function money(n: number | null): string | null {
   return n === null || !Number.isFinite(n) ? null : n.toFixed(2);
 }
+/** 單價 → 4 位小數字串（Cloud SQL 存 DECIMAL(14,4)；CPC $0.125 用 money() 會被捨入成 0.13：IO 單審查 #16）。 */
+export function price(n: number | null): string | null {
+  return n === null || !Number.isFinite(n) ? null : n.toFixed(4);
+}
 
 function must(m: Map<string, number>, k: string, what: string): number {
   const v = m.get(k);
@@ -68,7 +72,7 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
     nexus_sales_cue_lines: seed.cueLines.map((c) => ({
       io_id: io(c.ioKey), line_no: c.lineNo, cue_ver: c.cueVer, line_type: c.lineType, platform: c.platform, ad_format: c.adFormat,
       account_id: c.accountId, campaign_ids: c.campaignIds, label: c.label, start_date: c.start, end_date: c.end,
-      budget: money(c.budget), billing_model: c.billingModel, target_price: money(c.targetPrice),
+      budget: money(c.budget), billing_model: c.billingModel, target_price: price(c.targetPrice),
       est_volume: c.estVolume, kpi_note: c.kpiNote, ...upd,
     })),
   };

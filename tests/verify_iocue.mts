@@ -2,14 +2,14 @@
 // 全程假資料（手算期望值），不連 DB／BQ／GCS。用法：npx tsx tests/verify_iocue.mts
 import assert from 'node:assert/strict';
 import { appendIosys, type IosysProject } from '../src/tools/sales/iosys.js';
-import { seedToRows, checkKeys } from '../src/tools/sales/rows.js';
+import { seedToRows, checkKeys, price } from '../src/tools/sales/rows.js';
 import { mergeRows } from '../src/tools/sales/merge.js';
 import { SALES_TABLES } from '../src/tools/sales/schema.js';
 import type { Seed } from '../src/tools/sales/build.js';
 import {
   estimateVolume, lineVolume, cueTotals, taxOf, chineseAmount, projectNo, runChecks, checksBlock, lineProblems,
   ioTransition, cueTransition, ioActions, reconcile, cueNeedsIoResign, monthSplit, bindingDiff, normalizeBindings,
-  parsePaste, flightDays, isYmd, renumber, validTaxId, twDate, type CueLine, type Check,
+  parsePaste, flightDays, isYmd, renumber, validTaxId, twDate, kpiVolume, type CueLine, type Check,
 } from '../src/tools/iocue/model.js';
 
 let n = 0;
@@ -204,8 +204,24 @@ await ok('IO 狀態機：AE 不能核准、不能自己核准、核對沒過不�
   assert.ok('error' in ioTransition('draft', 'submit', { roles: ['ae'], checks: bad }));
   assert.ok('error' in ioTransition('draft', 'submit', { roles: ['ae'] })); // 沒帶核對結果也擋
   assert.ok('error' in ioTransition('awaiting_client', 'sign', { roles: ['finance'] }));
-  assert.ok('error' in ioTransition('signed', 'void', { roles: ['ae'], reason: '  ' }));
-  assert.deepEqual(ioTransition('signed', 'void', { roles: ['ae'], reason: '客戶取消' }), { to: 'void' });
+  assert.ok('error' in ioTransition('signed', 'void', { roles: ['manager'], reason: '  ' }));
+  assert.deepEqual(ioTransition('signed', 'void', { roles: ['manager'], reason: '客戶取消' }), { to: 'void' });
+});
+
+await ok('作廢權限分段（審查 #10）：草稿／審核中 AE 可撤；已核發／已鎖定只有主管、財務、管理員能廢', () => {
+  assert.deepEqual(ioTransition('draft', 'void', { roles: ['ae'], reason: '重開' }), { to: 'void' });
+  assert.deepEqual(ioTransition('reviewing', 'void', { roles: ['am'], reason: '撤回' }), { to: 'void' });
+  for (const from of ['awaiting_client', 'signed'] as const) {
+    const r = ioTransition(from, 'void', { roles: ['ae', 'am'], reason: '客戶取消' });
+    assert.ok('error' in r && /主管／財務／管理員/.test(r.error), from);
+    assert.deepEqual(ioTransition(from, 'void', { roles: ['finance'], reason: '客戶取消' }), { to: 'void' });
+  }
+  assert.ok('error' in cueTransition('confirmed', 'void', { roles: ['ae'], reason: 'x' }));
+  assert.deepEqual(cueTransition('confirmed', 'void', { roles: ['manager'], reason: 'x' }), { to: 'void' });
+  assert.deepEqual(cueTransition('pending', 'void', { roles: ['ae'], reason: 'x' }), { to: 'void' });
+  // 按鈕：AE 在已簽署的 IO 上看不到作廢
+  assert.deepEqual(ioActions('signed', ['ae']).map((a) => a.action), []);
+  assert.deepEqual(ioActions('signed', ['manager']).map((a) => a.action), ['void']);
 });
 
 await ok('IO 狀態機：鎖定後不能再送審或核准、作廢後什麼都不能做', () => {
@@ -423,7 +439,7 @@ await ok('iosys → BQ 列：checkKeys 過、campaign 規則與走期寫進 assi
   const a = rows.nexus_sales_io_assignments.find((r) => r.campaign_id === '1001')!;
   assert.deepEqual([a.valid_from, a.valid_to, a.source], ['2026-01-25', '2026-02-10', 'iosys']);
   assert.equal(rows.nexus_sales_cue_lines.length, 7);
-  assert.equal(rows.nexus_sales_cue_lines.find((r) => r.line_no === 1)!.target_price, '120.00');
+  assert.equal(rows.nexus_sales_cue_lines.find((r) => r.line_no === 1)!.target_price, '120.0000'); // 單價 4 位小數（審查 #16）
   const empty = Object.fromEntries(SALES_TABLES.map((t) => [t, []])) as any;
   const m1 = mergeRows(empty, rows, { date: '2026-11-19', by: 'sync', at: '2026-11-19T00:00:00.000Z' });
   checkKeys(m1.rows);
@@ -448,6 +464,75 @@ await ok('iosys：Cue 改版後同一張 IO（id 不變）、明細整組換成�
 
 await ok('iosys：專案單號重複就丟錯（不默默寫兩張）', () => {
   assert.throws(() => appendIosys(emptySeed(), [IOSYS, IOSYS]), /重複/);
+});
+
+// ---------- 2026-11-20 同事審查後補的 ----------
+
+await ok('貼上（審查 #12）：沒表頭時說明含「平台」不會被吃掉；平台別名；讀回第 12 欄量體與第 14 欄 KPI；負單價與非 0 贈送報錯', () => {
+  const { lines, errors } = parsePaste([
+    'M\t媒體\tNative\t1\t跨平台導流\t2026/1/1\t2026/1/31\t12000\tCPM\t120\t31\t100000\tImp.\tCTR 0.5%', // 量體＝自動算的 → 不算手動
+    'Meta\t\t\t\tFB 代操\t2026/1/1\t2026/1/31\t5000\t包版\t',
+    'GG\t\t\t\t關鍵字\t2026/1/1\t2026/1/31\t5000\t包版\t',
+    'D\t贈送\tNative\t1\t加碼\t2026/1/1\t2026/1/31\t0\tCPM\t\t\t50000\t\t贈 5 萬曝光', // 贈送填量體 → 手動
+    'M\t媒體\tNative\t1\t第二波\t2026/1/1\t2026/1/31\t12000\tCPM\t120\t31\t99999', // 量體跟自動不同 → 手動
+  ].join('\n'));
+  assert.deepEqual(errors, []);
+  assert.equal(lines.length, 5);
+  assert.deepEqual([lines[0].label, lines[0].volumeManual, lines[0].kpiNote], ['跨平台導流', false, 'CTR 0.5%']);
+  assert.deepEqual([lines[1].platform, lines[2].platform], ['META', 'GOOGLE']);
+  assert.deepEqual([lines[3].type, lines[3].volume, lines[3].volumeManual, lines[3].unitPrice, lines[3].kpiNote], ['bonus', 50000, true, null, '贈 5 萬曝光']);
+  assert.deepEqual([lines[4].volume, lines[4].volumeManual], [99999, true]);
+  const bad = parsePaste(['D\t媒體\tNative\t1\t\t2026/1/1\t2026/1/31\t1000\tCPC\t-3', 'D\t贈送\t\t1\t\t2026/1/1\t2026/1/31\t500\tCPM\t'].join('\n'));
+  assert.equal(bad.lines.length, 0);
+  assert.match(bad.errors[0], /第 1 列.*單價/);
+  assert.match(bad.errors[1], /第 2 列.*贈送列預算要是 0/);
+});
+
+await ok('KPI 量體（審查 #12）：媒體＝自動或手動；贈送只認手動；費用列沒有', () => {
+  assert.equal(kpiVolume(L({ lineNo: 1, budget: 12000, model: 'CPM', unitPrice: 120 })), 100000);
+  assert.equal(kpiVolume(L({ lineNo: 1, type: 'bonus', budget: 0, model: 'CPM', unitPrice: null })), null);
+  assert.equal(kpiVolume(L({ lineNo: 1, type: 'bonus', budget: 0, model: 'CPM', unitPrice: null, volume: 50000, volumeManual: true })), 50000);
+  assert.equal(kpiVolume(L({ lineNo: 1, type: 'service', budget: 5000, model: 'FLAT', unitPrice: null, volume: 9, volumeManual: true })), null);
+});
+
+await ok('單價寫 BQ 保留 4 位小數（審查 #16：CPC $0.125 原本變 0.13）', () => {
+  assert.equal(price(0.125), '0.1250');
+  assert.equal(price(null), null);
+});
+
+await ok('iosys 作廢（審查 #2）：同一張 IO（id 不變）改成作廢、金額歸 0、子表清空；IO 還簽著只是 Cue 作廢＝暫停', () => {
+  const at = { by: 'sync', at: '2026-11-19T00:00:00.000Z' };
+  const day1 = seedToRows(appendIosys(emptySeed(), [IOSYS]), at);
+  const empty = Object.fromEntries(SALES_TABLES.map((t) => [t, []])) as any;
+  const m1 = mergeRows(empty, day1, { date: '2026-11-19', ...at });
+  const id = m1.rows.nexus_sales_ios[0].id;
+  assert.ok(m1.rows.nexus_sales_io_allocations.length > 0 && m1.rows.nexus_sales_cue_lines.length === 7);
+  // 隔天：IO 被作廢
+  const day2 = seedToRows(appendIosys(emptySeed(), [{ ...IOSYS, io: { ...IOSYS.io, status: 'void' }, voided: true }]), at);
+  checkKeys(day2);
+  const m2 = mergeRows(m1.rows, day2, { date: '2026-11-20', by: 'sync', at: '2026-11-20T00:00:00.000Z' });
+  checkKeys(m2.rows);
+  const io = m2.rows.nexus_sales_ios[0];
+  assert.deepEqual([io.id, io.status, Number(io.budget_net), io.service_fee, io.setup_fee], [id, '已作廢', 0, null, null]);
+  assert.match(String(io.note), /原未稅 335,000/);
+  for (const t of ['nexus_sales_io_allocations', 'nexus_sales_io_assignments', 'nexus_sales_cue_lines'] as const) assert.equal(m2.rows[t].length, 0, t);
+  assert.deepEqual(m2.vanishedIoIds, []); // 今天還在（只是作廢），不會被當成「從試算表消失」
+  const paused = seedToRows(appendIosys(emptySeed(), [{ ...IOSYS, io: { ...IOSYS.io, status: 'signed' }, voided: true }]), at);
+  assert.equal(paused.nexus_sales_ios[0].status, '暫停（Cue 待重新確認）');
+});
+
+await ok('iosys 主檔（審查 #16）：BQ 已有同名付款方時沿用舊列，不被 IO 單的空白統編蓋掉', () => {
+  const at = { by: 'sync', at: '2026-11-19T00:00:00.000Z' };
+  const empty = Object.fromEntries(SALES_TABLES.map((t) => [t, []])) as any;
+  // BQ 既有：試算表來的付款方，有統編
+  const hist = seedToRows({ ...emptySeed(), billingParties: [{ name: '仙桃牌國際股份有限公司', taxId: '04595257', paymentTerms: '月結 60 天', source: 'finance', sourceRef: 'r1' }] }, at);
+  const m1 = mergeRows(empty, hist, { date: '2026-11-18', ...at });
+  // 今天試算表沒有它、IO 單引用同名但沒填統編
+  const today = seedToRows(appendIosys(emptySeed(), [{ ...IOSYS, project: PROJ({ billingTaxId: '', paymentTerms: '' }) }]), at);
+  const m2 = mergeRows(m1.rows, today, { date: '2026-11-19', ...at });
+  const b = m2.rows.nexus_sales_billing_parties.find((r) => r.name === '仙桃牌國際股份有限公司')!;
+  assert.deepEqual([b.tax_id, b.payment_terms, b.source], ['04595257', '月結 60 天', 'finance']);
+  assert.equal(m2.rows.nexus_sales_ios[0].billing_party_id, b.id);
 });
 
 console.log(`\n${n} 項全部通過`);

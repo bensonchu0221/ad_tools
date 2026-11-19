@@ -32,6 +32,10 @@ export const ENTITIES = ['博英'] as const;
 export type Entity = (typeof ENTITIES)[number];
 
 export const DEFAULT_TAX_RATE = 0.05;
+/** 金額上限（999 億）：再大 chineseAmount 會超過「兆」、BIGINT 運算也可能溢位；實務上不會有這麼大的單。 */
+export const MAX_AMOUNT = 99_999_999_999;
+/** 預估量體上限（BIGINT 安全範圍內、實務上不可能超過）。 */
+export const MAX_VOLUME = 1e13;
 
 export interface CueLine {
   lineNo: number; // 1 起算，畫面與 PDF 的 #
@@ -76,6 +80,15 @@ export function estimateVolume(model: BillingModel, budget: number, unitPrice: n
 
 /** 該列實際用的預估量體：手動改過就用手動值，否則自動算。 */
 export const lineVolume = (l: CueLine) => (l.volumeManual && l.volume != null ? l.volume : estimateVolume(l.model, l.budget, l.unitPrice));
+/**
+ * 畫面／PDF／Excel／BQ 共用的「KPI 量體」：媒體列＝lineVolume；贈送列＝只認手動填的量（0 元自動算不出來）；費用列沒有量體。
+ * （2026-11-20 審查 #12：原本四處各自判斷，贈送列填了量體畫面、PDF、BQ 都不顯示，只有 Excel 有。）
+ */
+export function kpiVolume(l: CueLine): number | null {
+  if (l.type === 'media') return lineVolume(l);
+  if (l.type === 'bonus') return l.volumeManual && l.volume != null ? l.volume : null;
+  return null;
+}
 
 export interface Totals { media: number; service: number; production: number; bonus: number; total: number }
 export function cueTotals(lines: CueLine[]): Totals {
@@ -254,7 +267,9 @@ const IO_RULES: Rule<IoStatus, IoAction>[] = [
   { action: 'reject', from: ['reviewing'], to: 'draft', roles: APPROVERS, label: '退回修改' },
   // 簽署鎖定＝客戶用印檔／回簽憑證已上傳，由主管或財務核對後鎖定
   { action: 'sign', from: ['awaiting_client'], to: 'signed', roles: APPROVERS, label: '核對客戶簽回並鎖定' },
-  { action: 'void', from: ['draft', 'reviewing', 'awaiting_client', 'signed'], to: 'void', roles: [...EDITORS, ...APPROVERS], label: '作廢' },
+  // 作廢分兩段（2026-11-20 審查 #10）：還沒核發的 AE／AM 可以自己撤；已壓章核發或已鎖定的是正式合約，只有主管／財務能作廢
+  { action: 'void', from: ['draft', 'reviewing'], to: 'void', roles: [...EDITORS, ...APPROVERS], label: '作廢' },
+  { action: 'void', from: ['awaiting_client', 'signed'], to: 'void', roles: APPROVERS, label: '作廢' },
 ];
 
 export type CueAction = 'submit' | 'confirm' | 'reject' | 'void';
@@ -263,7 +278,8 @@ const CUE_RULES: Rule<CueStatus, CueAction>[] = [
   // Cue 的客戶確認憑證由 AE／AM 上傳後即鎖定（PRD 3.1），主管也可以代為確認
   { action: 'confirm', from: ['pending'], to: 'confirmed', roles: [...EDITORS, ...APPROVERS], label: '上傳確認憑證並鎖定' },
   { action: 'reject', from: ['pending'], to: 'draft', roles: [...EDITORS, ...APPROVERS], label: '退回草稿' },
-  { action: 'void', from: ['draft', 'pending', 'confirmed'], to: 'void', roles: [...EDITORS, ...APPROVERS], label: '作廢' },
+  { action: 'void', from: ['draft', 'pending'], to: 'void', roles: [...EDITORS, ...APPROVERS], label: '作廢' },
+  { action: 'void', from: ['confirmed'], to: 'void', roles: APPROVERS, label: '作廢' },
 ];
 
 export interface TransitionCtx {
@@ -275,9 +291,11 @@ export interface TransitionCtx {
 }
 
 function transition<S extends string, A extends string>(rules: Rule<S, A>[], from: S, action: A, ctx: TransitionCtx): { to: S } | { error: string } {
-  const r = rules.find((x) => x.action === action);
-  if (!r) return { error: `不認得的動作：${action}` };
-  if (!r.from.includes(from)) return { error: `目前狀態不能「${r.label}」` };
+  // 同一個動作可以依原狀態分成幾條規則（例如作廢：草稿誰都能撤、已鎖定只有主管能廢）
+  const rs = rules.filter((x) => x.action === action);
+  if (!rs.length) return { error: `不認得的動作：${action}` };
+  const r = rs.find((x) => x.from.includes(from));
+  if (!r) return { error: `目前狀態不能「${rs[0].label}」` };
   if (!ctx.roles.some((x) => r.roles.includes(x))) return { error: `沒有權限「${r.label}」（需要 ${r.roles.map((x) => ROLE_LABEL[x]).join('／')}）` };
   if (action === 'submit' && (!ctx.checks || checksBlock(ctx.checks))) return { error: '核對沒通過，修正後才能送出' };
   if ((action === 'sign' || action === 'confirm') && !ctx.evidence) return { error: '要先上傳客戶簽回檔或確認信截圖' };
@@ -381,9 +399,12 @@ export function normalizeBindings(raw: Binding[]): Binding[] {
  * 欄位順序固定：平台、類型、廣告形式、帳戶 ID、波段說明、起日、迄日、預算、計費模式、目標單價。
  * 第一列若是表頭（含「平台」）就略過。日期接受 2026/1/5、2026-01-05；金額可帶千分位、TWD、$。
  */
+/** 貼上時平台的其他寫法（PDF／畫面顯示的標籤）。 */
+const PLATFORM_ALIAS: Record<string, Platform> = { GG: 'GOOGLE', 其他: 'OTHER', FB: 'META' };
 export function parsePaste(tsv: string, startNo = 1): { lines: CueLine[]; errors: string[] } {
   const rows = tsv.replace(/\r/g, '').split('\n').map((r) => r.split('\t')).filter((r) => r.some((c) => c.trim()));
-  if (rows.length && rows[0].some((c) => c.includes('平台'))) rows.shift();
+  // 表頭：第一格就是「平台」才算（原本任一格含「平台」就丟第 1 列，說明寫「跨平台導流」會被吃掉）
+  if (rows.length && rows[0][0]?.trim() === '平台') rows.shift();
   const lines: CueLine[] = [];
   const errors: string[] = [];
   const typeOf = (s: string): LineType | null => {
@@ -394,10 +415,11 @@ export function parsePaste(tsv: string, startNo = 1): { lines: CueLine[]; errors
   };
   rows.forEach((c, i) => {
     const at = `貼上第 ${i + 1} 列`;
-    const [plat = '', type = '', format = '', acct = '', label = '', sd = '', ed = '', budget = '', model = '', price = ''] = c.map((x) => x.trim());
+    // 前 10 欄必填順序；第 12 欄預估量體、第 14 欄其他 KPI 是匯出 Excel 帶的，貼回來也收（第 11、13 欄天數、單位是算的，不讀）
+    const [plat = '', type = '', format = '', acct = '', label = '', sd = '', ed = '', budget = '', model = '', price = '', , volRaw = '', , kpi = ''] = c.map((x) => x.trim());
     const t = typeOf(type);
     // 服務費／製作費列跟平台無關（PDF 印類型、走速不看），Excel 常留空 → 記 OTHER
-    const p = (plat === '' && (t === 'service' || t === 'production') ? 'OTHER' : plat.toUpperCase()) as Platform;
+    const p = (plat === '' && (t === 'service' || t === 'production') ? 'OTHER' : PLATFORM_ALIAS[plat.toUpperCase()] ?? plat.toUpperCase()) as Platform;
     const m = (model.toUpperCase() === '包版' || model === '包版' ? 'FLAT' : model.toUpperCase() || 'FLAT') as BillingModel;
     const s = toYmd(sd);
     const e = toYmd(ed);
@@ -409,12 +431,21 @@ export function parsePaste(tsv: string, startNo = 1): { lines: CueLine[]; errors
     if (!(MODELS as readonly string[]).includes(m)) bad.push(`計費模式「${model}」`);
     if (!s || !e) bad.push('走期');
     if (b == null) bad.push(`預算「${budget}」`);
-    if (u != null && Number.isNaN(u)) bad.push(`單價「${price}」`);
+    if (u != null && !(u >= 0)) bad.push(`單價「${price}」`);
+    if (b != null && b > MAX_AMOUNT) bad.push(`預算「${budget}」太大`);
+    if (t === 'bonus' && b != null && b > 0) bad.push('贈送列預算要是 0');
+    const v = volRaw === '' ? null : toInt(volRaw);
+    if (volRaw !== '' && (v == null || v > MAX_VOLUME)) bad.push(`預估量體「${volRaw}」`);
     if (bad.length) { errors.push(`${at}：${bad.join('、')} 看不懂`); return; }
     const fmtv = format.toLowerCase() === 'video' || format === '影音' ? 'Video' : format.toLowerCase() === 'native' || format === '原生' ? 'Native' : '';
+    const unitPrice = m === 'FLAT' ? null : u;
+    // 量體：跟自動算的一樣就當自動（匯出的 Excel 貼回來不會全部變成手動值）；不一樣才算手動改過
+    const auto = t === 'media' ? estimateVolume(m, b!, unitPrice) : null;
+    const manual = v != null && v !== auto;
     lines.push({
       lineNo: startNo + lines.length, type: t!, platform: p, format: fmtv, accountId: acct, label, start: s!, end: e!,
-      budget: b!, model: m, unitPrice: m === 'FLAT' ? null : u, volume: null, volumeManual: false, kpiNote: '',
+      budget: b!, model: m, unitPrice: t === 'bonus' ? null : unitPrice, volume: manual ? v : null, volumeManual: manual,
+      kpiNote: kpi.slice(0, 255),
     });
   });
   return { lines, errors };

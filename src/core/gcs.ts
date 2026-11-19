@@ -57,6 +57,12 @@ export async function uploadIocueFile(relPath: string, buffer: Buffer, contentTy
   return object;
 }
 
+/** 刪掉剛上傳、但 DB 交易沒成功的檔（避免孤兒檔永久留在不設 lifecycle 的 iocue/）。只用在補救，不刪已入帳的存證。 */
+export async function deleteIocueFile(object: string): Promise<void> {
+  if (!object.startsWith(IOCUE_PREFIX)) throw new Error(`不是 IO／Cue 單的檔案：${object}`);
+  await getStorage().bucket(BUCKET).file(object).delete({ ignoreNotFound: true });
+}
+
 export async function downloadIocueFile(object: string): Promise<Buffer> {
   if (!object.startsWith(IOCUE_PREFIX)) throw new Error(`不是 IO／Cue 單的檔案：${object}`);
   const [buf] = await getStorage().bucket(BUCKET).file(object).download();

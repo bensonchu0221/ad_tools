@@ -12,7 +12,13 @@ export const MOBILE_VIEWPORT_WIDTH = MOBILE.viewport.width;
 let browserPromise: Promise<Browser> | null = null;
 /** 全程序共用一個 headless Chromium（Cloud Run 記憶體有限）；tool#11 IO 單 PDF 也用這個。 */
 export function getBrowser(): Promise<Browser> {
-  if (!browserPromise) browserPromise = chromium.launch({ headless: true });
+  // 崩潰（OOM）或啟動失敗就清掉快取，下一次呼叫重開；否則會一直拿到已斷線的瀏覽器直到容器重啟（2026-11-20 IO 單審查 #15）
+  if (!browserPromise) {
+    browserPromise = chromium.launch({ headless: true }).then((b) => {
+      b.on('disconnected', () => { browserPromise = null; });
+      return b;
+    }).catch((e) => { browserPromise = null; throw e; });
+  }
   return browserPromise;
 }
 

@@ -40,10 +40,23 @@ export function canonicalJson(v: unknown): string {
   return JSON.stringify(v ?? null);
 }
 
-export async function renderPdf(doc: PdfDoc): Promise<Buffer> {
+// 同時最多印 2 份：Cloud Run 2Gi 還要給廣告預覽用同一個 Chromium，多人同時按核准／預覽不要一起擠爆（審查 #15）
+let running = 0;
+const waiting: (() => void)[] = [];
+async function slot<T>(fn: () => Promise<T>): Promise<T> {
+  if (running >= 2) await new Promise<void>((r) => waiting.push(r));
+  running++;
+  try { return await fn(); } finally { running--; waiting.shift()?.(); }
+}
+
+export function renderPdf(doc: PdfDoc): Promise<Buffer> {
+  return slot(() => renderOnce(doc));
+}
+async function renderOnce(doc: PdfDoc): Promise<Buffer> {
   const html = renderPdfHtml({ ...doc, fontFaces: embeddedFonts() });
   const browser = await getBrowser();
   const page = await browser.newPage();
+  page.setDefaultTimeout(30_000);
   try {
     await page.setContent(html, { waitUntil: 'load' });
     await page.evaluate(() => document.fonts.ready);

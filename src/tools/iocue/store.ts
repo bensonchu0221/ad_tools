@@ -11,15 +11,30 @@ import type { CueLine, IoStatus, CueStatus, Role, Binding, Platform, LineType, B
 
 export type Q = <T = any>(sql: string, params?: unknown[]) => Promise<T[]>;
 
-let ready = false;
+// 建表只跑一次：快取 Promise（不是 boolean），冷啟動時前端同時打 /me、/meta、/projects 不會各跑一輪 DDL；失敗就清掉下次重試。
+let ready: Promise<void> | null = null;
 async function pool(): Promise<mysql.Pool> {
   const p = getPool();
   if (!p) throw new Error('DB 未設定');
-  if (ready) return p;
-  for (const ddl of DDL) await p.query(ddl);
-  ready = true;
+  if (!ready) {
+    ready = (async () => {
+      for (const ddl of DDL) await p.query(ddl);
+      for (const m of MIGRATIONS) {
+        const [rows]: any = await p.query(
+          `SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`, [m.table, m.column]);
+        if (!rows.length) await p.query(m.ddl);
+      }
+    })().catch((e) => { ready = null; throw e; });
+  }
+  await ready;
   return p;
 }
+
+/** 已上線後才加的欄位（CREATE TABLE IF NOT EXISTS 不會改既有的表）。 */
+const MIGRATIONS = [
+  // 2026-11-20 審查 #3：送審時凍結合約欄位（客戶、開票主體、統編…），已送出／簽署的版本 PDF、雜湊、BQ 都用這份，不受之後草稿修改影響
+  { table: 'iocue_io_versions', column: 'project_json', ddl: `ALTER TABLE iocue_io_versions ADD COLUMN project_json JSON NULL` },
+];
 
 const DDL = [
   // 專案（母單）：串 IO 與 Cue 的容器，之後財務請款也掛這裡
@@ -224,13 +239,23 @@ export interface IoVersionRow {
   termsVersion: string; submittedBy: string | null; submittedAt: string | null; approvedBy: string | null; approvedAt: string | null;
   sentBy: string | null; sentAt: string | null; signMethod: string; signedBy: string | null; signedAt: string | null;
   voidReason: string; contentHash: string; createdBy: string; createdAt: string | null;
+  /** 送審時凍結的合約欄位（草稿是 null，用專案列的現值）。 */
+  projectSnapshot: ContractFields | null;
 }
+/** 印在合約上、送審後就不能再變的專案欄位。 */
+export const CONTRACT_KEYS = ['name', 'agencyName', 'agencyAttr', 'clientName', 'billingName', 'billingTaxId', 'invoiceTitle',
+  'entity', 'aeEmail', 'amEmail', 'paymentTerms', 'rebatePct'] as const;
+export type ContractFields = Pick<ProjectRow, (typeof CONTRACT_KEYS)[number]>;
+export const contractOf = (p: ProjectRow | ProjectInput): ContractFields =>
+  Object.fromEntries(CONTRACT_KEYS.map((k) => [k, p[k]])) as ContractFields;
+const parseJson = (v: unknown) => (v == null ? null : typeof v === 'string' ? JSON.parse(v) : v);
 const toIo = (r: any): IoVersionRow => ({
   id: r.id, projectId: r.project_id, ver: r.ver, status: r.status, net: Number(r.net), taxRate: Number(r.tax_rate),
   start: ymd(r.start_date), end: ymd(r.end_date), termsVersion: r.terms_version,
   submittedBy: r.submitted_by, submittedAt: ts(r.submitted_at), approvedBy: r.approved_by, approvedAt: ts(r.approved_at),
   sentBy: r.sent_by, sentAt: ts(r.sent_at), signMethod: r.sign_method, signedBy: r.signed_by, signedAt: ts(r.signed_at),
   voidReason: r.void_reason, contentHash: r.content_hash, createdBy: r.created_by, createdAt: ts(r.created_at),
+  projectSnapshot: parseJson(r.project_json),
 });
 
 export interface CueVersionRow {
@@ -338,21 +363,30 @@ export async function loadProject(qq: Q, projectNo: string, forUpdate = false) {
 }
 export type ProjectFull = NonNullable<Awaited<ReturnType<typeof loadProject>>>;
 
-/** 首頁清單：每個專案帶最新 IO 版與最新 Cue 版的摘要。 */
+/** 現行版：最新一版沒作廢的；全部作廢才回最新一版（2026-11-20 審查 #7：作廢 v2 後要回到已簽署的 v1）。 */
+export const current = <T extends { status: string }>(xs: T[]): T | null => xs.filter((x) => x.status !== 'void').at(-1) ?? xs.at(-1) ?? null;
+
+/** 首頁清單：每個專案帶現行 IO 版、現行 Cue 版、最新已簽署 IO 的摘要。 */
 export async function listProjects(qq: Q) {
   const ps = (await qq(`SELECT * FROM iocue_projects ORDER BY updated_at DESC LIMIT 500`)).map(toProject);
   if (!ps.length) return [];
   const ids = ps.map((p) => p.id);
   const ios = (await qq(`SELECT * FROM iocue_io_versions WHERE project_id IN (?) ORDER BY ver`, [ids])).map(toIo);
-  const cues = await qq(`SELECT * FROM iocue_cue_versions WHERE project_id IN (?) ORDER BY ver`, [ids]);
-  const counts = await qq(`SELECT v.project_id, COUNT(DISTINCT l.platform) AS n FROM iocue_cue_versions v JOIN iocue_cue_lines l ON l.cue_version_id = v.id
-    WHERE v.project_id IN (?) AND l.type IN ('media', 'bonus') GROUP BY v.project_id`, [ids]); // 服務費／製作費列記 OTHER，不算一個平台
+  const cues = (await qq(`SELECT * FROM iocue_cue_versions WHERE project_id IN (?) ORDER BY ver`, [ids])).map((r: any) => toCue(r, []));
+  const curCue = new Map(ps.map((p) => [p.id, current(cues.filter((x) => x.projectId === p.id))]));
+  const cueIds = [...curCue.values()].filter(Boolean).map((c) => c!.id);
+  // 平台數只算現行 Cue 版的媒體／贈送列（服務費／製作費列記 OTHER，不算一個平台；舊版、作廢版的平台也不算）
+  const counts = cueIds.length ? await qq(`SELECT cue_version_id, COUNT(DISTINCT platform) AS n FROM iocue_cue_lines
+    WHERE cue_version_id IN (?) AND type IN ('media', 'bonus') GROUP BY cue_version_id`, [cueIds]) : [];
   return ps.map((p) => {
-    const io = ios.filter((x) => x.projectId === p.id).at(-1) ?? null;
-    const cr = cues.filter((x: any) => x.project_id === p.id).at(-1);
+    const mine = ios.filter((x) => x.projectId === p.id);
+    const cue = curCue.get(p.id) ?? null;
+    const { projectSnapshot: _s, ...io } = current(mine) ?? ({} as IoVersionRow);
+    const signed = mine.filter((x) => x.status === 'signed').at(-1);
     return {
-      project: p, io, cue: cr ? toCue(cr, []) : null,
-      platformCount: Number(counts.find((c: any) => c.project_id === p.id)?.n ?? 0),
+      project: p, io: io.id ? io : null, cue,
+      signed: signed ? { ver: signed.ver, net: signed.net, signedAt: signed.signedAt, start: signed.start, end: signed.end } : null,
+      platformCount: Number(counts.find((c: any) => c.cue_version_id === cue?.id)?.n ?? 0),
     };
   });
 }
@@ -409,6 +443,20 @@ export async function updateCueDraft(qq: Q, id: number, lines: CueLine[], ioVer:
   const r: any = await qq(`UPDATE iocue_cue_versions SET total = ?, io_ver = ? WHERE id = ? AND status = 'draft'`, [total, ioVer, id]);
   if ((r as any).affectedRows !== 1) throw new Error('Cue 表已不是草稿，不能修改（可能別人剛送出）');
   await replaceLines(qq, id, lines);
+}
+/** 草稿 Cue 改對應的 IO 版（開 IO 新版時，進行中的 Cue 草稿跟著新版 IO 走）。 */
+export async function setCueIoVer(qq: Q, id: number, ioVer: number): Promise<void> {
+  const r: any = await qq(`UPDATE iocue_cue_versions SET io_ver = ? WHERE id = ? AND status = 'draft'`, [ioVer, id]);
+  if ((r as any).affectedRows !== 1) throw new Error('Cue 表已不是草稿（可能別人剛送出），請重新整理');
+}
+/** 專案列的合約欄位改回某版凍結的值（作廢新版草稿後，回到已簽署版的客戶資料）。 */
+export async function restoreContract(qq: Q, id: number, c: ContractFields): Promise<void> {
+  await qq(
+    `UPDATE iocue_projects SET name = ?, agency_name = ?, agency_attr = ?, client_name = ?, billing_name = ?, billing_tax_id = ?,
+       invoice_title = ?, entity = ?, ae_email = ?, am_email = ?, payment_terms = ?, rebate_pct = ? WHERE id = ?`,
+    [c.name, c.agencyName, c.agencyAttr, c.clientName, c.billingName, c.billingTaxId, c.invoiceTitle, c.entity,
+      c.aeEmail, c.amEmail, c.paymentTerms, c.rebatePct, id],
+  );
 }
 async function replaceLines(qq: Q, cueVersionId: number, lines: CueLine[]): Promise<void> {
   await qq(`DELETE FROM iocue_cue_lines WHERE cue_version_id = ?`, [cueVersionId]);
@@ -475,20 +523,29 @@ export async function addEvent(qq: Q, projectId: number, type: string, payload: 
 // ---------- 給 sales 同步：已鎖定的資料 ----------
 
 /**
- * 每個專案取「最新的已簽署 IO 版」與「最新的已確認 Cue 版」（含綁定）。兩者缺一就不給（還沒勾稽一致，不進 BQ）。
- * 結案／提前終止的專案照給（歷史業績要留著），作廢的版本不給。
+ * 給 sales 同步的快照。
+ * - 勾稽一致（reconcile='ok'）：取最新已簽署 IO＋最新已確認 Cue（含綁定），合約欄位用該 IO 送審時凍結的那份。
+ * - 曾經一致、現在不一致（已簽署 IO 或已確認 Cue 被作廢）：也要給，標 voided（2026-11-20 審查 #2）。
+ *   sales 合併是「今天沒出現的 IO 整組保留」，不給的話 BQ 永遠停在「已簽署」、預算與歸屬繼續算。
+ *   voided 的 io／cue 是「最後一次鎖定過」的版本（只拿來帶名稱與單號），iosys.ts 會清空金額與子表。
+ * 結案／提前終止的專案照給（歷史業績要留著）。
  */
-export async function lockedSnapshot(qq?: Q) {
+export interface SnapshotItem { project: ProjectRow; io: IoVersionRow; cue: CueVersionRow; bindings: Binding[]; voided: boolean }
+export async function lockedSnapshot(qq?: Q): Promise<SnapshotItem[]> {
   const Q2 = qq ?? (await q());
-  const ps = (await Q2(`SELECT * FROM iocue_projects WHERE reconcile = 'ok'`)).map(toProject);
-  const out: { project: ProjectRow; io: IoVersionRow; cue: CueVersionRow; bindings: Binding[] }[] = [];
+  const ps = (await Q2(`SELECT * FROM iocue_projects WHERE reconcile = 'ok'
+    OR id IN (SELECT DISTINCT project_id FROM iocue_events WHERE type = 'reconciled')`)).map(toProject);
+  const out: SnapshotItem[] = [];
   for (const p of ps) {
     const full = await loadProject(Q2, p.projectNo);
     if (!full) continue;
-    const io = full.ios.filter((x) => x.status === 'signed').at(-1);
-    const cue = full.cues.filter((x) => x.status === 'confirmed').at(-1);
+    const ok = full.project.reconcile === 'ok';
+    // 一致時取現在鎖定的版本；不一致時取「最後一次鎖定過」的版本（signed_at／confirmed_at 有值，之後被作廢）
+    const io = (ok ? full.ios.filter((x) => x.status === 'signed') : full.ios.filter((x) => x.signedAt)).at(-1);
+    const cue = (ok ? full.cues.filter((x) => x.status === 'confirmed') : full.cues.filter((x) => x.confirmedAt)).at(-1);
     if (!io || !cue) continue;
-    out.push({ project: full.project, io, cue, bindings: full.bindings[cue.ver] ?? [] });
+    const project = io.projectSnapshot ? { ...full.project, ...io.projectSnapshot } : full.project;
+    out.push({ project, io, cue, bindings: ok ? full.bindings[cue.ver] ?? [] : [], voided: !ok });
   }
   return out;
 }

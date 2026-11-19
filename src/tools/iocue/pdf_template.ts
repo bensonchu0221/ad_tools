@@ -7,7 +7,7 @@
 // - 階段（stage）決定壓不壓章：draft＝淡灰「僅供審閱」浮水印、不壓章；approved／signed＝壓合約專用章（multiply 疊印）。
 // - 報價單（kind='cue'）只印執行明細，壓「業務報價專用章」並註明最終金額以簽署之 IO 單為準。
 import {
-  cueTotals, taxOf, chineseAmount, flightDays, lineVolume, VOLUME_UNIT, MODEL_LABEL, LINE_TYPE_LABEL, type CueLine,
+  cueTotals, taxOf, chineseAmount, flightDays, kpiVolume, VOLUME_UNIT, MODEL_LABEL, LINE_TYPE_LABEL, type CueLine,
 } from './model.js';
 
 export const NAVY = '#1E3A5F';
@@ -55,6 +55,7 @@ export interface PdfDoc {
   approver?: { name: string; at: string }; // 核准主管與時間（approved 之後才有）
   contentHash?: string; // 內容雜湊（IO＋Cue 資料的 SHA-256，存證用；檔案本身的雜湊另存 DB）
   stampDataUri?: string; // 去背章圖（data:image/png;base64,...）；沒有就畫 CSS 佔位章
+  campaigns?: Record<number, string[]>; // 列號 → 已綁定的 campaign ID（沒綁＝印「上刊前綁定」）
   fontFaces?: string; // 內嵌字型的 @font-face（pdf.ts 給）
 }
 
@@ -62,6 +63,10 @@ export const esc = (s: unknown) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const money = (n: number) => n.toLocaleString('en-US');
 const md = (ymd: string) => `${ymd.slice(5, 7)}/${ymd.slice(8, 10)}`;
+/** 明細走期：跨年（或不在 IO 起始那年）就連年份一起印，不然 12/15 – 01/15 看不出是哪一年（審查 #17.6）。 */
+const lineRange = (l: CueLine, ioYear: string) =>
+  l.start.slice(0, 4) !== l.end.slice(0, 4) || l.start.slice(0, 4) !== ioYear ? `${slash(l.start)} – ${slash(l.end)}` : `${md(l.start)} – ${md(l.end)}`;
+const pfLabel = (p: string) => PF_LABEL[p] ?? p; // 之後新增平台、這裡還沒補標籤也不會整份 PDF 印失敗
 const slash = (ymd: string) => ymd.replace(/-/g, '/');
 
 const COLS = '<colgroup><col style="width:30px"><col style="width:40px"><col><col style="width:100px"><col style="width:58px"><col style="width:84px"><col style="width:88px"><col style="width:104px"></colgroup>';
@@ -122,20 +127,25 @@ ol.terms{margin:0;border:1px solid #CBD5E1;background:#F8FAFC;padding:12px 14px 
 /** 平台框上的字：非我方平台用短名，避免撐破 40px 的欄。 */
 const PF_LABEL: Record<string, string> = { D: 'D', R: 'R', M: 'M', P: 'P', D1: 'D1', META: 'Meta', GOOGLE: 'GG', PR: 'PR', OTHER: '其他' };
 
-function cueRows(lines: CueLine[]): string {
+function cueRows(lines: CueLine[], d: Pick<PdfDoc, 'campaigns' | 'start'>): string {
+  const ioYear = (d.start || lines[0]?.start || '').slice(0, 4);
   return lines.map((l) => {
     const no = String(l.lineNo).padStart(2, '0');
     const isMedia = l.type === 'media';
-    const vol = isMedia ? lineVolume(l) : null;
+    const vol = kpiVolume(l); // 贈送列手動填的量體也印（審查 #12）
+    const camps = d.campaigns?.[l.lineNo] ?? [];
+    // 說明那行：影音／波段說明；都沒有時，綁了 campaign 印 campaign，沒綁才印「上刊前綁定」（審查 #17.6）
+    const sub = [l.format === 'Video' ? '影音' : '', l.label].filter(Boolean).join('・')
+      || (camps.length ? `Campaign：${camps.join('、')}` : 'Campaign ID：上刊前綁定');
     const acct = isMedia
-      ? `<div class="mono" style="font-weight:500">${esc(l.accountId || '[上刊前綁定]')}</div><div class="sm">${esc([l.format === 'Video' ? '影音' : '', l.label].filter(Boolean).join('・') || 'Campaign ID：上刊前綁定')}</div>`
+      ? `<div class="mono" style="font-weight:500">${esc(l.accountId || '[上刊前綁定]')}</div><div class="sm">${esc(sub)}</div>`
       : `<div class="b">${esc(LINE_TYPE_LABEL[l.type])}</div>${l.label ? `<div class="sm">${esc(l.label)}</div>` : ''}`;
     return `<tr class="ln">
       <td class="c mono">${no}</td>
-      <td class="c">${l.type === 'service' || l.type === 'production' ? '' /* 費用列不屬於任何平台，不印平台徽章 */ : `<span class="pf${PF_LABEL[l.platform].length > 2 ? ' pf-sm' : ''}">${esc(PF_LABEL[l.platform])}</span>`}</td>
+      <td class="c">${l.type === 'service' || l.type === 'production' ? '' /* 費用列不屬於任何平台，不印平台徽章 */ : `<span class="pf${pfLabel(l.platform).length > 2 ? ' pf-sm' : ''}">${esc(pfLabel(l.platform))}</span>`}</td>
       <td style="padding:9px 6px">${acct}</td>
-      <td class="c mono" style="font-size:11.5px"><div>${md(l.start)} – ${md(l.end)}</div><div class="sm body-font">（共 ${flightDays(l.start, l.end)} 日）</div></td>
-      <td class="c b">${isMedia ? esc(MODEL_LABEL[l.model]) : '—'}</td>
+      <td class="c mono" style="font-size:11.5px"><div>${lineRange(l, ioYear)}</div><div class="sm body-font">（共 ${flightDays(l.start, l.end)} 日）</div></td>
+      <td class="c b">${isMedia ? esc(MODEL_LABEL[l.model]) : vol != null ? esc(MODEL_LABEL[l.model]) : '—'}</td>
       <td class="r b mono" style="padding:9px 6px">${isMedia && l.unitPrice != null ? '$' + esc(l.unitPrice) : '—'}</td>
       <td class="r mono" style="padding:9px 6px">${vol != null ? `<div>${money(vol)}</div><div class="sm">${VOLUME_UNIT[l.model]}</div>` : l.kpiNote ? `<div class="sm body-font" style="text-align:right">${esc(l.kpiNote)}</div>` : '—'}</td>
       <td class="r b mono" style="padding:9px 6px">${l.type === 'bonus' ? '贈送' : money(l.budget)}</td>
@@ -194,7 +204,7 @@ export function renderPdfHtml(d: PdfDoc): string {
     <table class="cue">${COLS}
       <thead><tr><th>#</th><th>平台</th><th style="text-align:left;padding:8px 6px">廣告帳戶 / Campaign ID</th><th>執行走期（天數）</th><th>計費方式</th>
         <th class="r" style="padding:8px 6px">KPI 目標單價</th><th class="r" style="padding:8px 6px">預估量體</th><th class="r" style="padding:8px 6px">分配預算（未稅）</th></tr></thead>
-      <tbody>${cueRows(d.lines)}</tbody>
+      <tbody>${cueRows(d.lines, d)}</tbody>
     </table>
     <table class="cue keep" style="margin-top:-8px">${COLS}<tbody>${totals}</tbody></table>
     ${isIo ? '' : '<p class="note">本報價單僅供排程確認，最終金額以雙方簽署之委刊單（IO）為準。預估量體依目標單價試算，實際成效以各媒體平台官方後台報表為準。</p>'}

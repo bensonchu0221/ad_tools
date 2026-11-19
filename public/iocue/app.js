@@ -12,6 +12,10 @@
   const short = (n) => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : Math.abs(n) >= 1e4 ? `${(n / 1e3).toFixed(0)}K` : fmt(n));
   const pad2 = (n) => String(n).padStart(2, '0');
   const md = (ymd) => (ymd ? `${ymd.slice(5, 7)}/${ymd.slice(8, 10)}` : '—');
+  /** 走期：起迄跨年就連年份一起顯示（12/15 – 01/15 看不出年份：審查 #17.6）。 */
+  const range = (s, e) => (s && e && s.slice(0, 4) !== e.slice(0, 4) ? `${s.replace(/-/g, '/')} – ${e.replace(/-/g, '/')}` : `${md(s)} – ${md(e)}`);
+  /** ISO 時間（UTC）→ 台北日期／月份（審查 #17.2：每月 1 號 00–08 點簽的不能算到上個月）。 */
+  const twDate = (iso) => (iso ? new Date(Date.parse(iso) + 8 * 36e5).toISOString().slice(0, 10) : '');
   const days = (s, e) => (s && e ? Math.round((Date.parse(e) - Date.parse(s)) / 864e5) + 1 : 0);
   const ago = (iso) => {
     if (!iso) return '';
@@ -29,7 +33,11 @@
     else if (opts.body !== undefined) { init.body = JSON.stringify(opts.body); init.headers['content-type'] = 'application/json'; }
     const r = await fetch(API + path, init);
     const ct = r.headers.get('content-type') || '';
-    const data = ct.includes('json') ? await r.json() : await r.text();
+    // 登入過期：守衛把 API 302 導去 /login，fetch 跟著轉址拿到 200 的 HTML。原本當成功、顯示「已儲存」其實沒存（審查 #9）
+    if (r.redirected || /\/login(\?|$)/.test(new URL(r.url, location.href).pathname) || (r.ok && !ct.includes('json'))) {
+      throw new Error('登入已過期：請在新分頁重新登入 ad_tools 後再按一次（這頁的修改還在，不要重新整理）');
+    }
+    const data = await r.json().catch(() => null);
     if (!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
     return data;
   }
@@ -84,6 +92,8 @@
     return Math.floor(v + 1e-9);
   };
   const lineVol = (l) => (l.volumeManual && l.volume != null && l.volume !== '' ? Number(l.volume) : estimate(l));
+  /** 跟後端 model.kpiVolume 同規則：媒體＝手動或自動；贈送＝只認手動填的；費用列沒有量體。 */
+  const kpiVol = (l) => (l.type === 'media' ? lineVol(l) : l.type === 'bonus' && l.volumeManual && l.volume != null && l.volume !== '' ? Number(l.volume) : null);
 
   // ---------- 狀態 ----------
   const S = { me: null, meta: null, list: null, today: '', cur: null, draft: null, dirty: false, filter: 'all' };
@@ -101,10 +111,10 @@
 
   // ---------- 外框 ----------
   function counts() {
-    const rows = S.list || [];
+    const rows = (S.list || []).filter((r) => r.project.status === 'active'); // 結案／終止的不算待辦（審查 #17.1：徽章跟待辦頁對不起來）
     const mine = (r) => r.project.aeEmail === S.me.email || r.project.amEmail === S.me.email;
     return {
-      all: rows.length,
+      all: (S.list || []).length,
       todo: rows.filter((r) => todoOf(r, mine(r))).length,
       reviewing: rows.filter((r) => r.io && r.io.status === 'reviewing').length,
     };
@@ -133,7 +143,7 @@
         ${nav('#/todo', 'todo', '我的待辦', 'todo', c.todo, true)}
         <span class="navgrp">委刊作業</span>
         ${nav('#/all', 'doc', 'IO / Cue 單', 'all', c.all)}
-        ${nav('#/new', 'plus', '新增專案', 'new')}
+        ${isRole('ae', 'am', 'admin') ? nav('#/new', 'plus', '新增專案', 'new') : ''}
         ${isRole('admin') ? `<span class="navgrp">設定</span>${nav('#/roles', 'users', '角色與權限', 'roles')}` : ''}
         <div class="me"><span class="av" style="${avStyle(me.email)}">${esc(initial(me.email))}</span>
           <div style="display:flex;flex-direction:column;min-width:0"><span style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis">${esc(nameOf(me.email))}</span>
@@ -155,8 +165,11 @@
         S.me = me; S.meta = meta;
         if (meta.masters && meta.masters.error) console.warn('主檔讀取失敗', meta.masters.error);
       }
+      // 有沒存的修改：換到別的專案或離開編輯頁都先問（審查 #13：原本切到別的專案會直接丟掉）
+      const leaving = !m || (S.cur && S.cur.project.projectNo !== m[1]);
+      if (S.dirty && leaving && !confirm('有尚未儲存的修改，確定離開？')) { history.back(); return; }
+      if (leaving) S.dirty = false;
       if (m) return await editor(m[1], m[2] || 'content');
-      if (S.dirty && !confirm('有尚未儲存的修改，確定離開？')) { history.back(); return; }
       S.dirty = false; S.cur = null;
       await loadList();
       if (h === '/roles') return await rolesView();
@@ -177,11 +190,12 @@
     const bad = p.reconcile === 'mismatch';
     const st = r.io ? IO_ST[r.io.status] : ['—', 'mut'];
     const t = todoOf(r, p.aeEmail === S.me.email || p.amEmail === S.me.email);
+    const live = r.signed && r.io && r.io.ver !== r.signed.ver && p.reconcile === 'ok'; // 已簽署舊版還在執行，新版進行中
     return `<a class="card${bad ? ' bad' : ''}" href="#/p/${p.projectNo}">
       <div class="t1"><span class="mono">${esc(p.projectNo)}</span><span>${esc(ago(p.updatedAt))}</span></div>
       <div class="t2"><b>${esc(p.name)}</b><span>${esc(p.clientName || p.billingName || '（未填客戶）')}${r.platformCount ? ` · ${r.platformCount} 個平台` : ''}</span></div>
       <div class="t3"><div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
-        ${bad ? tag(REC.mismatch) : t ? `<span class="tag warn">${esc(t)}</span>` : tag(st)}
+        ${bad ? tag(REC.mismatch) : t ? `<span class="tag warn">${esc(t)}</span>` : tag(st)}${live ? ` <span class="tag ok">v${r.signed.ver} 執行中</span>` : ''}
         <span class="num" style="font-size:12px;color:var(--ink2)">${r.io ? money(r.io.net) : ''}</span></div>
         <span class="av sm" style="${avStyle(p.aeEmail)}" title="AE ${esc(nameOf(p.aeEmail))}">${esc(initial(p.aeEmail))}</span></div></a>`;
   }
@@ -192,18 +206,27 @@
     const shown = rows.filter((r) => r.project.status === 'active' && (mode === 'todo' ? todoOf(r, mine(r)) : S.filter === 'mine' ? mine(r) : true));
     const st = (r) => (r.io ? r.io.status : '');
     const month = S.today.slice(0, 7);
-    const signedThisMonth = rows.filter((r) => r.io && r.io.status === 'signed' && (r.io.signedAt || '').slice(0, 7) === month);
+    // 本月簽署：看「最新已簽署版」（開了新版草稿，v1 的簽署額也還在），簽署時間換台北月份（審查 #17.2）
+    const signedThisMonth = rows.filter((r) => r.signed && twDate(r.signed.signedAt).slice(0, 7) === month);
+    const toReview = rows.filter((r) => st(r) === 'reviewing' && r.io.submittedBy !== S.me.email);
     const awaiting = rows.filter((r) => st(r) === 'awaiting_client');
     const overdue = awaiting.filter((r) => r.io.sentAt && Date.now() - Date.parse(r.io.sentAt) > 3 * 864e5);
     const mismatch = rows.filter((r) => r.project.reconcile === 'mismatch');
+    // 每個專案只進一欄（審查 #7：原本已簽署 v1＋草稿 v2 會同時出現在「草稿」和「可執行」）：依現行 IO 版的狀態分
+    const colOf = (r) => {
+      const s2 = st(r);
+      if (s2 === 'draft' || s2 === 'reviewing') return s2;
+      if (s2 === 'awaiting_client') return r.io.sentAt ? 'sent' : 'tosend';
+      return r.project.reconcile === 'ok' ? 'ok' : '';
+    };
     const cols = [
-      { t: '草稿', d: '#A1A1AA', f: (r) => st(r) === 'draft' },
-      { t: '主管審核中', d: '#EA580C', f: (r) => st(r) === 'reviewing' },
-      { t: '待寄出', d: '#2563EB', f: (r) => st(r) === 'awaiting_client' && !r.io.sentAt },
-      { t: '待客戶回簽', d: '#7C3AED', f: (r) => st(r) === 'awaiting_client' && r.io.sentAt },
-      { t: '可執行', d: '#16A34A', f: (r) => r.project.reconcile === 'ok' },
+      { t: '草稿', d: '#A1A1AA', f: (r) => colOf(r) === 'draft' },
+      { t: '主管審核中', d: '#EA580C', f: (r) => colOf(r) === 'reviewing' },
+      { t: '待寄出', d: '#2563EB', f: (r) => colOf(r) === 'tosend' },
+      { t: '待客戶回簽', d: '#7C3AED', f: (r) => colOf(r) === 'sent' },
+      { t: '可執行', d: '#16A34A', f: (r) => colOf(r) === 'ok' },
     ];
-    const upcoming = rows.filter((r) => r.io && r.io.status !== 'void' && r.io.start && r.io.start >= S.today && days(S.today, r.io.start) <= 15)
+    const upcoming = rows.filter((r) => r.project.status === 'active' && r.io && r.io.status !== 'void' && r.io.start && r.io.start >= S.today && days(S.today, r.io.start) <= 15)
       .sort((a, b) => a.io.start.localeCompare(b.io.start)).slice(0, 6);
     const hour = new Date().getHours();
     const hi = hour < 11 ? '早安' : hour < 18 ? '午安' : '晚安';
@@ -217,7 +240,7 @@
       <section class="metrics" aria-label="指標">
         ${metric('進行中專案', rows.filter((r) => r.project.status === 'active').length)}
         ${metric('雙單金額不符', mismatch.length, mismatch.length ? '需修正' : '', 'var(--err)')}
-        ${metric('主管審核中', rows.filter((r) => st(r) === 'reviewing').length, isRole('manager', 'finance', 'admin') ? '等你核准' : '', 'var(--warn)')}
+        ${metric('主管審核中', rows.filter((r) => st(r) === 'reviewing').length, isRole('manager', 'finance', 'admin') && toReview.length ? `${toReview.length} 張等你核准` : '', 'var(--warn)')}
         ${metric('待客戶回簽', awaiting.filter((r) => r.io.sentAt).length, overdue.length ? `${overdue.length} 張超過 3 天` : '', 'var(--warn)')}
         ${metric('本月簽署 · 未稅', `TWD ${short(signedThisMonth.reduce((s, r) => s + r.io.net, 0))}`)}
       </section>
@@ -239,7 +262,7 @@
             <span style="width:40px;text-align:center;display:flex;flex-direction:column"><span style="font-size:11px;color:var(--mut2)">${+r.io.start.slice(5, 7)}月</span><span style="font-size:17px;font-weight:600">${+r.io.start.slice(8, 10)}</span></span>
             <div class="m"><b>${esc(r.project.name)}</b><span>${esc(r.project.clientName || r.project.billingName)}</span></div>${tag(r.project.reconcile === 'ok' ? ['可執行', 'ok'] : ['尚未鎖定', 'warn'])}</a>`).join('') || '<div class="prow"><div class="m"><span>沒有即將上刊的專案</span></div></div>'}</div></section>
         <section class="panel" aria-labelledby="h-check"><div class="ph">${ic('check', 15, '#52525B')}<h2 id="h-check">需要處理</h2></div>
-          <div class="pb">${rows.map((r) => [r, todoOf(r, mine(r))]).filter(([, t]) => t).slice(0, 8).map(([r, t]) => `<a class="prow" href="#/p/${r.project.projectNo}" style="text-decoration:none;color:inherit">
+          <div class="pb">${rows.filter((r) => r.project.status === 'active').map((r) => [r, todoOf(r, mine(r))]).filter(([, t]) => t).slice(0, 8).map(([r, t]) => `<a class="prow" href="#/p/${r.project.projectNo}" style="text-decoration:none;color:inherit">
             <div class="m"><b>${esc(t)}</b><span>${esc(r.project.projectNo)} · ${esc(r.project.name)}</span></div>${t === '金額不符' ? tag(['不符', 'err']) : tag(['處理', 'warn'])}</a>`).join('') || '<div class="prow"><div class="m"><span>目前沒有待辦</span></div><span class="tag ok">清空</span></div>'}</div></section>
         ${mismatch[0] ? `<div class="hintbar">${ic('spark', 16, '#C2410C')}<span style="flex:1">${esc(mismatch[0].project.projectNo)} 已鎖定的 IO 與 Cue 金額不符，請開新版修正。</span><a class="btn sm" href="#/p/${mismatch[0].project.projectNo}">修正</a></div>` : ''}
       </aside></div>`;
@@ -258,7 +281,7 @@
       document.getElementById('tbl').innerHTML = rows.length ? rows.map((r) => {
         const p = r.project;
         return `<tr><td><a class="mono" href="#/p/${p.projectNo}">${esc(p.projectNo)}</a></td><td><b>${esc(p.name)}</b><div style="font-size:12px;color:var(--mut)">${esc([p.agencyName, p.clientName].filter(Boolean).join(' · '))}</div></td>
-          <td class="num">${r.io ? esc(`${md(r.io.start)} – ${md(r.io.end)}`) : '—'}</td><td class="num" style="text-align:right">${r.io ? fmt(r.io.net) : '—'}</td>
+          <td class="num">${r.io ? esc(range(r.io.start, r.io.end)) : '—'}</td><td class="num" style="text-align:right">${r.io ? fmt(r.io.net) : '—'}</td>
           <td>${r.io ? `${tag(IO_ST[r.io.status])} <span style="font-size:12px;color:var(--mut)">v${r.io.ver}</span>` : ''}</td>
           <td>${r.cue ? `${tag(CUE_ST[r.cue.status])} <span style="font-size:12px;color:var(--mut)">v${r.cue.ver}</span>` : ''}</td>
           <td>${tag(REC[p.reconcile] || REC.unaligned)}${p.status !== 'active' ? ` <span class="tag mut">${PST[p.status]}</span>` : ''}</td>
@@ -329,7 +352,8 @@
       if (a && a.attr && attr) { attr.value = a.attr; onChange(attr); }
     });
   }
-  const readNum = (s) => Number(String(s).replace(/[,\s]/g, '')) || 0;
+  /** 數字欄：空白＝0；打了不是數字的回 NaN（存檔前擋下來，原本 'abc' 會默默變 0：審查 #13）。 */
+  const readNum = (s) => { const t = String(s).replace(/[,\s]/g, ''); return t === '' ? 0 : Number(t); };
 
   // ---------- 新增專案 ----------
   function newDialog() {
@@ -356,8 +380,11 @@
   }
 
   // ---------- 編輯頁 ----------
-  async function editor(no, tab) {
-    if (!S.cur || S.cur.project.projectNo !== no || !S.dirty) {
+  /** force：子頁操作（上傳、綁定、標記寄出、改狀態）成功後一定要重抓；有沒存的草稿時只換 S.cur、保留 S.draft（審查 #13）。 */
+  async function editor(no, tab, force) {
+    if (S.cur && S.cur.project.projectNo === no && S.dirty && force) {
+      S.cur = await api(`/projects/${no}`);
+    } else if (!S.cur || S.cur.project.projectNo !== no || !S.dirty) {
       S.cur = await api(`/projects/${no}`);
       S.draft = {
         project: { ...S.cur.project },
@@ -428,7 +455,7 @@
           <dt>內容雜湊</dt><dd class="mono" style="font-size:11px">${io && io.contentHash ? esc(io.contentHash.slice(0, 16)) + '…' : '—'}</dd>
         </dl></section>
       ${firstFail ? `<div class="hintbar">${ic('spark', 16, '#C2410C')}<span style="flex:1">${esc(firstFail.detail)}。修正後才能送出。</span></div>`
-        : c.project.reconcile === 'ok' ? `<div class="hintbar ok">${ic('check', 16, '#15803D')}<span style="flex:1">IO 與 Cue 表都已鎖定、金額一致，可以上刊。記得在「投放 ID」綁定 campaign。</span></div>` : ''}
+        : c.project.reconcile === 'ok' ? `<div class="hintbar ok">${ic('check', 16, '#15803D')}<span style="flex:1">IO 與 Cue 表都已鎖定、金額一致，可以上刊。記得在「投放 ID」綁定 campaign；明天 06:00 同步後 PAC 才看得到。</span></div>` : ''}
     </aside>`;
   }
 
@@ -451,27 +478,31 @@
         <div class="totals" id="totals">${totalsHtml()}</div></section>
       <section class="sec" aria-labelledby="s3"><div class="sech"><h2 id="s3">委刊約定條款</h2>
         <select class="inp" id="terms" style="width:auto;min-height:32px;font-size:13px"${ioEd ? '' : ' disabled'}>${terms.map((t) => `<option value="${esc(t.version)}"${d.io && d.io.termsVersion === t.version ? ' selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div>
-        <ol class="terms"><li><strong>排程與預算微調授權</strong>：未稅總金額（${money(d.io ? d.io.net : 0)}）及總走期不變下，得經雙方確認新版 Cue 表調整平台或波段預算，無須重簽 IO。</li>
-          <li><strong>素材交付與上刊時程</strong>：上刊日前至少 3 個工作日提供素材。</li><li><strong>成效數據與結算基準</strong>：以各媒體平台官方後台報表為準。</li>
-          <li><strong>文件效力</strong>：雙方用印或系統電子簽署後生效。</li></ol>
+        <ol class="terms" id="termsbody">${termsHtml()}</ol>
         <p style="margin:0;padding:0 18px 14px;font-size:12px;color:var(--mut)">條款全文以 PDF 為準；改條款＝新增一版範本（舊單維持原版本）。</p></section>
     </div>${aside()}</div>`;
   }
 
+  /** 條款全文：跟 PDF 同一份（伺服器 config.ts），{net} 換成目前填的 IO 未稅金額。 */
+  function termsHtml() {
+    const d = S.draft;
+    const t = S.meta.terms.find((x) => d.io && x.version === d.io.termsVersion) || S.meta.terms[0];
+    return t.terms.map((x) => `<li><strong>${esc(x.title)}</strong>：${esc(x.body.replace('{net}', money(d.io ? d.io.net : 0)))}</li>`).join('');
+  }
   const sel = (k, opts, v, labels) => `<select class="inp" data-l="${k}">${opts.map((o) => `<option value="${o}"${o === v ? ' selected' : ''}>${esc(labels ? labels[o] ?? o : o)}</option>`).join('')}</select>`;
   function cueRows(ed) {
     const d = S.draft;
-    const head = `<div class="h"><span>#</span><span>類型</span><span>平台</span><span>形式</span><span>廣告帳戶 ID</span><span>說明（波段）</span><span>走期起</span><span>走期迄</span><span>計費</span><span class="r">目標單價</span><span class="r">預估量體</span><span class="r">預算（未稅）</span><span></span></div>`;
+    const head = `<div class="h"><span>#</span><span>類型</span><span>平台</span><span>形式</span><span>廣告帳戶 ID</span><span>說明（波段）</span><span>走期起</span><span>走期迄</span><span>計費</span><span class="r">目標單價</span><span class="r">預估量體</span><span>其他 KPI</span><span class="r">預算（未稅）</span><span></span></div>`;
     if (!d.lines.length) return head + `<div class="empty" style="margin:16px 18px">還沒有明細。${ed ? '按「＋ 新增一列」或「從 Excel 貼上」。' : ''}</div>`;
     return head + d.lines.map((l, i) => {
-      const vol = lineVol(l);
+      const vol = kpiVol(l);
       const no = pad2(i + 1);
       if (!ed) {
         return `<div class="rw"><span class="no">${no}</span><span>${esc(LINE_TYPE[l.type])}</span><span class="pf">${esc(PF_LABEL[l.platform] || l.platform)}</span><span>${l.format === 'Video' ? '影音' : l.format === 'Native' ? '原生' : '—'}</span>
           <span class="mono" style="font-size:12px">${esc(l.accountId || '—')}</span><span>${esc(l.label || '')}</span>
           <span class="num">${esc(l.start)}</span><span class="num">${esc(l.end)}<div style="font-size:12px;color:var(--mut)">共 ${days(l.start, l.end)} 日</div></span>
-          <span>${l.type === 'media' ? `<span class="tag line">${MODEL[l.model]}</span>` : '—'}</span><span class="r num">${l.unitPrice != null && l.type === 'media' ? '$' + esc(l.unitPrice) : '—'}</span>
-          <span class="vol">${vol != null && l.type === 'media' ? `${fmt(vol)}<span>${UNIT[l.model]}</span>` : esc(l.kpiNote || '—')}</span><span class="r num" style="font-weight:600">${l.type === 'bonus' ? '贈送' : fmt(l.budget)}</span><span></span></div>`;
+          <span>${l.type === 'media' || vol != null ? `<span class="tag line">${MODEL[l.model]}</span>` : '—'}</span><span class="r num">${l.unitPrice != null && l.type === 'media' ? '$' + esc(l.unitPrice) : '—'}</span>
+          <span class="vol">${vol != null ? `${fmt(vol)}<span>${UNIT[l.model]}</span>` : '—'}</span><span style="font-size:12px">${esc(l.kpiNote || '—')}</span><span class="r num" style="font-weight:600">${l.type === 'bonus' ? '贈送' : fmt(l.budget)}</span><span></span></div>`;
       }
       return `<div class="rw" data-i="${i}"><span class="no">${no}</span>${sel('type', Object.keys(LINE_TYPE), l.type, LINE_TYPE)}${sel('platform', PLATFORMS, l.platform, PF_LABEL)}
         ${sel('format', ['Native', 'Video', ''], l.format, { Native: '原生', Video: '影音', '': '—' })}
@@ -479,8 +510,9 @@
         <input class="inp" data-l="label" value="${esc(l.label)}" placeholder="${l.type === 'bonus' ? '贈送內容' : '第一波…'}">
         <input class="inp num" type="date" data-l="start" value="${esc(l.start)}"><input class="inp num" type="date" data-l="end" value="${esc(l.end)}">
         ${sel('model', Object.keys(MODEL), l.model, MODEL)}
-        <input class="inp num r" data-l="unitPrice" inputmode="decimal" value="${l.unitPrice ?? ''}" placeholder="${l.model === 'FLAT' ? '—' : '單價'}"${l.model === 'FLAT' ? ' disabled' : ''}>
-        <input class="inp num r" data-l="volume" inputmode="numeric" value="${l.volumeManual && l.volume != null ? l.volume : ''}" placeholder="${vol != null ? fmt(vol) : l.type === 'bonus' ? '' : '—'}" title="空白＝依預算÷單價自動算；填了就用手動值">
+        <input class="inp num r" data-l="unitPrice" inputmode="decimal" value="${l.unitPrice ?? ''}" placeholder="${l.model === 'FLAT' || l.type === 'bonus' ? '—' : '單價'}"${l.model === 'FLAT' || l.type === 'bonus' ? ' disabled' : ''}>
+        <input class="inp num r" data-l="volume" inputmode="numeric" value="${l.volumeManual && l.volume != null ? l.volume : ''}" placeholder="${vol != null ? fmt(vol) : l.type === 'bonus' ? '贈送量' : '—'}" title="${l.type === 'bonus' ? '贈送的曝光／點擊量（單位看計費欄）' : '空白＝依預算÷單價自動算；填了就用手動值'}">
+        <input class="inp" data-l="kpiNote" value="${esc(l.kpiNote || '')}" placeholder="CTR 0.5%…" maxlength="255">
         <input class="inp num r" data-l="budget" inputmode="numeric" value="${fmt(l.budget)}" style="font-weight:600"${l.type === 'bonus' ? ' disabled' : ''}>
         <button type="button" class="x" data-del="${i}" aria-label="刪除第 ${no} 列">${ic('x', 14)}</button></div>`;
     }).join('');
@@ -531,9 +563,11 @@
           const k = inp.dataset.l;
           if (k === 'budget') l.budget = readNum(inp.value);
           else if (k === 'unitPrice') l.unitPrice = inp.value.trim() === '' ? null : Number(inp.value.replace(/[,$\s]/g, ''));
+          if (['budget', 'unitPrice', 'volume'].includes(k)) inp.classList.toggle('bad', inp.value.trim() !== '' && !Number.isFinite(k === 'budget' ? l.budget : k === 'unitPrice' ? l.unitPrice : readNum(inp.value)));
           else if (k === 'volume') { const v = inp.value.trim(); l.volumeManual = v !== ''; l.volume = v === '' ? null : readNum(v); }
           else l[k] = inp.value;
-          if (k === 'type' && l.type === 'bonus') { l.budget = 0; l.model = 'FLAT'; }
+          // 贈送：0 元、沒有單價；計費欄留著當量體單位（CPM＝曝光、CPC＝點擊），原本強制包版就沒辦法記 KPI（審查 #12）
+          if (k === 'type' && l.type === 'bonus') { l.budget = 0; l.unitPrice = null; }
           if (k === 'model' && l.model === 'FLAT') l.unitPrice = null;
           if (['type', 'model', 'platform'].includes(k)) return redrawRows();
           // 預估量體的 placeholder 跟著預算／單價更新（不重畫整列，避免游標跳走）
@@ -573,8 +607,22 @@
     d.showModal();
   }
 
+  /** 存檔前擋掉不是數字、小數預算（原本 'abc' 默默變 0、小數被後端四捨五入：審查 #13）。 */
+  function draftProblem() {
+    const d = S.draft;
+    if (d.io && !(Number.isInteger(d.io.net) && d.io.net >= 0)) return 'IO 未稅總金額要是非負整數';
+    for (const [i, l] of d.lines.entries()) {
+      const no = `第 ${pad2(i + 1)} 列`;
+      if (!(Number.isInteger(l.budget) && l.budget >= 0)) return `${no}預算要是非負整數`;
+      if (l.unitPrice != null && !(Number.isFinite(l.unitPrice) && l.unitPrice >= 0)) return `${no}目標單價不是數字`;
+      if (l.volumeManual && !(Number.isInteger(Number(l.volume)) && Number(l.volume) >= 0)) return `${no}預估量體要是非負整數`;
+    }
+    return '';
+  }
   async function save() {
     const c = S.cur;
+    const bad = draftProblem();
+    if (bad) { toast(bad, true); return; }
     const body = {};
     if (c.io && c.io.editable) {
       body.project = S.draft.project;
@@ -647,7 +695,8 @@
       const net = document.getElementById('f-net');
       if (net) net.addEventListener('blur', () => { net.value = fmt(S.draft.io.net); });
       const terms = document.getElementById('terms');
-      if (terms) terms.addEventListener('change', () => { S.draft.io.termsVersion = terms.value; markDirty(); });
+      if (terms) terms.addEventListener('change', () => { S.draft.io.termsVersion = terms.value; document.getElementById('termsbody').innerHTML = termsHtml(); markDirty(); });
+      if (net) net.addEventListener('input', () => { const tb = document.getElementById('termsbody'); if (tb) tb.innerHTML = termsHtml(); });
       wireRows();
       const add = document.getElementById('addrow');
       if (add) add.addEventListener('click', () => { S.draft.lines.push(blankLine()); redrawRows(); });
@@ -699,9 +748,9 @@
           <div style="display:flex;flex-wrap:wrap;gap:8px">
             <button type="button" class="btn" id="copymail">複製信件內文</button>
             <a class="btn" href="mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(mailBody)}">用郵件程式開新信</a>
-            ${io.sentAt ? '' : '<button type="button" class="btn pri" id="sent">標記已寄出</button>'}</div></div></section>
+            ${io.sentAt || !c.can.edit ? '' : '<button type="button" class="btn pri" id="sent">標記已寄出</button>'}</div></div></section>
         <section class="sec"><div class="sech"><h2>② 上傳客戶簽回</h2>${io.hasEvidence ? '<span class="tag ok">已上傳</span>' : ''}</div>
-          <div class="secb" style="display:flex;flex-direction:column;gap:12px">
+          ${c.can.upload ? '' : '<div class="secb sub">你的角色不能上傳，請負責的 AE／AM 或主管上傳。</div>'}<div class="secb" style="display:${c.can.upload ? 'flex' : 'none'};flex-direction:column;gap:12px">
             <div class="form"><div class="fld"><label for="ukind">類別</label><select class="inp" id="ukind"><option value="client_signed">客戶用印掃描檔（PDF／圖片）</option><option value="client_email">客戶回信確認截圖</option></select></div>
               <div class="fld"><label for="ufile">檔案（PDF、PNG、JPG，15 MB 內）</label><input class="inp" type="file" id="ufile" accept=".pdf,.png,.jpg,.jpeg,.webp,.eml" style="padding-top:7px"></div></div>
             <div><button type="button" class="btn" id="upl">${ic('up', 14)}上傳</button></div>
@@ -710,8 +759,8 @@
       main = `<section class="sec"><div class="sech"><h2>Cue v${cue.ver} 客戶確認</h2><span class="tag warn">待確認</span></div><div class="secb" style="display:flex;flex-direction:column;gap:12px">
         <p class="sub" style="font-size:13px">IO v${io.ver} 已簽署；這版 Cue 表總額與走期沒變，不用重簽 IO（條款 1）。把報價單寄給客戶，取得確認後上傳確認信截圖或簽回檔，再按右上「Cue：上傳確認憑證並鎖定」。</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" href="${API}/projects/${p.projectNo}/pdf?kind=cue&ver=${cue.ver}&inline=1" target="_blank" rel="noopener">${ic('pdf', 14)}報價單 PDF</a><a class="btn" href="${API}/projects/${p.projectNo}/xlsx?ver=${cue.ver}">${ic('dl', 14)}Excel</a></div>
-        <div class="form"><input type="hidden" id="ukind" value="cue_confirm"><div class="fld"><label for="ufile">客戶確認憑證</label><input class="inp" type="file" id="ufile" accept=".pdf,.png,.jpg,.jpeg,.webp,.eml" style="padding-top:7px"></div></div>
-        <div><button type="button" class="btn" id="upl">${ic('up', 14)}上傳</button>${cue.hasEvidence ? ' <span class="tag ok">已上傳</span>' : ''}</div></div></section>`;
+        <div class="form" style="display:${c.can.upload ? '' : 'none'}"><input type="hidden" id="ukind" value="cue_confirm"><div class="fld"><label for="ufile">客戶確認憑證</label><input class="inp" type="file" id="ufile" accept=".pdf,.png,.jpg,.jpeg,.webp,.eml" style="padding-top:7px"></div></div>
+        <div>${c.can.upload ? `<button type="button" class="btn" id="upl">${ic('up', 14)}上傳</button>` : ''}${cue.hasEvidence ? ' <span class="tag ok">已上傳</span>' : ''}</div></div></section>`;
     } else {
       const msg = !io ? '還沒有 IO。'
         : io.status === 'draft' ? 'IO 還是草稿：在「委刊內容」填好、核對通過後按「送主管核准」。核准後這裡會出現寄送步驟。'
@@ -728,7 +777,7 @@
     const cm = document.getElementById('copymail');
     if (cm) cm.addEventListener('click', () => navigator.clipboard.writeText(document.getElementById('mailbody').textContent).then(() => toast('已複製'), () => toast('複製失敗，請手動選取', true)));
     const sent = document.getElementById('sent');
-    if (sent) sent.addEventListener('click', async () => { if (await run(() => api(`/projects/${no}/io/${c.io.ver}/sent`, { method: 'POST', body: {} }), '已標記寄出')) editor(no, 'send'); });
+    if (sent) sent.addEventListener('click', async () => { if (await run(() => api(`/projects/${no}/io/${c.io.ver}/sent`, { method: 'POST', body: {} }), '已標記寄出')) editor(no, 'send', true); });
     const up = document.getElementById('upl');
     if (up) up.addEventListener('click', async () => {
       const f = document.getElementById('ufile').files[0];
@@ -741,7 +790,7 @@
       up.disabled = true;
       const r = await run(() => api(`/projects/${no}/upload`, { method: 'POST', body: fd }), '已上傳');
       up.disabled = false;
-      if (r) editor(no, 'send');
+      if (r) editor(no, 'send', true);
     });
   }
 
@@ -752,15 +801,15 @@
     if (!cue) return '<p class="sub">還沒有 Cue 表。</p>';
     const media = cue.lines.filter((l) => l.type === 'media');
     const bs = cue.bindings || [];
-    return `<div class="split"><div class="l"><section class="sec"><div class="sech"><h2>投放 ID 綁定（Cue v${cue.ver}）</h2><button type="button" class="btn pri sm" id="savebind">儲存綁定</button></div>
+    return `<div class="split"><div class="l"><section class="sec" id="idsbox"><div class="sech"><h2>投放 ID 綁定（Cue v${cue.ver}）</h2>${c.can.edit ? '<button type="button" class="btn pri sm" id="savebind">儲存綁定</button>' : ''}</div>
       <div class="secb" style="display:flex;flex-direction:column;gap:6px">
-        <p class="sub" style="font-size:13px;margin-bottom:8px">商業條件鎖定後仍可修改。綁到 campaign 的列，走速與報表只算那些 campaign 的花費；只填帳戶＝整個帳戶都算這一列（同帳戶同時跑多列時請綁 campaign，否則會被當成衝突）。每次修改都記錄前後差異。</p>
+        <p class="sub" style="font-size:13px;margin-bottom:8px">商業條件鎖定後仍可修改。綁到 campaign 的列，走速與報表只算那些 campaign 的花費；只填帳戶＝整個帳戶都算這一列（同帳戶同時跑多列時請綁 campaign，否則會被當成衝突）。一列只能對一個帳戶（可綁多支 campaign）。每次修改都記錄前後差異；改了 Cue 明細（刪列、換平台或帳戶）對不上的綁定會自動拿掉。</p>
         ${media.length ? media.map((l) => {
           const mine = bs.filter((b) => b.lineNo === l.lineNo);
           const rows = (mine.length ? mine : [{ accountId: l.accountId, campaignId: '' }]);
           return `<div style="border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px" data-line="${l.lineNo}">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span class="no mono" style="font-size:12px;color:var(--mut)">${pad2(l.lineNo)}</span><span class="pf">${esc(PF_LABEL[l.platform] || l.platform)}</span>
-              <b style="font-weight:500">${esc(l.label || l.accountId || '')}</b><span style="font-size:12px;color:var(--mut)">${esc(md(l.start))} – ${esc(md(l.end))} · ${money(l.budget)}</span>
+              <b style="font-weight:500">${esc(l.label || l.accountId || '')}</b><span style="font-size:12px;color:var(--mut)">${esc(range(l.start, l.end))} · ${money(l.budget)}</span>
               ${TRACKED.includes(l.platform) ? '' : '<span class="tag mut">非我方平台，不追走速</span>'}</div>
             <div class="bindrow" style="font-size:12px;color:var(--mut)"><span></span><span>廣告帳戶 ID</span><span>Campaign ID（空白＝整個帳戶）</span><span></span></div>
             <div class="binds">${rows.map((b) => bindRow(b)).join('')}</div>
@@ -775,7 +824,9 @@
       const firstAcct = box.querySelector('[data-acct]');
       box.insertAdjacentHTML('beforeend', bindRow({ accountId: firstAcct ? firstAcct.value : '', campaignId: '' }));
     }));
-    app.addEventListener('click', (e) => { const rm = e.target.closest('[data-rmbind]'); if (rm) rm.parentElement.remove(); });
+    // 掛在這一頁的區塊上（重畫就跟著換掉）；原本掛在常駐的 #app，每進一次投放 ID 頁就多一層（審查 #13）
+    const idsBox = document.getElementById('idsbox');
+    if (idsBox) idsBox.addEventListener('click', (e) => { const rm = e.target.closest('[data-rmbind]'); if (rm) rm.parentElement.remove(); });
     const sv = document.getElementById('savebind');
     if (sv) sv.addEventListener('click', async () => {
       const bindings = [];
@@ -785,7 +836,7 @@
         bindings.push({ lineNo: Number(box.dataset.line), accountId: a.value.trim(), campaignId: r.querySelector('[data-camp]').value.trim() });
       }));
       const r = await run(() => api(`/projects/${c.project.projectNo}/cue/${c.cue.ver}/bindings`, { method: 'PUT', body: { bindings } }));
-      if (r) { toast(r.changed ? `已儲存（新增 ${r.added.length}、移除 ${r.removed.length}）` : '沒有變更'); editor(c.project.projectNo, 'ids'); }
+      if (r) { toast(r.changed ? `已儲存（新增 ${r.added.length}、移除 ${r.removed.length}）` : '沒有變更'); editor(c.project.projectNo, 'ids', true); }
     });
   }
 
@@ -814,7 +865,7 @@
         ${c.audit.map((a) => `<tr><td class="num" style="font-size:12px">${esc(dt(a.at))}</td><td>${esc(ACTION_LABEL[a.action] || a.action)} <span style="font-size:12px;color:var(--mut)">${esc(a.target)}</span></td>
           <td>${esc(nameOf(a.email))}<div style="font-size:11px;color:var(--mut2)">${esc(a.ip)}</div></td><td style="font-size:12px;color:var(--ink2)">${esc(auditText(a))}${a.docHash ? `<div class="mono" style="font-size:11px;color:var(--mut)">SHA256 ${esc(a.docHash.slice(0, 16))}…</div>` : ''}</td></tr>`).join('')}
         </tbody></table></section>
-      <section class="sec"><div class="sech"><h2>專案狀態</h2>${tag([PST[c.project.status], c.project.status === 'active' ? 'ok' : 'mut'])}</div><div class="secb" style="display:flex;gap:8px;flex-wrap:wrap">
+      <section class="sec"><div class="sech"><h2>專案狀態</h2>${tag([PST[c.project.status], c.project.status === 'active' ? 'ok' : 'mut'])}</div><div class="secb" style="display:${c.can.status ? 'flex' : 'none'};gap:8px;flex-wrap:wrap">
         ${c.project.status !== 'closed' ? '<button type="button" class="btn sm" data-pst="closed">結案</button>' : ''}${c.project.status !== 'terminated' ? '<button type="button" class="btn sm danger" data-pst="terminated">提前終止</button>' : ''}${c.project.status !== 'active' ? '<button type="button" class="btn sm" data-pst="active">恢復進行中</button>' : ''}</div></section>
       </div>${aside()}</div>`;
   }
@@ -841,7 +892,7 @@
       const st = b.dataset.pst;
       const reason = await reasonDialog(st === 'closed' ? '結案' : st === 'terminated' ? '提前終止' : '恢復進行中', st === 'terminated' ? '原因（必填）' : '備註（選填）', '確定', st === 'terminated');
       if (reason == null) return;
-      if (await run(() => api(`/projects/${c.project.projectNo}/status`, { method: 'POST', body: { status: st, reason } }), '已更新')) editor(c.project.projectNo, 'history');
+      if (await run(() => api(`/projects/${c.project.projectNo}/status`, { method: 'POST', body: { status: st, reason } }), '已更新')) editor(c.project.projectNo, 'history', true);
     }));
   }
 

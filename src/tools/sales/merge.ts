@@ -55,7 +55,7 @@ const taipeiDate = (iso: string) => new Date(Date.parse(iso) + 8 * 3600_000).toI
  * 有 id 的表（經銷商／client／付款方／IO）：同鍵沿用既有 id、新的從 MAX(id)+1 往後編；今天沒有的保留。
  * 輸出順序＝既有列（原順序、同鍵被今天的取代）＋新列（今天的順序），所以同樣的輸入重跑結果相同。
  */
-function mergeIdTable(t: SalesTable, ex: Row[], td: Row[], key: (r: Row) => string, prep: (r: Row) => Row) {
+function mergeIdTable(t: SalesTable, ex: Row[], td: Row[], key: (r: Row) => string, prep: (r: Row) => Row, keepOld?: (cur: Row) => boolean) {
   const out = new Map<string, Row>();
   for (const r of ex) {
     // 既有兩列撞鍵（手動 SQL 或 normName 規則改過才會發生）：照合併會默默丟掉一列永久資料，寧可整次失敗
@@ -74,7 +74,8 @@ function mergeIdTable(t: SalesTable, ex: Row[], td: Row[], key: (r: Row) => stri
     const id = old ? Number(old.id) : next++;
     if (!old) newIds.push(id);
     idMap.set(Number(r.id), id);
-    out.set(k, keepAudit(t, old, { ...cur, id }));
+    // keepOld：今天這列只是「借名稱」（例如 IO 單系統的主檔），BQ 已有同名的就整列沿用舊的，不拿今天的空白統編／屬性蓋掉
+    out.set(k, old && keepOld?.(cur) ? old : keepAudit(t, old, { ...cur, id }));
     seen.add(k);
   }
   return { rows: [...out.values()], idMap, newIds, seen, kept: ex.filter((r) => !seen.has(key(r))) };
@@ -101,7 +102,8 @@ export function mergeRows(existing: SalesRows, today: SalesRows, meta: { date: s
   // ---------- 主檔 ----------
   const byName = (r: Row) => normName(String(r.name));
   const master = (t: 'nexus_sales_agencies' | 'nexus_sales_clients' | 'nexus_sales_billing_parties') => {
-    const m = mergeIdTable(t, existing[t], today[t], byName, stamp);
+    // IO 單系統（source='iosys'）只是用名稱引用主檔，不擁有主檔內容：BQ 已有同名的就沿用（IO 單審查 #16：原本空白統編、屬性會蓋掉 BQ 歷史值）
+    const m = mergeIdTable(t, existing[t], today[t], byName, stamp, (r) => r.source === 'iosys');
     out[t] = m.rows;
     stats[t] = { today: today[t].length, kept: m.kept.length, merged: m.rows.length };
     return m.idMap;
