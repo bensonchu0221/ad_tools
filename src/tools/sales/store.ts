@@ -70,7 +70,7 @@ export async function writeRowsToBq(
     }
     let bytes = 0;
     for (const sql of swapStatements()) bytes += await bq.dryRun(sql);
-    log(`換表交易 dry-run：預估掃描 ${bytes} bytes（實際每句最低計 10 MB，16 句約 160 MB ≈ US$0.001）`);
+    log(`換表交易 dry-run：預估掃描 ${bytes} bytes（實際每句最低計 10 MB，18 句約 180 MB ≈ US$0.001）`);
     if (bytes > MAX_SWAP_BYTES) throw new Error(`換表交易預估掃描 ${bytes} bytes，超過上限 ${MAX_SWAP_BYTES}，停止`);
   } catch (e) {
     await dropStages();
@@ -79,7 +79,7 @@ export async function writeRowsToBq(
   try {
     await bq.query(swapSql(), { timeoutMs: 120_000 });
   } catch (e) {
-    throw new Error(`換表交易結果不確定（呼叫失敗，BQ 上的 job 可能仍在跑；8 張表必定全換或全不變）。暫存表保留、1 天後自動過期；請重跑種子（冪等）：${e instanceof Error ? e.message : e}`);
+    throw new Error(`換表交易結果不確定（呼叫失敗，BQ 上的 job 可能仍在跑；9 張表必定全換或全不變）。暫存表保留、1 天後自動過期；請重跑種子（冪等）：${e instanceof Error ? e.message : e}`);
   }
   await dropStages();
   const out = {} as Record<SalesTable, number>;
@@ -90,7 +90,7 @@ export async function writeRowsToBq(
   return out;
 }
 
-/** 8 張表現況（tabledata.list，不計費）並解碼成 Row。表還不存在（第一次）回空陣列。 */
+/** 9 張表現況（tabledata.list，不計費）並解碼成 Row。表還不存在（第一次）回空陣列。 */
 export async function readRowsFromBq(bq: BqOps = realBq): Promise<SalesRows> {
   const out = {} as SalesRows;
   for (const t of SALES_TABLES) {

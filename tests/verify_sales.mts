@@ -472,8 +472,8 @@ await ok('報告：筆數、覆蓋率表、未歸屬帳戶、對不到的帳戶�
 
 // ---------- rows（轉成 BQ 列、寫入前檢查、換表交易） ----------
 
-await ok('schema：8 張表都有欄位與唯一鍵、唯一鍵欄位都在 schema 裡、表名與暫存表名', () => {
-  assert.equal(SALES_TABLES.length, 8);
+await ok('schema：9 張表（2026-11-19 加 cue_lines）都有欄位與唯一鍵、唯一鍵欄位都在 schema 裡、表名與暫存表名', () => {
+  assert.equal(SALES_TABLES.length, 9);
   for (const t of SALES_TABLES) {
     assert.ok(SALES_SCHEMA[t].length > 0, t);
     assert.ok(UNIQUE_KEYS[t].length > 0, t);
@@ -502,7 +502,7 @@ const clone = (): SalesRows => JSON.parse(JSON.stringify(ROWS));
 await ok('seedToRows：筆數與 Seed 相同、id 從 1 連號、名稱換成外鍵 id、金額與月份格式、規則欄位空字串', () => {
   assert.deepEqual(SALES_TABLES.map((t) => ROWS[t].length), [
     SEED.agencies.length, SEED.clients.length, SEED.aliases.length, SEED.billingParties.length,
-    SEED.ios.length, SEED.periods.length, SEED.allocations.length, SEED.assignments.length,
+    SEED.ios.length, SEED.periods.length, SEED.allocations.length, SEED.assignments.length, SEED.cueLines.length,
   ]);
   assert.deepEqual(ROWS.nexus_sales_ios.map((r) => r.id), SEED.ios.map((_, i) => i + 1));
   const a12 = one('nexus_sales_ios', (r) => r.io_code === 'A12');
@@ -550,9 +550,9 @@ await ok('checkKeys：外鍵指不到、必填欄 NULL、多出或缺少欄位�
   assert.throws(() => checkKeys(d), /缺欄位 note/);
 });
 
-await ok('swapSql：一段交易內 8 張表各 DELETE＋從暫存表 INSERT（欄位明列），出錯 ROLLBACK', () => {
+await ok('swapSql：一段交易內 9 張表各 DELETE＋從暫存表 INSERT（欄位明列），出錯 ROLLBACK', () => {
   const st = swapStatements();
-  assert.equal(st.length, 16);
+  assert.equal(st.length, 18);
   for (const t of SALES_TABLES) {
     assert.ok(st.includes(`DELETE FROM \`${fullTable(t)}\` WHERE TRUE`), t);
     const ins = st.find((s) => s.startsWith(`INSERT INTO \`${fullTable(t)}\` (`));
@@ -646,12 +646,12 @@ await ok('schema：ios 最後一欄是 last_seen_at（DATE、可 NULL），seedT
   for (const t of SALES_TABLES) assert.ok(!SALES_TABLE_DESC[t].includes('會換'), t);
 });
 
-await ok('writeRowsToBq：成功時回讀筆數、最後刪掉 8 張暫存表', async () => {
+await ok('writeRowsToBq：成功時回讀筆數、最後刪掉 9 張暫存表', async () => {
   const { bq, calls } = fakeBq();
   const out = await writeRowsToBq(ROWS, quiet, bq);
   assert.equal(out.nexus_sales_ios, ROWS.nexus_sales_ios.length);
   const iq = calls.indexOf('query');
-  assert.equal(calls.slice(iq).filter((c) => c.startsWith('delete ') && c.includes('nexus__stage_')).length, 8);
+  assert.equal(calls.slice(iq).filter((c) => c.startsWith('delete ') && c.includes('nexus__stage_')).length, 9);
 });
 
 await ok('writeRowsToBq：暫存表 load 失敗 → 不跑交易、刪暫存表、訊息說正式表未動', async () => {
@@ -1015,7 +1015,7 @@ function syncBq(existing: SalesRows | null) {
   return { bq, calls, stage };
 }
 const SYNC_NOW = new Date('2026-10-19T00:00:00.000Z'); // 台北 10/19
-const syncDeps = (bq: BqOps, reader: SheetReader = fakeReader(okTabs('2026-10-19'))) => ({ readSheet: reader, loadAccounts: async () => ACC, bq });
+const syncDeps = (bq: BqOps, reader: SheetReader = fakeReader(okTabs('2026-10-19'))) => ({ readSheet: reader, loadAccounts: async () => ACC, loadIosys: async () => [], bq });
 
 await ok('runSync：dry → 不呼叫 loadRows/query，status=dry，stats 有值', async () => {
   const { bq, calls } = syncBq(emptyRows());

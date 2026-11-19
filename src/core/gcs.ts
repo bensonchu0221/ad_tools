@@ -44,3 +44,21 @@ export async function downloadWeekly(object: string): Promise<Buffer> {
   const [buf] = await getStorage().bucket(BUCKET).file(object).download();
   return buf;
 }
+
+// ---------- tool#11 IO／Cue 單：核准 PDF、客戶簽回檔、確認信截圖 ----------
+// 放 iocue/ 前綴，**不設 lifecycle 自動刪除**（合約存證）；bucket 已開版本控制的話舊版也留著。
+const IOCUE_PREFIX = 'iocue/';
+
+/** 上傳 IO／Cue 單相關檔案，回傳 GCS 物件路徑。relPath 例：IO-2611-X7K4P/io-v2-approved-1763.pdf */
+export async function uploadIocueFile(relPath: string, buffer: Buffer, contentType: string): Promise<string> {
+  if (relPath.includes('..') || relPath.startsWith('/')) throw new Error(`不合法的路徑：${relPath}`);
+  const object = `${IOCUE_PREFIX}${relPath}`;
+  await getStorage().bucket(BUCKET).file(object).save(buffer, { contentType, resumable: false });
+  return object;
+}
+
+export async function downloadIocueFile(object: string): Promise<Buffer> {
+  if (!object.startsWith(IOCUE_PREFIX)) throw new Error(`不是 IO／Cue 單的檔案：${object}`);
+  const [buf] = await getStorage().bucket(BUCKET).file(object).download();
+  return buf;
+}

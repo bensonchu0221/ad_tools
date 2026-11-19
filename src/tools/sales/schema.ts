@@ -20,6 +20,7 @@ export const SALES_DATASET = process.env.SALES_BQ_DATASET ?? 'popinpoc1.reportin
 export const SALES_TABLES = [
   'nexus_sales_agencies', 'nexus_sales_clients', 'nexus_sales_aliases', 'nexus_sales_billing_parties',
   'nexus_sales_ios', 'nexus_sales_io_periods', 'nexus_sales_io_allocations', 'nexus_sales_io_assignments',
+  'nexus_sales_cue_lines', // 2026-11-19 tool#11 IO／Cue 單鎖定後的 Cue 明細（只有 source='iosys' 的 IO 有）
 ] as const;
 export type SalesTable = (typeof SALES_TABLES)[number];
 
@@ -65,6 +66,18 @@ export const SALES_SCHEMA: Record<SalesTable, BqField[]> = {
     req('campaign_id', 'STRING'), req('campaign_keyword', 'STRING'), opt('valid_from', 'DATE'), opt('valid_to', 'DATE'),
     req('source', 'STRING'), ...UPDATED,
   ],
+  // tool#11 IO／Cue 單：已確認鎖定的 Cue 明細，一列＝一個平台波段（同平台可多段走期）。給走速與 PAC 看 KPI 目標。
+  nexus_sales_cue_lines: [
+    req('io_id', 'INT64'), req('line_no', 'INT64'), req('cue_ver', 'INT64'),
+    req('line_type', 'STRING'), // media／service／production／bonus；走速只看 media
+    req('platform', 'STRING'), req('ad_format', 'STRING'), req('account_id', 'STRING'),
+    req('campaign_ids', 'STRING'), // 綁定的 campaign，逗號分隔；''＝整個帳戶
+    req('label', 'STRING'), req('start_date', 'DATE'), req('end_date', 'DATE'),
+    req('budget', 'NUMERIC'), // 未稅、客戶價（D1 也是客戶價，倉庫花費要 ÷0.6 再比）
+    req('billing_model', 'STRING'), // CPC／CPM／CPA／FLAT
+    money('target_price'), opt('est_volume', 'INT64'), req('kpi_note', 'STRING'),
+    ...UPDATED,
+  ],
 };
 
 /** 邏輯唯一鍵。BQ 不強制，寫入前由 rows.ts 的 checkKeys 檢查。 */
@@ -77,6 +90,7 @@ export const UNIQUE_KEYS: Record<SalesTable, string[][]> = {
   nexus_sales_io_periods: [['io_id', 'period_no', 'account_name_raw']],
   nexus_sales_io_allocations: [['io_id', 'platform', 'month']],
   nexus_sales_io_assignments: [['id'], ['io_id', 'platform', 'account_id', 'campaign_id', 'campaign_keyword']],
+  nexus_sales_cue_lines: [['io_id', 'line_no']],
 };
 
 const DESC_SUFFIX = '。設計：ad_tools docs/superpowers/specs/2026-10-14-sales-io-hierarchy-design.md；由 ad_tools 每日同步（/tools/sales/cron）合併寫入，只增不減，id 固定';
@@ -89,4 +103,5 @@ export const SALES_TABLE_DESC: Record<SalesTable, string> = {
   nexus_sales_io_periods: `業績層級：IO 請款期（財務表一列一期）${DESC_SUFFIX}`,
   nexus_sales_io_allocations: `業績層級：IO × 平台 × 月 計畫預算${DESC_SUFFIX}`,
   nexus_sales_io_assignments: `業績層級：IO 歸屬規則（平台帳戶，之後可細到 campaign）${DESC_SUFFIX}`,
+  nexus_sales_cue_lines: `業績層級：已確認鎖定的 Cue 表明細（tool#11 IO／Cue 單，source=iosys 的 IO 才有；budget 為未稅客戶價）${DESC_SUFFIX}`,
 };

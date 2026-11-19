@@ -10,7 +10,8 @@ const MOBILE = devices['Pixel 7'];
 export const MOBILE_VIEWPORT_WIDTH = MOBILE.viewport.width;
 
 let browserPromise: Promise<Browser> | null = null;
-function getBrowser(): Promise<Browser> {
+/** 全程序共用一個 headless Chromium（Cloud Run 記憶體有限）；tool#11 IO 單 PDF 也用這個。 */
+export function getBrowser(): Promise<Browser> {
   if (!browserPromise) browserPromise = chromium.launch({ headless: true });
   return browserPromise;
 }

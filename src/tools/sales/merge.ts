@@ -87,9 +87,10 @@ function must(m: Map<number, number>, v: unknown, what: string): number {
 }
 const fk = (m: Map<number, number>, v: unknown, what: string) => (v === null || v === undefined ? null : must(m, v, what));
 
-const CHILD_KEY: Record<'nexus_sales_io_allocations' | 'nexus_sales_io_assignments', (r: Row) => string> = {
+const CHILD_KEY: Record<'nexus_sales_io_allocations' | 'nexus_sales_io_assignments' | 'nexus_sales_cue_lines', (r: Row) => string> = {
   nexus_sales_io_allocations: (r) => `${r.io_id}|${r.platform}|${r.month}`,
   nexus_sales_io_assignments: (r) => `${r.io_id}|${r.platform}|${r.account_id}|${r.campaign_id}|${r.campaign_keyword}`,
+  nexus_sales_cue_lines: (r) => `${r.io_id}|${r.line_no}`,
 };
 
 export function mergeRows(existing: SalesRows, today: SalesRows, meta: { date: string; by: string; at: string }): MergeResult {
@@ -152,7 +153,7 @@ export function mergeRows(existing: SalesRows, today: SalesRows, meta: { date: s
 
   // ---------- 子表：IO 今天還在 → 整組換成今天的；IO 今天不在 → 既有的保留 ----------
   const liveIo = new Set(io.idMap.values());
-  for (const t of ['nexus_sales_io_periods', 'nexus_sales_io_allocations', 'nexus_sales_io_assignments'] as const) {
+  for (const t of ['nexus_sales_io_periods', 'nexus_sales_io_allocations', 'nexus_sales_io_assignments', 'nexus_sales_cue_lines'] as const) {
     const kept = existing[t].filter((r) => !liveIo.has(Number(r.io_id)));
     let rows: Row[] = today[t].map((r) => ({ ...r, io_id: must(io.idMap, r.io_id, 'IO') }));
     if (t !== 'nexus_sales_io_periods') {

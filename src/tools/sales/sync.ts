@@ -11,6 +11,8 @@ import { checkSanity } from './sanity.js';
 import type { SalesTable } from './schema.js';
 import { fetchSalesSheets, sheetsApiReader, type SheetReader } from './sheets.js';
 import { loadAccounts, readRowsFromBq, writeRowsToBq, type BqOps } from './store.js';
+import { appendIosys, type IosysProject } from './iosys.js';
+import { lockedSnapshot } from '../iocue/store.js';
 
 /** 倉庫起始日（CLI 覆蓋率報告用）。 */
 export const COVERAGE_SINCE = '2026-05-21';
@@ -18,6 +20,8 @@ export const COVERAGE_SINCE = '2026-05-21';
 export interface SyncDeps {
   readSheet: SheetReader;
   loadAccounts: () => Promise<Account[]>;
+  /** tool#11 IO／Cue 單已鎖定、勾稽一致的專案（Cloud SQL iocue_*）。 */
+  loadIosys: () => Promise<IosysProject[]>;
   bq?: BqOps; // 不給＝真的 BQ
   allowProdWrite: boolean; // 用真的 BQ 時，非 dry 要 true 才寫得進去
 }
@@ -40,7 +44,7 @@ export async function runSync(opts: {
   const now = opts.now ?? new Date();
   const date = twToday(now);
   const log = opts.log ?? console.log;
-  const d: SyncDeps = { readSheet: sheetsApiReader, loadAccounts, allowProdWrite: false, ...opts.deps };
+  const d: SyncDeps = { readSheet: sheetsApiReader, loadAccounts, loadIosys: () => lockedSnapshot(), allowProdWrite: false, ...opts.deps };
   const done = (o: Partial<SyncResult>): SyncResult => ({
     date, status: opts.dry ? 'dry' : 'written', problems: [], stats: null, newIos: 0, vanishedIos: 0, newIoNames: [], vanishedIoNames: [],
     dupes: [], seed: null, ...o, ms: Date.now() - t0,
@@ -57,13 +61,14 @@ export async function runSync(opts: {
     return done({ status: 'rejected', problems });
   }
 
-  const seed = buildSeed({ finance, customers, deliver, accounts: await d.loadAccounts() });
+  const iosys = await d.loadIosys();
+  const seed = appendIosys(buildSeed({ finance, customers, deliver, accounts: await d.loadAccounts() }), iosys);
   const at = now.toISOString();
   const today = seedToRows(seed, { by: opts.by, at });
   checkKeys(today);
   const merged = mergeRows(await readRowsFromBq(d.bq), today, { date, by: opts.by, at });
   checkKeys(merged.rows);
-  log(`讀入：財務 ${finance.length} 列、客戶資料 ${customers.length} 列、月表 ${tabs.join('/')} 共 ${deliver.length} 列；`
+  log(`讀入：財務 ${finance.length} 列、客戶資料 ${customers.length} 列、月表 ${tabs.join('/')} 共 ${deliver.length} 列、IO 系統鎖定 ${iosys.length} 案；`
     + `IO 今天 ${today.nexus_sales_ios.length}、新增 ${merged.newIoIds.length}、剛消失 ${merged.vanishedIoIds.length}、合併後 ${merged.rows.nexus_sales_ios.length}`);
   if (!opts.dry) await writeRowsToBq(merged.rows, log, d.bq, { allowProd: d.allowProdWrite });
   const byId = new Map(merged.rows.nexus_sales_ios.map((r) => [Number(r.id), r]));

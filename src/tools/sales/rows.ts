@@ -63,7 +63,13 @@ export function seedToRows(seed: Seed, meta: { by: string; at: string }): SalesR
     })),
     nexus_sales_io_assignments: seed.assignments.map((a, i) => ({
       id: i + 1, io_id: io(a.ioKey), platform: a.platform, account_id: a.accountId,
-      campaign_id: '', campaign_keyword: '', valid_from: null, valid_to: null, source: a.source, ...upd,
+      campaign_id: a.campaignId ?? '', campaign_keyword: '', valid_from: a.validFrom ?? null, valid_to: a.validTo ?? null, source: a.source, ...upd,
+    })),
+    nexus_sales_cue_lines: seed.cueLines.map((c) => ({
+      io_id: io(c.ioKey), line_no: c.lineNo, cue_ver: c.cueVer, line_type: c.lineType, platform: c.platform, ad_format: c.adFormat,
+      account_id: c.accountId, campaign_ids: c.campaignIds, label: c.label, start_date: c.start, end_date: c.end,
+      budget: money(c.budget), billing_model: c.billingModel, target_price: money(c.targetPrice),
+      est_volume: c.estVolume, kpi_note: c.kpiNote, ...upd,
     })),
   };
 }
@@ -77,6 +83,7 @@ const FOREIGN: { table: SalesTable; col: string; ref: SalesTable; when?: (r: Row
   { table: 'nexus_sales_io_periods', col: 'io_id', ref: 'nexus_sales_ios' },
   { table: 'nexus_sales_io_allocations', col: 'io_id', ref: 'nexus_sales_ios' },
   { table: 'nexus_sales_io_assignments', col: 'io_id', ref: 'nexus_sales_ios' },
+  { table: 'nexus_sales_cue_lines', col: 'io_id', ref: 'nexus_sales_ios' },
 ];
 
 /** 寫入前檢查（BQ 不擋）：欄位與 schema 一致、必填欄非 NULL、邏輯唯一鍵不重複、外鍵指得到。有任何問題就 throw。 */

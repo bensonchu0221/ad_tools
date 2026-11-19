@@ -48,7 +48,8 @@ function poolOptions(connectionLimit: number): mysql.PoolOptions | null {
       };
 }
 
-function getPool(): mysql.Pool | null {
+/** 主連線池（預設庫 ad_tools）。tool#11 IO／Cue 單的 iocue/store.ts 也用這個，不另開池。 */
+export function getPool(): mysql.Pool | null {
   if (pool) return pool;
   const o = poolOptions(5);
   if (!o) return null;

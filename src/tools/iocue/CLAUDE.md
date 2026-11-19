@@ -1,0 +1,22 @@
+## IO / Cue 單（tool#11，`/tools/iocue`，`src/tools/iocue/`）
+
+- **目的**（2026-11-19 使用者核准計畫）：AE／AM 在這裡建 IO（委刊單）＋Cue 表、主管核准、客戶簽回、鎖定，匯出 A4 PDF 給客戶。鎖定且勾稽一致的資料由 sales 同步寫進 BQ `nexus_sales_*`（`source='iosys'`），給 PAC `/ad-performance`、AM dashboard、走速用。**這就是 sales spec §8 說「之後另做」的管理介面**，不另建平行 IO 主檔。PAC 那邊目前（11-19）沒有 Cue 表、KPI 只有自由文字。
+- **視覺**：照成品「IO / Cue 單後台與 PDF 設計」（claude.ai artifact `XdYMgNeSicVA9M9W6XgsND`，Design 畫布：後台 Main／Editor／Send 三頁＋PDF IoPage1／IoPage2）。zinc 中性色、左側欄（不用 Slot Board 外殼）。設計稿側欄的「價目與底價」「委刊金額報表」「主檔資料」沒有對應功能，**沒放假入口**。等寬字用自架的 IBM Plex Mono（設計稿是 JetBrains Mono，專案沒自架）。
+- **分層**：`model.ts`（純函式：金額、核對 runChecks、狀態機、預估量體、國字大寫、跨月攤提、統編檢查碼、貼上解析、綁定差異）→ `store.ts`（Cloud SQL `ad_tools.iocue_*`，第一次用到時 CREATE）→ `service.ts`（流程：把規則接到 DB／PDF／GCS）→ `route.ts`（HTTP、身分、角色）；`pdf_template.ts`（HTML，純函式）＋`pdf.ts`（共用 `adpreview/shoot.ts getBrowser()` 印 PDF）；`masters.ts`（主檔下拉，BQ tabledata.list 免費、快取 10 分鐘）；`xlsx.ts`（Cue 匯出）；`config.ts`（受託方資料、條款範本）。**前端在 `public/iocue/app.js`**（tsc 不會把 src 裡的 .js 帶進 dist，public 整包進映像；route 讀檔送出）。
+- **為什麼編輯本體放 Cloud SQL 不放 BQ**：版本號、狀態轉換要交易一致、唯一鍵要擋重複，BQ 都做不到。BQ 只放鎖定後的結果。
+- **BQ 只有一個寫入者＝sales 同步**：sales 每天整批 DELETE＋INSERT 9 張表，IO 系統自己直接寫 BQ 會被蓋掉。所以 `sales/sync.ts` 多讀一個來源（`iocue/store.ts lockedSnapshot()`，只給勾稽一致的專案），轉換在 `sales/iosys.ts appendIosys`（純函式）。鎖定／勾稽一致／改綁定時 `route.ts syncTrigger` 防抖 20 秒觸發一次同步（同時只跑一個）；**本機只 dry-run**，正式環境才寫。
+- **資料規則**（使用者 11-19 確認）：
+  - **Cue 列分類型**：媒體／服務費／製作費／贈送（0 元只記 KPI）。IO 未稅總額＝全部明細加總（差 1 元都不過）；走速、allocations、歸屬只看媒體列。寫 BQ：`budget_net`＝媒體合計、`service_fee`＝服務費、`setup_fee`＝製作費。
+  - 平台 `D R M P D1 META GOOGLE PR OTHER`（沿用 sales）；非我方平台只記預算、不寫歸屬。D1 預算是**客戶價**，倉庫花費要 ÷0.6 再比。
+  - 主檔（經銷商／品牌／付款方）**用名稱存**，sales 同步依正規化名稱對到既有 id 或新增；沒填經銷商＝直客。
+  - 投放 ID 綁定可多支 campaign；綁了＝campaign 層歸屬、沒綁＝用該列帳戶（帳戶層）；同帳戶同 campaign 多波段併一條、走期取頭尾。
+- **流程與狀態**：IO `草稿→內部審核中→待客戶簽署→已簽署鎖定`（任何時候可作廢、要原因）；Cue `草稿→待確認→已確認鎖定`。第一次送審 IO＋Cue 一起送、一起鎖（客戶簽的 PDF 就含明細）。IO 簽署後 Cue 可單獨開新版，**總額與走期不變才不用重簽 IO**（條款 1，`cueNeedsIoResign`），否則要開 IO 新版。新版鎖定後舊的已鎖定版自動作廢「由 vN 取代」。只有草稿能改內容；狀態轉換用 `WHERE status=原狀態` 擋兩人同時按。不能核准自己送審的單（admin 例外）。
+- **角色**：`iocue_roles`（AE／AM／主管／財務／管理員），管理員在 `#/roles` 維護。表空的時候 `IOCUE_ADMINS`（預設 benson@popin.cc）自動是管理員。本機沒開 OAuth 時登入者＝`IOCUE_DEV_USER`（預設 benson@popin.cc）。ae_email／am_email 存真實 email（PAC 一直缺這個對照）。
+- **PDF**：A4、內容自然分頁（Cue 表頭每頁重複、單列與合計不切開、條款與簽署欄不切開）。草稿＝淡灰「僅供審閱」浮水印、不壓章；核准＝壓「合約專用章」（multiply 疊印）並歸檔 GCS；報價單（kind=cue）壓「業務報價專用章」並註明以 IO 為準。**核准後下載的是歸檔那份**（雜湊對得上），不重印。中文用系統字（Cloud Run 有 fonts-noto-cjk），**不能用自架的 noto-sans-tc woff2（是 86KB 子集，客戶名會缺字）**。內容雜湊＝專案＋IO＋Cue 的正規 JSON SHA-256（印在 PDF）；檔案雜湊另存 `iocue_files.sha256`。
+- **GCS**：`popinpoc1-internal-tool/iocue/<單號>/…`，**不設 lifecycle**（合約存證）。PRD 原本要 90 天轉低頻，PDF 每份幾十～幾百 KB、省不到錢，拿掉。
+- **一期不做**（使用者可再決定）：線上電子簽章（OTP＋簽名板＋數位簽章，表已預留 `sign_method`）、系統代寄 Email（AE 下載 PDF 自己寄、回來按已寄出）、Excel 檔匯入（改「從 Excel 貼上」，不解析客戶改過的檔）、Webhook 推送（只寫 `iocue_events` outbox）、月度拆帳表（用 `monthSplit` 攤提，財務期再做）。
+- **開票主體只有博英**（2026-11-20 使用者：行家公司已不存在，拿掉）。博英已給統編 52633245、代表人申芳萍、資本額 50 萬、地址；**全銜、電話、匯款帳戶「先留空白」**——PDF 上空的欄位整段不印（不印「[待提供]」），全銜空白時印簡稱「博英」，匯款帳戶列整列不印。**章先用示意章**（CSS 畫的，使用者同意），拿到去背 PNG 再換。
+- **待使用者提供**：博英全銜、電話、匯款帳戶（補進 `config.ts` 就會印）；合約章／報價章去背 PNG；主管與財務名單；跟試算表切換的月份。
+- **要跟 PAC（小李）對齊**：PAC 目前用 `(name, agency, client, start, end)` 五欄辨識 IO，iosys 的 IO 改版後走期可能變 ⇒ 請他對 `source='iosys'` 改用 `id`；新表 `nexus_sales_cue_lines` 給 KPI 數字（budget 是未稅客戶價、target_price、est_volume、campaign_ids）。
+- **驗證**：`npx tsx tests/verify_iocue.mts`（39 項，全假資料手算）；2026-11-19 變異測試 19/19 全部抓到（勾稽容忍 1 元、量體四捨五入、國字漏組間零、天數不含頭、可自己核准、IO 無憑證可鎖、未鎖定也勾稽、攤提不補尾差、服務費也攤、統編特例不限第 7 碼、接續也算重疊、不要求單價、非我方平台寫歸屬、合併波段不取最早、budget_net 含費用、主檔不沿用試算表寫法、單號重複不擋、merge 漏 cue_lines、campaign 沒寫進 BQ；「CPM 先除後乘」有 1e-9 容忍後是等價變異，拿掉）。PDF 樣本 `poc/_iocue_pdf.mts <輸出目錄>`（5 列 2 頁、7 列含費用 2 頁、30 列 3 頁、報價單 1 頁）。
+- **本機 e2e（2026-11-20 走過一次全流程）**：Docker `mysql:8.4`（`-p 127.0.0.1:3399:3306`）＋ `DB_HOST=127.0.0.1 DB_PORT=3399 DB_USER=root DB_SSL=off PORT=8091 npx tsx src/server.ts`，瀏覽器走 建立→角色→貼上 8 列→送審→核准（歸檔 PDF 下載雜湊＝`iocue_files.sha256`）→已寄出→上傳簽回→鎖定；`poc/_iocue_e2e_bq.mts` 把 lockedSnapshot 轉 sales 列跑 `checkKeys`（不碰 BQ）。**核准會真的上傳 GCS `iocue/`**，測完要刪。鎖定觸發的同步本機會停在讀試算表（本機 ADC 沒 Sheets scope，正常）。當時抓到並修掉：①DB 預設時間是 UTC、共用池 mysql2 用 local 讀 → `store.ts queryOf` 讀寫一律 UTC（不改共用池）；②PDF 核發日期直接切 UTC 字串，台北 00–08 點會印前一天 → `model.ts twDate`；③貼上時服務費／製作費平台空白整列被丟 → 記 `OTHER`，且貼上改全有或全無；④費用列不印平台徽章、不算進「N 個平台」。

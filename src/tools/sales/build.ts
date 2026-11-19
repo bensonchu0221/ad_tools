@@ -17,7 +17,7 @@ export interface SeedIo {
   start: string | null; end: string | null; status: string;
   budgetNet: number | null; serviceFeePct: number | null; serviceFee: number | null; setupFee: number | null; otherFee: number | null;
   kpi: string; note: string;
-  source: 'finance' | 'deliver'; sourceRef: string;
+  source: 'finance' | 'deliver' | 'iosys'; sourceRef: string; // iosys＝tool#11 IO／Cue 單（sourceRef＝專案單號）
   labels: string[]; // 這張 IO 用到的帳戶名（財務表帳戶名＋月表帳戶名欄），拿來比對平台帳戶
 }
 export interface SeedPeriod {
@@ -28,10 +28,20 @@ export interface SeedPeriod {
   note: string; sourceRow: number;
 }
 export interface SeedAllocation { ioKey: string; platform: SalesPlatform; month: string; plannedBudget: number; source: string; note: string }
-export interface SeedAssignment { ioKey: string; platform: string; accountId: string; source: string }
+export interface SeedAssignment {
+  ioKey: string; platform: string; accountId: string; source: string;
+  campaignId?: string; validFrom?: string | null; validTo?: string | null; // iosys：綁到 campaign、限定在該列走期
+}
+/** tool#11 鎖定的 Cue 明細（只有 iosys IO 有）。 */
+export interface SeedCueLine {
+  ioKey: string; lineNo: number; cueVer: number; lineType: string; platform: string; adFormat: string; accountId: string;
+  campaignIds: string; label: string; start: string; end: string; budget: number; billingModel: string;
+  targetPrice: number | null; estVolume: number | null; kpiNote: string;
+}
 export interface Seed {
   agencies: SeedAgency[]; clients: SeedClient[]; aliases: SeedAlias[]; billingParties: SeedBillingParty[];
   ios: SeedIo[]; periods: SeedPeriod[]; allocations: SeedAllocation[]; assignments: SeedAssignment[];
+  cueLines: SeedCueLine[];
   unmatchedLabels: string[]; // 對不到任何帳戶、已略過的帳戶名
   pending: string[]; // 推測、待人確認的事
 }
@@ -446,7 +456,7 @@ export function buildSeed(input: SeedInput): Seed {
   return {
     agencies: [...agencies.values()], clients: [...clients.values()], aliases: [...aliases.values()],
     billingParties: [...billing.values()], ios: [...ios.values()], periods,
-    allocations: [...allocMap.values()], assignments,
+    allocations: [...allocMap.values()], assignments, cueLines: [],
     unmatchedLabels: [...unmatched].sort(), pending: PENDING_NOTES,
   };
 }

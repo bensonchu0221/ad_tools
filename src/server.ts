@@ -21,6 +21,7 @@ import { registerD1VideoAd, BASE_PATH as D1VIDEOAD } from './tools/d1videoad/rou
 import { registerNexus, BASE_PATH as NEXUS } from './tools/nexus/route.js'; // tool#9 nexus 資料倉庫
 import { registerPacing, BASE_PATH as PACING } from './tools/pacing/route.js'; // tool#10 走速
 import { registerSales } from './tools/sales/route.js'; // 業績層級資料每日同步（只有 /cron，沒有頁面）
+import { registerIocue, BASE_PATH as IOCUE } from './tools/iocue/route.js'; // tool#11 IO／Cue 單
 import { probePopin } from './tools/adpreview/shoot.js';
 import { findMedia } from './tools/adpreview/media.js';
 import { dbDiagnostics, getQuickLinks, saveQuickLinks, getNavOrder, saveNavOrder } from './core/store.js';
@@ -44,7 +45,8 @@ const ICON = {
   bag: '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/>',
   play: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>',
-  flag: '<path d="M4 22V3"/><path d="M4 4h14l-3 4.5 3 4.5H4"/>'
+  flag: '<path d="M4 22V3"/><path d="M4 4h14l-3 4.5 3 4.5H4"/>',
+  contract: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>'
 };
 const TOOLS: Tool[] = [
   { name: '廣告預覽截圖', desc: '在真實媒體 popin 版位換素材並截圖', href: ADPREVIEW, icon: ICON.camera, code: 'AD PREVIEW', tag: 'SCREENSHOT' },
@@ -55,7 +57,8 @@ const TOOLS: Tool[] = [
   { name: '酷澎聯盟投放', desc: 'Coupang 聯盟商品自動上架 R 平台投放，收益與花費即時對照', href: COUPANGADS, icon: ICON.bag, code: 'COUPANG ADS', tag: 'AUTO · 30 MIN' },
   { name: 'D1 影音報表', desc: 'D1 影音廣告的曝光／點擊／25-50-75% 播放進度，可匯出 Excel', href: D1VIDEOAD, icon: ICON.play, code: 'D1 VIDEO AD', tag: 'ACTION4 · LIVE' },
   { name: 'nexus 資料倉庫', desc: '四平台全帳戶素材×日每日寫進 BigQuery，給 Looker 與各報表共用；含每日健檢', href: NEXUS, icon: ICON.database, code: 'NEXUS', tag: 'BIGQUERY · DAILY' },
-  { name: '走速', desc: 'BH 設定的每個預算一列，看各平台加總能不能在走期內花完', href: PACING, icon: ICON.flag, code: 'PACING', tag: 'BH × NEXUS · T-1' }
+  { name: '走速', desc: 'BH 設定的每個預算一列，看各平台加總能不能在走期內花完', href: PACING, icon: ICON.flag, code: 'PACING', tag: 'BH × NEXUS · T-1' },
+  { name: 'IO / Cue 單', desc: 'AE／AM 建委刊單與 Cue 表、主管核准、客戶簽回鎖定，產出 A4 PDF；鎖定後接走速與 PAC', href: IOCUE, icon: ICON.contract, code: 'IO / CUE', tag: 'APPROVAL · PDF' }
   // 站外工具與快捷連結統一在 slotboard.ts 的 QUICK_LINKS 維護
 ];
 
@@ -152,6 +155,7 @@ registerD1VideoAd(app);
 registerNexus(app);
 registerPacing(app);
 registerSales(app);
+registerIocue(app);
 
 const port = Number(process.env.PORT ?? 8080);
 app.listen({ port, host: '0.0.0.0' }).then(() => app.log.info(`listening on ${port}`));
