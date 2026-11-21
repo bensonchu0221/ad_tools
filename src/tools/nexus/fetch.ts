@@ -520,7 +520,9 @@ export function toMRows(account: { id: string; name: string }, currency: string,
  * 花費保留 statistics-reports＝後台；見 core/mgid.ts mergeTeaserStat）。
  * 裝置表不在這裡抓：MGID API 的裝置報表會整支排除零點擊 campaign，改由全平台 Redash job 產生（fetchMRedashDevice）。 */
 export async function fetchMAccount(
-  client: MgidClient, sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void, now = new Date()
+  client: MgidClient, sd: string, ed: string, syncedAt: string, onPhase: (p: string) => void, now = new Date(),
+  /** false＝不抓媒體層（88 天前：statistics-reports 的曝光按美西日切，回 media undefined ⇒ 媒體表原封不動） */
+  withMedia = true,
 ): Promise<FetchResult> {
   onPhase(`M ${client.clientName}：teaser 報表`);
   const rows = await fetchMgidReportCorrected(client, sd, ed,
@@ -530,8 +532,8 @@ export async function fetchMAccount(
   // 媒體層：同一支 statistics-reports 換 day×source 維度（tool#5 同一個函式）。素材層原始列是空的，source 也一定空，省一次。
   // ⚠️ statistics-reports 整支排除生涯零點擊 campaign、也沒走 teaser-stat 校正 ⇒ 總量會比素材層略少（10/6 實測 imp −0.11%）
   // 裝置三段轉換不在這裡抓：2026-10-21 起 Redash 有 goal1／goal2，由 M 裝置 job 寫進裝置表 events（以前多打一次 day×deviceType）
-  let media: Row[] = [];
-  if (rows.length) {
+  let media: Row[] | undefined = withMedia ? [] : undefined;
+  if (media && rows.length) {
     onPhase(`M ${client.clientName}：媒體報表`);
     media = toMMediaRows(acc, await fetchMgidSourceReport(client, sd, ed), syncedAt);
   }

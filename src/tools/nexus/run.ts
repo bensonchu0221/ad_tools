@@ -23,6 +23,7 @@ import {
   R_DIM_TABLE, R_DIM_SCHEMA, P_DIM_TABLE, P_DIM_SCHEMA, TABLE_SPECS, INTEGRATED_VIEW, NEXUS_PREFIX, integratedViewSql,
 } from './schema.js';
 import { fetchMDim, fetchMSlice } from './mdim.js';
+import { redashDimCutoff, REDASH_DIM_MAX_AGE_DAYS } from '../../core/mgidRedash.js';
 import { fetchRDim, fetchPDim } from './rpdim.js';
 
 /** 回補起點＝P 平台最早有資料的日子（使用者拍板 2026-05-21）。 */
@@ -67,8 +68,22 @@ export const M_EXTRA_CHUNK_DAYS = 1;
 /** M 維度／切片回補：一次最多幾天、台北幾點之間才收（避開 04:00 每日批次；使用者 2026-11-09 定每批 7 天、一天 1~2 批）。 */
 export const MDIM_BACKFILL_MAX_DAYS = 7;
 export const MDIM_BACKFILL_HOURS = { from: '07:00', to: '23:00' };
+/**
+ * M 裝置／維度／切片 job 太舊：回傳原因，null＝可以跑。純函式。
+ * MGID 約 90 天前的曝光按美西日存，Redash 13252（裝置、維度）與 statistics-reports 分維度報表（切片）
+ * 用台北時區查會把曝光放錯日子、點擊不動（2026-11-12／11-17 實測，MGID 2026-11-13 確認不修）。
+ * 只有素材級（Redash 14411）不受影響。
+ */
+export function mStaleBlock(sd: string, now = new Date()): string | null {
+  const cutoff = redashDimCutoff(now);
+  return sd < cutoff
+    ? `M 裝置／維度／切片／媒體只能抓 ${cutoff} 起（${REDASH_DIM_MAX_AGE_DAYS} 天內）：更舊的日子 MGID 曝光按美西日切，抓了會蓋掉正確數字`
+    : null;
+}
 /** 回補 mdim=only 能不能收：回傳 null＝可以，否則是原因。純函式。 */
-export function mdimBackfillBlock(o: { sd: string; ed: string; hhmm: string }): string | null {
+export function mdimBackfillBlock(o: { sd: string; ed: string; hhmm: string; now?: Date }): string | null {
+  const stale = mStaleBlock(o.sd, o.now);
+  if (stale) return stale;
   if (o.hhmm < MDIM_BACKFILL_HOURS.from || o.hhmm >= MDIM_BACKFILL_HOURS.to) return `M 維度／切片回補只在台北 ${MDIM_BACKFILL_HOURS.from}~${MDIM_BACKFILL_HOURS.to} 入列（避開每日批次）`;
   const days = (Date.parse(`${o.ed}T00:00:00Z`) - Date.parse(`${o.sd}T00:00:00Z`)) / 86400_000 + 1;
   if (days > MDIM_BACKFILL_MAX_DAYS) return `M 維度／切片回補一次最多 ${MDIM_BACKFILL_MAX_DAYS} 天（這次 ${days} 天）`;
@@ -426,6 +441,8 @@ export async function writeMExtra(o: { which: keyof typeof EXTRA_TABLES; sd: str
 async function runMExtraJob(job: NexusJobRow | NexusJobInput, onPhase: (p: string) => void): Promise<JobResult> {
   const which = job.accountId === M_DIM_JOB ? 'dim' : 'slice';
   const label = `M ${job.accountName} ${job.sd}~${job.ed}`;
+  const stale = mStaleBlock(job.sd);
+  if (stale) throw new NexusNoRetryError(`${label}：${stale}`);
   const batch = (job as Partial<NexusJobRow>).batch;
   const pending = batch ? await nexusPendingJobs(batch, 'M', job.accountId) : 0;
   if (pending) throw new NexusDeferError(`M 各帳戶還有 ${pending} 個 job 沒跑完，稍後再產生${which === 'dim' ? '維度表' : '切片表'}`);
@@ -511,6 +528,8 @@ async function fetchForJob(job: NexusJobInput, syncedAt: string, onPhase: (p: st
     }
     case 'M': {
       if (isMDeviceJob(job)) {
+        const stale = mStaleBlock(job.sd);
+        if (stale) throw new NexusNoRetryError(`M 裝置 ${job.sd}~${job.ed}：${stale}`);
         // 要等同一批次的 M 各帳戶 job 都跑完：花費分配要用它們剛寫好的計費金額
         const batch = (job as Partial<NexusJobRow>).batch;
         const pending = batch ? await nexusPendingJobs(batch, 'M', M_DEVICE_JOB) : 0;
@@ -519,7 +538,8 @@ async function fetchForJob(job: NexusJobInput, syncedAt: string, onPhase: (p: st
       }
       const token = await getMgidTokenById(job.accountId);
       if (!token) throw new Error(`MGID 帳號 ${job.accountId}（${job.accountName}）在 nexus.mgid_tokens 找不到 token`);
-      return fetchMAccount({ apiClientId: job.accountId, token, clientName: job.accountName }, job.sd, job.ed, syncedAt, onPhase);
+      return fetchMAccount({ apiClientId: job.accountId, token, clientName: job.accountName }, job.sd, job.ed, syncedAt, onPhase,
+        new Date(), !mStaleBlock(job.sd));
     }
     case 'R': return fetchRAll(job.sd, job.ed, syncedAt, onPhase);
     case 'P': return fetchPAll(job.sd, job.ed, syncedAt, onPhase);
@@ -579,6 +599,13 @@ export async function runNexusJob(
       throw new NexusQuotaError(`${label}：R 平台 API 今天的請求額度用完（1003），${R_QUOTA_RETRY_MIN / 60} 小時後再試，不算失敗`);
     }
     throw e;
+  }
+
+  // M 媒體表（statistics-reports day×source）跟裝置／維度表一樣：88 天前的曝光按美西日切，不能拿來蓋倉庫。
+  // 素材表照寫（曝光來自 teaser-stat，舊日子也對）；媒體列丟掉 ⇒ writeSlice 收到 media undefined、媒體表原封不動。
+  if (job.platform === 'M' && !deviceOnly && res.media) {
+    const stale = mStaleBlock(job.sd, deps.today ? new Date(`${deps.today}T12:00:00+08:00`) : undefined);
+    if (stale) res = { ...res, media: undefined, warnings: [...res.warnings, `媒體表不寫（${stale}）`] };
   }
 
   if (!res.facts.length && !res.device.length) {

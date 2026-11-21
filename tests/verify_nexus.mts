@@ -27,11 +27,11 @@ import { statusPage } from '../src/tools/nexus/page.js';
 import {
   fixText, osFamily, browserFamily, toMDimRows, addMDimOthers, toMSliceRows, addMSliceOthers, M_OTHERS, type FactCell, type SliceAccount,
 } from '../src/tools/nexus/mdim.js';
-import { M_DIM_JOB, M_SLICE_JOB, M_EXTRA_CHUNK_DAYS, isMExtraJob, mdimBackfillBlock } from '../src/tools/nexus/run.js';
+import { M_DIM_JOB, M_SLICE_JOB, M_EXTRA_CHUNK_DAYS, isMExtraJob, mdimBackfillBlock, mStaleBlock } from '../src/tools/nexus/run.js';
 import { M_DIM_SCHEMA, M_SLICE_SCHEMA } from '../src/tools/nexus/schema.js';
 import { summarizeDimRecon, summarizeSliceOthers, SLICE_OTHERS_WARN } from '../src/tools/nexus/recon.js';
 import { markSupersededNexusJobs, type NexusReconRow, type NexusJobRow } from '../src/core/store.js';
-import { toRedashRows, type RedashRow } from '../src/core/mgidRedash.js';
+import { toRedashRows, redashParams, redashDimCutoff, assertRedashDimRange, REDASH_DIM_MAX_AGE_DAYS, type RedashRow } from '../src/core/mgidRedash.js';
 import { fetchReport, fetchReportPaged, isRDailyLimit } from '../src/core/rixbee.js';
 import { toRDimRows, packRAccounts, fetchRDimBatch, toPDimRows, addDimOthers, DIM_OTHERS } from '../src/tools/nexus/rpdim.js';
 import { RP_DIM_JOB, RP_DIM_CHUNK_DAYS, isRPDimJob, isDimJob } from '../src/tools/nexus/run.js';
@@ -404,12 +404,12 @@ await ok('覆蓋紀錄：每帳戶每天一筆、曝光、花費與點擊依平�
   assert.equal(coverageEntries('P', [{ account_id: '1', date: '2026-09-22', clicks: 9 }])[0].click, 9);
 });
 
-function fakeDeps(o: { facts?: any[]; device?: any[]; prev?: number }) {
+function fakeDeps(o: { facts?: any[]; device?: any[]; media?: any[]; prev?: number }) {
   const calls: string[] = [];
   const deps: JobDeps = {
-    fetch: async () => ({ facts: o.facts ?? [], device: o.device ?? [], warnings: [] }),
+    fetch: async () => ({ facts: o.facts ?? [], device: o.device ?? [], ...(o.media ? { media: o.media } : {}), warnings: [] }),
     coveredRows: async () => o.prev ?? 0,
-    writeSlice: async (s) => { calls.push(`write:${s.platform}:${s.accountId}:${s.facts.length}`); },
+    writeSlice: async (s) => { calls.push(`write:${s.platform}:${s.accountId}:${s.facts.length}${s.media?.length ? `:media${s.media.length}` : ''}`); },
     replaceCoverage: async (p, a, _sd, _ed, entries) => { calls.push(`cov:${p}:${a}:${entries.length}`); },
   };
   return { deps, calls };
@@ -436,6 +436,20 @@ await ok('job：有資料 → 先寫 BQ 再寫覆蓋紀錄；R/P 的 * 轉成整
   const r = fakeDeps({ facts: [{ account_id: '9', account_name: 'r', date: '2026-09-22', impression: 1, payment_revenue: 1 }] });
   await runNexusJob({ ...job, platform: 'R', accountId: '*' }, () => {}, r.deps);
   assert.deepEqual(r.calls, ['write:R:null:1', 'cov:R:null:1']);
+});
+
+await ok('job：M 帳戶 88 天前 → 素材表照寫、媒體表不寫（media undefined）；88 天內照寫媒體表', async () => {
+  const mjob = { platform: 'M' as const, accountId: '980132', accountName: '帳M', sd: '2026-08-23', ed: '2026-08-23' };
+  const facts = [{ account_id: '980132', date: '2026-08-23', imp: 5, click: 1, spent: 1 }];
+  const media = [{ platform: 'M', account_id: '980132', date: '2026-08-23', media: 'msn.com', imp: 5, click: 1, spend: 1 }];
+  const old = fakeDeps({ facts, media }); old.deps.today = '2026-11-20';
+  const r = await runNexusJob(mjob, () => {}, old.deps);
+  assert.deepEqual(old.calls, ['write:M:980132:1', 'cov:M:980132:1']);
+  assert.match(r.message, /媒體表不寫.*2026-08-24 起/);
+  const fresh = fakeDeps({ facts: [{ ...facts[0], date: '2026-08-24' }], media: [{ ...media[0], date: '2026-08-24' }] });
+  fresh.deps.today = '2026-11-20';
+  await runNexusJob({ ...mjob, sd: '2026-08-24', ed: '2026-08-24' }, () => {}, fresh.deps);
+  assert.deepEqual(fresh.calls, ['write:M:980132:1:media1', 'cov:M:980132:1']);
 });
 
 await ok('job：帳戶 ID 不合法（token 表的 nan／空字串）→ 不打 API、不寫 BQ，直接失敗不重試（健檢紅燈）', async () => {
@@ -1788,9 +1802,33 @@ await ok('M 維度／切片 job：全平台帳戶值、回補一天一段、回�
   assert.equal(M_EXTRA_CHUNK_DAYS, 1);
   assert.equal(jobs.length, 7);
   assert.ok(jobs.every((j) => j.sd === j.ed));
-  assert.equal(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-11', hhmm: '10:00' }), null);
-  assert.match(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-12', hhmm: '10:00' })!, /最多 7 天/);
-  assert.match(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-05', hhmm: '04:30' })!, /07:00~23:00/);
+  const june = new Date('2026-06-20T10:00:00+08:00');
+  assert.equal(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-11', hhmm: '10:00', now: june }), null);
+  assert.match(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-12', hhmm: '10:00', now: june })!, /最多 7 天/);
+  assert.match(mdimBackfillBlock({ sd: '2026-06-05', ed: '2026-06-05', hhmm: '04:30', now: june })!, /07:00~23:00/);
+});
+
+await ok('M 裝置／維度／切片只抓 88 天內（MGID 90 天前曝光按美西日）：cutoff 依台北日、回補入列與 job 都擋', () => {
+  assert.equal(REDASH_DIM_MAX_AGE_DAYS, 88);
+  const now = new Date('2026-11-20T10:00:00+08:00');
+  assert.equal(redashDimCutoff(now), '2026-08-24');
+  assert.equal(redashDimCutoff(new Date('2026-11-19T17:00:00Z')), '2026-08-24'); // UTC 還是 11-19、台北已 11-20
+  assert.equal(mStaleBlock('2026-08-24', now), null);
+  assert.match(mStaleBlock('2026-08-23', now)!, /2026-08-24 起/);
+  assert.match(mdimBackfillBlock({ sd: '2026-08-14', ed: '2026-08-14', hhmm: '10:00', now })!, /美西日/);
+  assert.doesNotThrow(() => assertRedashDimRange('2026-08-24', 'M 維度', now));
+  assert.throws(() => assertRedashDimRange('2026-08-23', 'M 維度', now), /13252 只能查 2026-08-24 起/);
+});
+
+await ok('Redash 參數：素材級查 14411（4 個 dimension、teas_category 陣列、沒有 13252 的地區／子網參數），維度查 13252', () => {
+  const g = redashParams('general', '2026-08-14', '2026-08-14', 'Asia/Taipei', { Teaser_Breakdown: 'teaser', dims: [] });
+  assert.deepEqual(Object.keys(g).filter((k) => k.startsWith('dimension')), ['dimension1', 'dimension2', 'dimension3', 'dimension4']);
+  assert.deepEqual(g.teas_category, ['ALL']);
+  for (const k of ['country_name', 'pub_subnet', 'tier', 'site_language']) assert.ok(!(k in g), k);
+  const d = redashParams('dim', '2026-11-18', '2026-11-18', 'Asia/Taipei', { Teaser_Breakdown: 'teaser', dims: ['device', 'sources_name', 'os_name', 'browser_name', 'uid'] });
+  assert.deepEqual([d.dimension1, d.dimension5, d.teas_category, d.pub_subnet], ['device', 'uid', 'ALL', ['-1']]);
+  assert.throws(() => redashParams('general', '2026-11-18', '2026-11-18', 'Asia/Taipei', { Teaser_Breakdown: 'teaser', dims: ['a', 'b', 'c', 'd', 'e'] }), /14411 最多 4 個維度/);
+  assert.throws(() => toRedashRows([{ 'Date Breakdown': '2026-11-18' }], 14411), /查詢 14411 被改了/);
 });
 
 await ok('比對：M 維度層（台北帳戶）與切片 Others 佔比；非台北帳戶、沒有維度資料的日子不比', () => {
